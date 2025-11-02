@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+
+<html data-theme="light" lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1" name="viewport"/>
+<title>AI Terms &amp; Policies Reviewer — User Demo</title>
+<style>
+    :root {
+      --bg: #0b0c0f; --panel: #13151a; --soft: #1c1f26; --text: #e8eaed; --muted:#b6bcc6;
+      --accent: #5b8df7; --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444; --border:#2a2f3a;
+      --pill:#0f172a;
+    }
+    [data-theme="light"] :root {
+      --bg: #f7f7f8; --panel:#ffffff; --soft:#f2f3f5; --text:#111827; --muted:#4b5563; --border:#e5e7eb;
+      --accent:#335eea; --ok:#16a34a; --warn:#d97706; --bad:#dc2626; --pill:#eef2ff;
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; background: var(--bg); color: var(--text);}
+    header { position: sticky; top:0; z-index:10; backdrop-filter: blur(8px); background: color-mix(in oklab, var(--bg), transparent 35%); border-bottom: 1px solid var(--border);}
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 16px 20px; }
+    .title-row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    h1 { font-size: 20px; margin: 6px 0; }
+    .btn { display:inline-flex; align-items:center; gap:8px; padding:10px 14px; border:1px solid var(--border); border-radius:12px; background: var(--panel); color: var(--text); cursor:pointer; text-decoration:none; }
+    .btn:hover { border-color: color-mix(in oklab, var(--accent), black 10%); }
+    .primary { background: var(--accent); color: white; border-color: color-mix(in oklab, var(--accent), black 10%); }
+    .grid { display:grid; gap:16px; grid-template-columns: 1fr 1fr; }
+    @media (max-width: 1080px) { .grid { grid-template-columns: 1fr; } }
+    .card { background: var(--panel); border:1px solid var(--border); border-radius:16px; padding:16px; }
+    .card h2 { font-size:16px; margin:0 0 8px; display:flex; align-items:center; gap:8px; }
+    label { font-size:12px; color: var(--muted); display:block; margin: 0 0 6px; }
+    input[type="text"], textarea, select { width: 100%; padding:12px; border-radius:12px; border:1px solid var(--border); background: var(--soft); color: var(--text); }
+    textarea { min-height: 140px; resize: vertical; }
+    .seg { display:inline-flex; gap:8px; background: var(--soft); padding:4px; border-radius:12px; border:1px solid var(--border); }
+    .seg button { padding:8px 12px; border-radius:10px; border:1px solid transparent; background: transparent; color: var(--text); cursor:pointer; }
+    .seg button[aria-pressed="true"] { background: var(--panel); border-color: var(--border); }
+    .toolbar { display:flex; gap:8px; flex-wrap:wrap; }
+    .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; display:inline-flex; align-items:center; gap:6px; background: var(--pill); border:1px solid var(--border); }
+    .pill.bad { border-color: var(--bad); color: var(--bad); }
+    .pill.warn { border-color: var(--warn); color: var(--warn); }
+    .pill.ok { border-color: var(--ok); color: var(--ok); }
+    .row { display:flex; gap: 12px; align-items:center; flex-wrap: wrap; }
+    .kpis { display:grid; grid-template-columns: repeat(4, 1fr); gap:12px; margin-top: 8px; }
+    @media (max-width: 960px) { .kpis { grid-template-columns: repeat(2, 1fr); } }
+    .kpi { background: var(--soft); border:1px solid var(--border); border-radius:14px; padding:12px; }
+    .kpi .val { font-size: 22px; font-weight: 700; }
+    details > summary { cursor:pointer; list-style: none; }
+    details > summary::-webkit-details-marker { display:none; }
+    .issue { border:1px solid var(--border); border-radius:14px; padding:12px; background: var(--soft); margin-bottom:10px; }
+    .issue h3 { margin: 0 0 6px; font-size: 14px; }
+    .muted { color: var(--muted); font-size: 12px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+    .badge { padding:2px 6px; border-radius:6px; border:1px solid var(--border); background: var(--panel); font-size: 11px; }
+    .footnotes { font-size: 12px; color: var(--muted); }
+    .sr-only { position:absolute; left:-10000px; top:auto; width:1px; height:1px; overflow:hidden; }
+    /* Info icon */
+    .info { width:18px; height:18px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; background:var(--soft); border:1px solid var(--border); color:var(--muted); font-size:12px; cursor:pointer; }
+    .tooltip { position: fixed; pointer-events: none; background: var(--panel); border:1px solid var(--border); padding:10px 12px; border-radius:10px; font-size:12px; display:none; max-width: 320px; box-shadow: 0 2px 12px rgba(0,0,0,0.15); }
+  </style>
+<style>
+:root { --tight-px: 10px; --tight-pad: 12px; --tight-gap: 12px; --tight-radius: 12px; }
+* { box-sizing: border-box; }
+.container, main, .content, .wrap, .wrapper { max-width: 1200px; margin: 0 auto; }
+.card, .panel, .section { border-radius: var(--tight-radius); }
+.card .body, .panel .body, .section .body, .card-body, .panel-body, .content > section { padding: var(--tight-pad) !important; }
+.grid, .row { gap: var(--tight-gap); }
+h1, h2, h3, h4 { margin-top: 12px; margin-bottom: 8px; }
+p { margin: 8px 0; }
+input[type="file"], select, textarea, input[type="text"], button { padding: 8px 10px; border-radius: 10px; }
+.small { font-size: 12px; color: #778; }
+.kpi { background: rgba(255,255,255,0.02); border: 1px solid rgba(140,160,180,0.25); border-radius: 12px; padding: 10px; }
+.kpi h4 { margin: 0 0 6px 0; font-size: 12px; color: #9bb; }
+.kpi .num { font-size: 20px; font-weight: 600; }
+.pill { padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid rgba(140,160,180,0.35); }
+.pill.green { background: rgba(62,207,142,0.12); color: #34d399; }
+.pill.yellow{ background: rgba(255,204,102,0.12); color: #fbbf24; }
+.pill.red   { background: rgba(255,107,107,0.12); color: #f87171; }
+.meter { height: 8px; border: 1px solid rgba(140,160,180,0.25); border-radius: 999px; overflow: hidden; background: rgba(255,255,255,0.03); }
+.meter > div { height: 100%; width: 0%; background: linear-gradient(90deg, #34d399, #fbbf24, #f87171); transition: width .4s ease; }
+.toolbar-tight { position: sticky; top: 64px; display: flex; align-items: center; gap: 8px; padding: 8px; border: 1px dashed rgba(140,160,180,0.25); border-radius: 10px; background: rgba(10,12,14,0.6); backdrop-filter: blur(6px); }
+.hr { border-top: 1px solid rgba(140,160,180,0.25); margin: 8px 0; }
+</style></head>
+<body>
+<a class="sr-only" href="#main">Skip to content</a>
+<header>
+<div class="wrap title-row">
+<h1>AI Terms &amp; Policies Reviewer — User Interaction Demo</h1><div id="reviewer-rail">
+<div class="toolbar-tight" id="reviewer-toolbar">
+<strong>Reviewer</strong>
+<span class="small">Paste text or upload → set context → Analyze → See findings.</span>
+</div>
+<div class="card" id="reviewer-card">
+<div class="body">
+<div class="row" style="align-items:flex-end; flex-wrap:wrap; gap:10px;">
+<div style="flex:2 1 420px; min-width:320px;">
+<label class="small">Policy text</label>
+<textarea id="policyText" placeholder="Paste Terms/Privacy text here…" style="width:100%; min-height:160px;"></textarea>
+<div class="row" style="justify-content:space-between; margin-top:6px;">
+<div class="row">
+<input accept=".txt,.md,.pdf" id="fileInput" type="file"/>
+<button class="" id="btnLoadSample">Sample</button>
+</div>
+<button class="" id="btnAnalyze">Analyze</button>
+</div>
+</div>
+<div style="flex:1 1 260px; min-width:240px;">
+<label class="small">Context</label>
+<div class="row">
+<select id="jurisdiction">
+<option value="US-CA">US—CA</option><option value="US-CO">US—CO</option><option value="US-CT">US—CT</option><option value="US-NY">US—NY</option><option value="US-FED">US—FED</option><option value="EU">EU—GDPR</option><option value="UK">UK—Code</option>
+</select>
+<select id="industry">
+<option>Retail</option><option>Finance</option><option>Health</option><option>Gaming</option><option>Social</option><option>Education</option>
+</select>
+<select id="size"><option>1–49</option><option>50–249</option><option>250–999</option><option>1000+</option></select>
+</div>
+<div class="row"><label><input id="minors" type="checkbox"/> Minors context</label><label><input id="contrib" type="checkbox"/> Add to dashboard</label></div>
+<div class="grid grid-3" style="margin-top:8px;">
+<div class="kpi"><h4>Action Readiness</h4><div class="num" id="kpiAction">—</div><div class="small" id="kpiActionNote">—</div></div>
+<div class="kpi"><h4>Completeness</h4><div class="meter"><div id="meterFill"></div></div><div class="small"><span id="meterPct">0%</span> sections</div></div>
+<div class="kpi"><h4>Top Risks</h4><div class="small" id="kpiTopRisks">—</div></div>
+</div>
+</div>
+</div>
+<div class="hr"></div>
+<div class="row" style="justify-content:space-between;">
+<div class="row"><label class="small">Filter:</label>
+<select id="filterCat"><option>All</option><option>SaleShare</option><option>ADM</option><option>Dark</option><option>Retention</option><option>Rights</option><option>Minors</option><option>Sensitive</option><option>Unilateral</option><option>Liability</option></select>
+<select id="filterSev"><option>All</option><option>GREEN</option><option>YELLOW</option><option>RED</option></select>
+</div>
+<div class="row"><button id="btnVerify">Verify</button><button id="btnExport">Export JSON</button></div>
+</div>
+<div class="grid grid-2" style="margin-top:8px;">
+<div><div class="list" id="findings"></div></div>
+<div><h4>Observations <span class="pill">Not Rated</span></h4><div class="list" id="observations"></div></div>
+</div>
+</div>
+</div>
+</div>
+<div class="toolbar">
+<button aria-pressed="false" class="btn" id="themeToggle" title="Toggle light/dark">Toggle Theme</button>
+<button class="btn" id="loadSample" title="Load a sample policy">Load Sample</button>
+<button class="btn" id="clearAll" title="Clear inputs">Clear</button>
+</div>
+</div>
+</header>
+<main class="wrap" id="main" style="margin-top:10px;">
+<div class="grid">
+<section aria-label="Input" class="card">
+<h2>1) Provide the policy <button aria-label="Explain this section" class="info" data-help="help1">i</button></h2>
+<div aria-label="Input method" class="row" role="group">
+<div aria-label="Input method tabs" class="seg" role="tablist">
+<button aria-pressed="true" aria-selected="true" class="segBtn" id="tabUrl" role="tab">URL</button>
+<button aria-pressed="false" aria-selected="false" class="segBtn" id="tabPaste" role="tab">Paste text</button>
+</div>
+<div style="margin-left:auto;"></div>
+<div class="row">
+<label class="sr-only" for="jurisdiction">Jurisdiction</label>
+<select aria-label="Jurisdiction" id="jurisdiction">
+<option selected="" value="EU">EU (GDPR/AI Act)</option>
+<option value="US-CA">US–California (CCPA/CPRA)</option>
+<option value="UK">UK (UK GDPR)</option>
+</select>
+</div>
+</div>
+<div id="urlBox" style="margin-top:10px;">
+<label for="url">Policy URL</label>
+<input id="url" placeholder="https://example.com/privacy" type="text"/>
+</div>
+<div id="pasteBox" style="display:none; margin-top:10px;">
+<label for="policyText">Paste policy text</label>
+<textarea id="policyText" placeholder="Paste Terms or Privacy text here…"></textarea>
+</div>
+<div class="row" style="margin-top:10px;">
+<button aria-label="Analyze policy" class="btn primary" id="analyze">Analyze</button>
+<span class="muted">Analysis runs locally with mock logic for demo; production uses LLM+rules.</span>
+</div>
+</section>
+<section aria-label="Overview" class="card">
+<h2>2) Overview <button aria-label="Explain this section" class="info" data-help="help2">i</button></h2>
+<div class="kpis" role="list">
+<div class="kpi" role="listitem"><div class="label">Overall Risk</div><div class="val" id="kpiRisk">—</div></div>
+<div class="kpi" role="listitem"><div class="label">Rights Impacted</div><div class="val" id="kpiRights">—</div></div>
+<div class="kpi" role="listitem"><div class="label">Issues Found</div><div class="val" id="kpiIssues">—</div></div>
+<div class="kpi" role="listitem"><div class="label">Confidence</div><div class="val" id="kpiConf">—</div></div>
+</div>
+<div class="row" style="margin-top:10px;">
+<button class="btn" id="exportJson">Export JSON</button>
+<button class="btn" id="printPdf">Print / Save PDF</button>
+</div>
+</section>
+</div>
+<section aria-label="Findings" class="card" style="margin-top:16px;">
+<h2>3) Findings <button aria-label="Explain this section" class="info" data-help="help3">i</button></h2>
+<div class="row" style="margin-bottom:8px;">
+<span class="pill bad">High</span>
+<span class="pill warn">Medium</span>
+<span class="pill ok">Low</span>
+<div style="margin-left:auto;"></div>
+<label for="filterCat">Category</label>
+<select id="filterCat">
+<option selected="" value="All">All</option>
+<option>ADM</option><option>Data Sale/Share</option><option>Dark Patterns</option>
+<option>Missing Rights</option><option>Retention</option>
+</select>
+<label for="filterSev">Severity</label>
+<select id="filterSev">
+<option selected="" value="All">All</option>
+<option>High</option><option>Medium</option><option>Low</option>
+</select>
+</div>
+<div id="issues"></div>
+</section>
+<section aria-label="Actions" class="card" style="margin-top:16px;">
+<h2>4) Exercise your rights <button aria-label="Explain this section" class="info" data-help="help4">i</button></h2>
+<div class="row">
+<label for="reqType">Request type</label>
+<select id="reqType">
+<option>Access my data</option>
+<option>Delete my data</option>
+<option>Correct my data</option>
+<option>Opt-out of sale/share</option>
+<option>Limit use of sensitive data</option>
+<option>Challenge automated decision (ADM)</option>
+</select>
+<button class="btn" id="copyReq">Copy template</button>
+</div>
+<textarea aria-label="Generated request template" class="mono" id="reqText" style="margin-top:8px;"></textarea>
+<p class="muted">Templates are jurisdiction-aware; you should adapt them to your specific situation.</p>
+</section>
+<section aria-label="Transparency" class="card" style="margin-top:16px;">
+<h2>5) Transparency &amp; Limitations (Model Card) <button aria-label="Explain this section" class="info" data-help="help5">i</button></h2>
+<p class="muted">This demo uses simple heuristics to illustrate the experience. Production uses a combination of rules and LLM with retrieval over authoritative sources. We always show evidence excerpts and legal hooks so you can verify claims.</p>
+<ul class="muted">
+<li>Uncertainty is surfaced as a confidence score.</li>
+<li>We never sell your data. In production, analysis is ephemeral by default.</li>
+<li>High-severity flags require your review before taking action.</li>
+</ul>
+</section>
+<section aria-label="References" class="card footnotes" style="margin-top:16px;">
+<h2>References</h2>
+<ol>
+<li id="fn1">GDPR Article 22 on automated decision-making and profiling (EUR‑Lex official text). </li>
+<li id="fn2">EU Artificial Intelligence Act (Regulation (EU) 2024/1689) — risk-based obligations and transparency. </li>
+<li id="fn3">FTC Staff Report: “Bringing Dark Patterns to Light” — patterns to flag in consumer interfaces. </li>
+</ol>
+</section>
+</main>
+<div aria-hidden="true" class="tooltip" id="tip" role="tooltip"></div>
+<script>
+    // Theme toggle
+    document.getElementById('themeToggle').addEventListener('click', (event) => {
+      const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+      document.documentElement.setAttribute('data-theme', isLight ? 'dark' : 'light');
+      event.currentTarget.setAttribute('aria-pressed', (!isLight).toString());
+    });
+
+    // Info help dictionary
+    const helpText = {
+      help1: "Provide the policy you want analyzed. Either paste the text or link to the public URL. Choose your jurisdiction so the reviewer maps findings to the right legal hooks.",
+      help2: "A quick, human-readable snapshot: overall risk, the number of rights implicated, the count of issues, and a confidence signal. Use this to gauge whether to read further or act now.",
+      help3: "Detailed issues with severity, evidence excerpts, and the specific rights involved. Filter by category or severity. Expand any row for rationale and next steps.",
+      help4: "Instant, jurisdiction-aware request templates to exercise your rights (access, delete, opt-out, limit sensitive data, or challenge ADM). Copy, personalize, and send.",
+      help5: "Transparency about how the reviewer works, what it can and can’t do, and the evidence standards. Think of this as a compact model card."
+    };
+
+    const tip = document.getElementById('tip');
+    function showTip(el, text) {
+      tip.textContent = text;
+      tip.style.display = 'block';
+      tip.setAttribute('aria-hidden', 'false');
+      const rect = el.getBoundingClientRect();
+      tip.style.left = (rect.left + window.scrollX + rect.width + 8) + 'px';
+      tip.style.top = (rect.top + window.scrollY - 4) + 'px';
+    }
+    function hideTip() {
+      tip.style.display = 'none';
+      tip.setAttribute('aria-hidden', 'true');
+    }
+    document.querySelectorAll('.info').forEach(el => {
+      const key = el.getAttribute('data-help');
+      el.addEventListener('mouseenter', () => showTip(el, helpText[key]));
+      el.addEventListener('mouseleave', hideTip);
+      el.addEventListener('focus', () => showTip(el, helpText[key]));
+      el.addEventListener('blur', hideTip);
+      el.addEventListener('click', () => {
+        // toggle persistent position for mobile
+        if (tip.style.display === 'block') hideTip(); else showTip(el, helpText[key]);
+      });
+    });
+
+    // Tabs
+    const tabUrl = document.getElementById('tabUrl');
+    const tabPaste = document.getElementById('tabPaste');
+    const urlBox = document.getElementById('urlBox');
+    const pasteBox = document.getElementById('pasteBox');
+    function selTab(which) {
+      const isUrl = which === 'url';
+      tabUrl.setAttribute('aria-pressed', isUrl ? 'true' : 'false');
+      tabPaste.setAttribute('aria-pressed', !isUrl ? 'true' : 'false');
+      urlBox.style.display = isUrl ? 'block' : 'none';
+      pasteBox.style.display = isUrl ? 'none' : 'block';
+    }
+    tabUrl.addEventListener('click', () => selTab('url'));
+    tabPaste.addEventListener('click', () => selTab('paste'));
+
+    // Sample text
+    const sample = `We may share certain categories of information with affiliates and advertising partners. You consent to such sharing by using the Service. We may use automated decision-making, including profiling, to tailor offers. You can opt out by contacting support but we may deny requests at our discretion. We retain data as long as necessary for business purposes. Children under 13 should not use the Service. We may sell certain identifiers to third parties. By continuing to use the Service, you consent to updates to these Terms without notice.`;
+
+    document.getElementById('loadSample').addEventListener('click', () => {
+      selTab('paste');
+      document.getElementById('policyText').value = sample;
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+
+    document.getElementById('clearAll').addEventListener('click', () => {
+      document.getElementById('url').value = '';
+      document.getElementById('policyText').value = '';
+      document.getElementById('issues').innerHTML = '';
+      document.getElementById('kpiRisk').textContent = '—';
+      document.getElementById('kpiRights').textContent = '—';
+      document.getElementById('kpiIssues').textContent = '—';
+      document.getElementById('kpiConf').textContent = '—';
+      document.getElementById('reqText').value = '';
+      hideTip();
+    });
+
+    // Analysis logic (deterministic heuristic)
+    function analyzeText(raw, jurisdiction) {
+      const text = raw.replace(/\s+/g, ' ').trim();
+      const issues = [];
+      const addIssue = (cat, sev, score, hook, excerpt, rights) => {
+        issues.push({ cat, sev, score, hook, excerpt, rights });
+      };
+      // Heuristics
+      const findExcerpt = (kw) => {
+        const i = text.toLowerCase().indexOf(kw);
+        if (i === -1) return '';
+        const start = Math.max(0, i - 60);
+        const end = Math.min(text.length, i + kw.length + 120);
+        return text.substring(start, end) + (end < text.length ? '…' : '');
+      };
+      // Data Sale/Share
+      if (/sell|sale of personal|share with|advertis/i.test(text)) {
+        addIssue('Data Sale/Share',
+                 'High',
+                 0.82,
+                 jurisdiction === 'US-CA' ? 'CPRA opt‑out right; disclose “sale/share” and provide Do Not Sell/Share.' : 'Disclose third‑party sharing practices; provide opt‑outs.',
+                 findExcerpt('sell') || findExcerpt('share') || findExcerpt('advertis'),
+                 ['Opt-out of sale/share','Access','Delete']);
+      }
+      // ADM / Profiling (GDPR Art.22)
+      if (/automated decision|profiling/i.test(text)) {
+        addIssue('ADM',
+                 'High',
+                 0.80,
+                 'If decisions have legal or similar significant effects, provide safeguards incl. human review (GDPR Art. 22).',
+                 findExcerpt('automated decision') || findExcerpt('profiling'),
+                 ['Challenge ADM','Access','Correct']);
+      }
+      // Dark Patterns (consent not freely given, obstruction)
+      if (/consent by using|pre[- ]?ticked|without notice|deny requests at our discretion/i.test(text)) {
+        addIssue('Dark Patterns',
+                 'Medium',
+                 0.68,
+                 'Avoid undermining choice (obstruction, nagging, interface interference). Ensure consent is freely given and revocable.',
+                 findExcerpt('consent') || findExcerpt('deny requests'),
+                 ['Opt-out of sale/share','Limit sensitive data']);
+      }
+      // Retention
+      if (/retain|retention|as long as necessary/i.test(text)) {
+        addIssue('Retention',
+                 'Medium',
+                 0.55,
+                 'Specify concrete retention periods or criteria; avoid open‑ended “as long as necessary.”',
+                 findExcerpt('retain') || findExcerpt('as long as necessary'),
+                 ['Access','Delete']);
+      }
+      // Missing Rights
+      const mentionsRights = /access|delete|correct|opt[- ]?out|appeal|review/i.test(text);
+      if (!mentionsRights) {
+        addIssue('Missing Rights',
+                 'Low',
+                 0.40,
+                 'Surface user rights (access, deletion, correction, opt‑out) and contact channels.',
+                 '',
+                 ['Access','Delete','Correct','Opt-out of sale/share']);
+      }
+      // Children (COPPA-esque)
+      if (/children|under 13/i.test(text)) {
+        addIssue('Missing Rights',
+                 'Low',
+                 0.42,
+                 'If collecting data from children, additional consent and notices may apply.',
+                 findExcerpt('children') || findExcerpt('under 13'),
+                 ['Access','Delete']);
+      }
+      // Aggregate metrics
+      const score = issues.length ? (issues.reduce((a,b)=>a+b.score,0)/issues.length) : 0;
+      const highRights = new Set(issues.flatMap(i => i.rights));
+      return { issues, score, rightsCount: highRights.size, confidence: 0.75 };
+    }
+
+    function sevPill(sev) {
+      const cls = sev === 'High' ? 'pill bad' : sev === 'Medium' ? 'pill warn' : 'pill ok';
+      return `<span class="${cls}">${sev}</span>`;
+    }
+
+    function renderIssues(list) {
+      const wrap = document.getElementById('issues');
+      wrap.innerHTML = '';
+      if (!list.length) {
+        wrap.innerHTML = '<p class="muted">No issues detected by demo heuristics.</p>';
+        return;
+      }
+      list.forEach((it, idx) => {
+        const legal = it.cat === 'ADM' ? 'GDPR Art. 22 [1]' :
+                      it.cat === 'Data Sale/Share' ? 'CPRA/CCPA rights; Do Not Sell/Share [—]' :
+                      it.cat === 'Dark Patterns' ? 'FTC Dark Patterns guidance [3]' :
+                      it.cat === 'Retention' ? 'GDPR Art. 5(1)(e) data minimization/retention [1]' :
+                      'User rights disclosure (varies by jurisdiction)';
+        const excerpt = it.excerpt ? `<blockquote class="mono" style="margin:6px 0 0 0;">${it.excerpt.replace(/</g,'&lt;')}</blockquote>` : '';
+        const rights = it.rights.map(r => `<span class="badge">${r}</span>`).join(' ');
+        const node = document.createElement('details');
+        node.className = 'issue';
+        node.innerHTML = `
+          <summary class="row">
+            <h3 style="flex:1;">${sevPill(it.sev)} <span class="badge">${it.cat}</span></h3>
+            <span class="muted">Score: ${it.score.toFixed(2)} • ${legal}</span>
+          </summary>
+          <div style="margin-top:8px;">
+            <div class="muted">${it.hook}</div>
+            ${excerpt}
+            <div style="margin-top:8px;">Impacted rights: ${rights}</div>
+            <div style="margin-top:8px;" class="row">
+              <button class="btn" data-action="action" data-cat="${it.cat}">Generate action</button>
+              <button class="btn" data-action="copy" data-idx="${idx}">Copy evidence</button>
+            </div>
+          </div>
+        `;
+        wrap.appendChild(node);
+      });
+
+      // Wire buttons
+      wrap.querySelectorAll('button[data-action="copy"]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const i = parseInt(btn.getAttribute('data-idx'), 10);
+          const it = window._analysis.issues[i];
+          const text = `Issue: ${it.cat}\nSeverity: ${it.sev}\nHook: ${it.hook}\nExcerpt: ${it.excerpt || '(none)'}\n`;
+          navigator.clipboard.writeText(text);
+          btn.textContent = 'Copied';
+          setTimeout(() => btn.textContent = 'Copy evidence', 1000);
+        });
+      });
+
+      wrap.querySelectorAll('button[data-action="action"]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const cat = btn.getAttribute('data-cat');
+          const jt = document.getElementById('jurisdiction').value;
+          const tmpl = templateFor(cat, jt);
+          document.getElementById('reqType').value = tmpl.kind;
+          document.getElementById('reqText').value = tmpl.text;
+          window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+        });
+      });
+    }
+
+    function templateFor(cat, jt) {
+      const header = `To: Privacy Office\nSubject: Exercising my rights regarding your ${cat} practice\n\n`;
+      const footer = `\n\nPlease confirm receipt and respond within the timelines required by law. I prefer responses by email.\n\nSincerely,\n[Your Name]\n[Your Email]\n`;
+      if (cat === 'ADM') {
+        return {
+          kind: 'Challenge automated decision (ADM)',
+          text: header +
+`I am exercising my right to obtain meaningful information about the logic involved and to request human review of any decision based solely on automated processing that significantly affects me. Please:\n- Confirm whether such automated decisions are used,\n- Provide information about the logic and factors considered,\n- Facilitate human review of any decision affecting me.\n` + footer
+        };
+      }
+      if (cat === 'Data Sale/Share' && jt === 'US-CA') {
+        return {
+          kind: 'Opt-out of sale/share',
+          text: header +
+`Under the California Consumer Privacy Act (as amended by the CPRA), I am opting out of the sale or sharing of my personal information and request that you honor this opt-out across all properties and service providers. Please confirm that my preference has been recorded.\n` + footer
+        };
+      }
+      if (cat === 'Dark Patterns') {
+        return {
+          kind: 'Opt-out of sale/share',
+          text: header +
+`Your current consent and choice flows appear to undermine free, informed choice. Please provide a clear opt-in mechanism and revoke any consent inferred from continued use or pre-ticked boxes. I also request confirmation of any data sharing and the means to opt out immediately.\n` + footer
+        };
+      }
+      if (cat === 'Retention') {
+        return {
+          kind: 'Delete my data',
+          text: header +
+`Please provide your retention schedule and delete personal information that is no longer necessary for the stated purposes. Confirm deletion or provide a lawful basis for retention.\n` + footer
+        };
+      }
+      return {
+        kind: 'Access my data',
+        text: header +
+`I am requesting access to my personal information, including categories, specific pieces, purposes of processing, recipients, and retention period. Please also confirm whether you process sensitive personal information and the applicable legal basis.\n` + footer
+      };
+    }
+
+    // Run
+    document.getElementById('analyze').addEventListener('click', () => {
+      const jt = document.getElementById('jurisdiction').value;
+      const modePaste = tabPaste.getAttribute('aria-pressed') === 'true';
+      const src = modePaste ? document.getElementById('policyText').value.trim() : document.getElementById('url').value.trim();
+      const text = modePaste ? src : (src ? `Policy at ${src}. (Demo fetch omitted)` : '');
+      if (!text) {
+        alert('Provide a URL or paste policy text.');
+        return;
+      }
+      const result = analyzeText(text, jt);
+      window._analysis = result;
+      // KPIs
+      document.getElementById('kpiRisk').textContent = result.score.toFixed(2);
+      document.getElementById('kpiRights').textContent = result.rightsCount;
+      document.getElementById('kpiIssues').textContent = result.issues.length;
+      document.getElementById('kpiConf').textContent = (result.confidence*100).toFixed(0) + '%';
+      // Render
+      renderIssues(result.issues);
+      // Seed request template
+      const seed = templateFor(result.issues[0]?.cat || 'Access', jt);
+      document.getElementById('reqType').value = seed.kind;
+      document.getElementById('reqText').value = seed.text;
+    });
+
+    // Filter controls
+    function applyIssueFilters() {
+      const cat = document.getElementById('filterCat').value;
+      const sev = document.getElementById('filterSev').value;
+      if (!window._analysis) return;
+      const list = window._analysis.issues.filter(i => (cat === 'All' || i.cat === cat) && (sev === 'All' || i.sev === sev));
+      renderIssues(list);
+    }
+    document.getElementById('filterCat').addEventListener('change', applyIssueFilters);
+    document.getElementById('filterSev').addEventListener('change', applyIssueFilters);
+
+    // Copy request template
+    document.getElementById('copyReq').addEventListener('click', () => {
+      navigator.clipboard.writeText(document.getElementById('reqText').value);
+      document.getElementById('copyReq').textContent = 'Copied';
+      setTimeout(() => document.getElementById('copyReq').textContent = 'Copy template', 1000);
+    });
+
+    // Export JSON
+    document.getElementById('exportJson').addEventListener('click', () => {
+      if (!window._analysis) { alert('Analyze a policy first.'); return; }
+      const data = {
+        jurisdiction: document.getElementById('jurisdiction').value,
+        metrics: {
+          risk: window._analysis.score,
+          rights: window._analysis.rightsCount,
+          issue_count: window._analysis.issues.length,
+          confidence: window._analysis.confidence
+        },
+        issues: window._analysis.issues
+      };
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], {type:'application/json'}));
+      a.download = 'policy_review.json';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    });
+
+    // Print
+    document.getElementById('printPdf').addEventListener('click', () => window.print());
+
+    // Hide tooltip on scroll/resize
+    window.addEventListener('scroll', hideTip, { passive: true });
+    window.addEventListener('resize', hideTip);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideTip(); });
+  </script>
+<script>
+const signals = {
+  SaleShare: [/sell\b/i, /sale of personal/i, /share with third/i, /targeted advertising/i, /data broker/i],
+  OptOut: [/opt-?out/i, /do not sell/i, /global privacy control/i, /\bGPC\b/i, /universal opt-?out/i],
+  ADM: [/automated decision/i, /solely automated/i, /profiling/i, /significant effect/i, /human review/i],
+  Dark: [/consent by using/i, /pre-?ticked/i, /without notice/i, /at our discretion/i, /nag/i],
+  Retention: [/retain/i, /retention/i, /as long as necessary/i, /indefinite/i],
+  Rights: [/access/i, /deletion|erase/i, /correction|rectification/i, /portability/i, /appeal/i, /how to/i],
+  Minors: [/children|minors|under\s?(13|16|18)/i, /parental consent/i, /guardian/i, /teen/i],
+  Sensitive: [/biometric/i, /precise location/i, /health data/i, /genetic/i, /sexual orientation/i],
+  Unilateral: [/change (these )?terms at any time/i, /terminate (your|the) account at (our )?discretion/i],
+  Liability: [/not liable/i, /no liability/i, /arbitration/i, /class action/i, /jury trial waiver/i]
+};
+function scoreIssue(cat, text, ctx) {
+  let I=0, L=0, S=0;
+  const m = {}; Object.keys(signals).forEach(k => { m[k] = signals[k].filter(rx => rx.test(text)); });
+  if (cat==="SaleShare") { L = m.SaleShare.length ? 5 : (m.OptOut.length ? 3 : 0); }
+  if (cat==="ADM")       { L = m.ADM.length ? 5 : 0; }
+  if (cat==="Dark")      { L = m.Dark.length ? 4 : 0; }
+  if (cat==="Retention") { L = m.Retention.length ? 4 : 0; }
+  if (cat==="Rights")    { L = m.Rights.length ? 3 : 0; }
+  if (cat==="Minors")    { L = (ctx.minors || m.Minors.length) ? 5 : 0; }
+  if (cat==="Sensitive") { L = m.Sensitive.length ? 4 : 0; }
+  if (cat==="Unilateral"){ L = m.Unilateral.length ? 4 : 0; }
+  if (cat==="Liability") { L = m.Liability.length ? 5 : 0; }
+
+  if (cat==="ADM") I = 5;
+  else if (cat==="Minors") I = 5;
+  else if (cat==="Sensitive") I = 4;
+  else if (cat==="SaleShare") I = 4;
+  else if (cat==="Liability") I = 4;
+  else if (cat==="Retention") I = /indefinite|as long as necessary/i.test(text) ? 3 : 2;
+  else if (cat==="Dark") I = 3;
+  else if (cat==="Rights") I = 3;
+  else if (cat==="Unilateral") I = 3;
+
+  if (cat==="SaleShare") S = m.OptOut.length ? 4 : 1;
+  if (cat==="ADM")       S = /human review|appeal/i.test(text) ? 4 : 1;
+  if (cat==="Retention") S = /(\b\d+\s?(days|weeks|months|years)\b)|until\b/i.test(text) ? 4 : 1;
+  if (cat==="Rights")    S = /how to|contact|email/i.test(text) ? 4 : 1;
+  if (cat==="Minors")    S = /parental consent|teen opt-?in/i.test(text) ? 4 : 1;
+  if (cat==="Sensitive") S = /opt-?in|explicit consent/i.test(text) ? 4 : 1;
+  if (cat==="Dark")      S = /you can change your mind|withdraw consent/i.test(text) ? 3 : 1;
+  if (cat==="Unilateral")S = /notice/i.test(text) ? 3 : 1;
+  if (cat==="Liability") S = /to the extent permitted by law|consumer rights unaffected/i.test(text) ? 2 : 1;
+
+  const irp = Math.max(0, Math.min(1, 0.5*(I/5) + 0.4*(L/5) - 0.3*(S/5)));
+  const color = irp>=0.75 ? "red" : (irp>=0.45 ? "yellow" : "green");
+  return {I,L,S,irp,color};
+}
+const cats = ["SaleShare","ADM","Dark","Retention","Rights","Minors","Sensitive","Unilateral","Liability"];
+
+function analyze(){
+  const text = (document.getElementById("policyText")?.value || "");
+  const ctx = {
+    jurisdiction: document.getElementById("jurisdiction")?.value || "US-CA",
+    industry: document.getElementById("industry")?.value || "Retail",
+    size: document.getElementById("size")?.value || "1–49",
+    minors: !!document.getElementById("minors")?.checked
+  };
+  const obsEl = document.getElementById("observations"); if (obsEl) obsEl.innerHTML = "";
+  const observations = [];
+  if (/\[insert url\]|\[tbd\]/i.test(text)) observations.push("Placeholder text detected (e.g., “[insert URL]”).");
+  if (!/contact|email|@/i.test(text)) observations.push("No clear contact/how-to found for rights requests.");
+  if (!/retain|retention/i.test(text)) observations.push("No retention information detected.");
+  if (!/children|minor|under\s?(13|16|18)/i.test(text) && ctx.minors) observations.push("Minors toggle is on but no minors language found in text.");
+  observations.forEach(o => { const d = document.createElement("div"); d.className="finding"; d.innerHTML = `<div class="pill">⚑ Not Rated</div> ${o}`; obsEl?.appendChild(d); });
+
+  const expected = ["rights","retention","children|minors","contact|email","opt-out|do not sell","automated decision|profiling"];
+  let have = 0; expected.forEach(rx => { if (new RegExp(rx,"i").test(text)) have++; });
+  const pct = Math.round(have/expected.length*100);
+  const mf = document.getElementById("meterFill"); if (mf) mf.style.width = pct+"%";
+  const mp = document.getElementById("meterPct"); if (mp) mp.innerText = pct+"%";
+
+  const results = cats.map(c => ({cat:c, ...scoreIssue(c, text, ctx)}));
+
+  const topCats = results.slice().sort((a,b)=>b.irp-a.irp).slice(0,3).map(r => `${r.cat} (${r.color.toUpperCase()})`);
+  const ktr = document.getElementById("kpiTopRisks"); if (ktr) ktr.textContent = topCats.join(", ") || "None";
+
+  let ar="Review", note="Read the top issues before trusting this policy.";
+  const topIRPs = results.map(r=>r.irp).sort((a,b)=>b-a);
+  const CRS = Math.max(topIRPs[0]||0, 0.5*(results.reduce((s,r)=>s+r.irp,0)/results.length || 0));
+  const docColor = CRS>=0.70? "red" : (CRS>=0.40? "yellow" : "green");
+  if (docColor==="green" && pct>=70) { ar="Go"; note="Meets baseline; keep a record and monitor."; }
+  if (docColor==="red" || pct<40) { ar="Stop"; note="Address high-risk findings before relying on this policy."; }
+  const ka = document.getElementById("kpiAction"); if (ka) ka.textContent = ar;
+  const kan = document.getElementById("kpiActionNote"); if (kan) kan.textContent = note;
+
+  const fcat = document.getElementById("filterCat")?.value || "All";
+  const fsev = document.getElementById("filterSev")?.value || "All";
+  const findingsEl = document.getElementById("findings"); if (findingsEl) findingsEl.innerHTML = "";
+  results.filter(r => (fcat==="All" || r.cat===fcat)).filter(r => (fsev==="All" || r.color.toUpperCase()===fsev)).forEach(r => {
+    const why = `I=${r.I}, L=${r.L}, S=${r.S} ⇒ IRP=${r.irp.toFixed(2)}`;
+    findingsEl?.insertAdjacentHTML("beforeend", `<div class="finding"><h4>${r.cat} <span class="pill ${r.color}">${r.color.toUpperCase()}</span></h4><div class="small">${why}. Impact×Likelihood − Safeguards.</div><div><button class="" onclick="openVerify('${r.cat}')">See evidence</button></div></div>`);
+  });
+
+  if (document.getElementById("contrib")?.checked) {
+    const store = JSON.parse(localStorage.getItem("ai_terms_rollups")||"[]");
+    store.push({ ts: Date.now(), jurisdiction: ctx.jurisdiction, industry: ctx.industry, size: ctx.size, minors: ctx.minors, CRS, results });
+    localStorage.setItem("ai_terms_rollups", JSON.stringify(store));
+  }
+}
+document.getElementById("btnAnalyze")?.addEventListener("click", analyze);
+document.getElementById("filterCat")?.addEventListener("change", analyze);
+document.getElementById("filterSev")?.addEventListener("change", analyze);
+
+window.openVerify = function(category) {
+  const text = document.getElementById("policyText")?.value || ""; let patterns = [];
+  if (category==="SaleShare") patterns = signals.SaleShare.concat(signals.OptOut); else patterns = signals[category] || [];
+  let html = text.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); patterns.forEach(rx => { html = html.replace(rx, m => `<span style="background:rgba(138,180,255,0.25); padding:0 2px; border-radius:3px;">${m}</span>`); });
+  const w = window.open("", "_blank", "width=800,height=600"); w.document.write(`<pre style="white-space:pre-wrap; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; padding:16px;">${html}</pre>`); w.document.title = "Verify — " + category;
+};
+
+document.getElementById("btnLoadSample")?.addEventListener("click", () => {
+  const sample = `We may share your personal information with third parties for advertising. You can opt-out via our Do Not Sell page or by honoring the Global Privacy Control (GPC). We retain data as long as necessary for our business purposes. Children under 13 require parental consent; teens 13-15 must opt-in for sale/sharing. Some decisions are made by automated systems; you can request human review and appeal. You may access, delete, or correct your data by emailing privacy@example.com within 30 days.`;
+  const ta = document.getElementById("policyText"); if (ta) ta.value = sample;
+});
+
+document.getElementById("fileInput")?.addEventListener("change", ev => {
+  const f = ev.target.files[0]; if (!f) return;
+  const reader = new FileReader();
+  if (f.type.startsWith("text") || /\.md$/i.test(f.name)) { reader.onload = e => document.getElementById("policyText").value = e.target.result; reader.readAsText(f); }
+  else { reader.onload = e => { const bytes = new Uint8Array(e.target.result); let ascii = ""; for (let i=0;i<Math.min(bytes.length, 200000);i++){ const c=bytes[i]; if ((c>=32 && c<=126) || c===10 || c===13 || c===9) ascii += String.fromCharCode(c); } document.getElementById("policyText").value = ascii || "(PDF text extraction not available in this beta)"; }; reader.readAsArrayBuffer(f); }
+});
+</script></body>
+</html>

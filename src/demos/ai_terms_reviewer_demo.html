@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Terms & Policies Reviewer — Interactive Demo</title>
+  <style>
+    :root {
+      --bg: #0b0c0f; --panel: #13151a; --soft: #1c1f26; --text: #e8eaed; --muted:#b6bcc6;
+      --accent: #5b8df7; --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444; --border:#2a2f3a;
+    }
+    [data-theme="light"] :root {
+      --bg: #f7f7f8; --panel:#ffffff; --soft:#f2f3f5; --text:#111827; --muted:#4b5563; --border:#e5e7eb;
+      --accent:#335eea; --ok:#16a34a; --warn:#d97706; --bad:#dc2626;
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; background: var(--bg); color: var(--text);}
+    header { position: sticky; top:0; z-index:10; backdrop-filter: blur(8px); background: color-mix(in oklab, var(--bg), transparent 35%); border-bottom: 1px solid var(--border);}
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 16px 20px; }
+    .title-row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    h1 { font-size: 20px; margin: 6px 0; }
+    .btn { display:inline-flex; align-items:center; gap:8px; padding:10px 14px; border:1px solid var(--border); border-radius:12px; background: var(--panel); color: var(--text); cursor:pointer; text-decoration:none; }
+    .btn:hover { border-color: color-mix(in oklab, var(--accent), black 10%); }
+    .grid { display:grid; gap:16px; grid-template-columns: 280px 1fr; }
+    @media (max-width: 960px) { .grid { grid-template-columns: 1fr; } }
+    .card { background: var(--panel); border:1px solid var(--border); border-radius:16px; padding:16px; }
+    .card h2 { font-size:16px; margin:0 0 8px; }
+    .filters .field { margin-bottom: 12px; }
+    label { font-size:12px; color: var(--muted); display:block; margin: 0 0 6px; }
+    select, #dateStart, #dateEnd { width: 100%; padding:10px; border-radius:12px; border:1px solid var(--border); background: var(--soft); color: var(--text);}
+    .kpis { display:grid; grid-template-columns: repeat(4, 1fr); gap:12px; margin-top: 8px; }
+    @media (max-width: 960px) { .kpis { grid-template-columns: repeat(2, 1fr); } }
+    .kpi { background: var(--soft); border:1px solid var(--border); border-radius:14px; padding:12px; }
+    .kpi .val { font-size: 22px; font-weight: 700; }
+    canvas { width: 100%; height: 420px; border-radius: 14px; background: var(--soft); border:1px solid var(--border);}
+    .legend { display:flex; gap:8px; align-items:center; font-size:12px; color: var(--muted); margin-top: 8px; }
+    .chip { width:16px; height:10px; border-radius:3px; display:inline-block; }
+    .toolbar { display:flex; gap:8px; flex-wrap:wrap; margin-top: 12px; }
+    footer { color: var(--muted); font-size: 12px; padding: 18px 0; }
+    .section-title { font-weight:700; font-size:14px; margin: 4px 0 8px; }
+    .tooltip { position: fixed; pointer-events: none; background: var(--panel); border:1px solid var(--border); padding:8px 10px; border-radius:10px; font-size:12px; display:none; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap title-row">
+      <h1>AI Terms & Policies Reviewer — Rolling Report (Interactive Demo)</h1>
+      <div class="toolbar">
+        <button id="themeToggle" class="btn" aria-pressed="false" title="Toggle light/dark">Toggle Theme</button>
+        <button id="exportCsv" class="btn" title="Export CSV">Export CSV</button>
+        <button id="exportJson" class="btn" title="Export JSON">Export JSON</button>
+        <a class="btn" href="#" id="downloadPng" download="dashboard.png" title="Download dashboard as PNG">Download PNG</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap grid" id="app">
+    <aside class="card filters" aria-label="Filters">
+      <h2>Filters</h2>
+      <div class="field">
+        <label for="industry">Industry</label>
+        <select id="industry" aria-label="Industry">
+          <option value="All" selected>All</option>
+          <option>Retail</option><option>Finance</option><option>Health</option>
+          <option>Gaming</option><option>Social</option><option>Education</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="country">Country/Jurisdiction</label>
+        <select id="country" aria-label="Country">
+          <option value="All" selected>All</option>
+          <option>EU</option><option>UK</option><option>US-CA</option><option>US-NY</option><option>AU</option><option>BR</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="size">Company Size</label>
+        <select id="size" aria-label="Company Size">
+          <option value="All" selected>All</option>
+          <option>Startup (&lt;50)</option><option>Mid-market</option><option>Enterprise</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="ptype">Policy Type</label>
+        <select id="ptype" aria-label="Policy Type">
+          <option value="All" selected>All</option>
+          <option>ToS</option><option>Privacy Policy</option><option>In-app UX</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="rcat">Risk Category</label>
+        <select id="rcat" aria-label="Risk Category">
+          <option value="All" selected>All</option>
+          <option>ADM</option><option>Data Sale/Share</option><option>Dark Patterns</option>
+          <option>Missing Rights</option><option>Retention</option>
+        </select>
+      </div>
+      <div class="field" style="display:flex; gap:8px;">
+        <div style="flex:1;">
+          <label for="dateStart">Start</label>
+          <input id="dateStart" type="date" aria-label="Start date"/>
+        </div>
+        <div style="flex:1;">
+          <label for="dateEnd">End</label>
+          <input id="dateEnd" type="date" aria-label="End date"/>
+        </div>
+      </div>
+      <button id="apply" class="btn" style="width:100%;" aria-label="Apply filters">Apply</button>
+      <div class="section-title">Notes</div>
+      <p style="font-size:12px; color:var(--muted);">Data shown is synthetic for demo purposes; in production this view aggregates anonymized results and includes sample size on hover.</p>
+    </aside>
+
+    <section>
+      <div class="card">
+        <h2>Overview</h2>
+        <div class="kpis" role="list">
+          <div class="kpi" role="listitem"><div class="label">Analyses in view</div><div class="val" id="kpiCount">—</div></div>
+          <div class="kpi" role="listitem"><div class="label">Avg risk</div><div class="val" id="kpiAvg">—</div></div>
+          <div class="kpi" role="listitem"><div class="label">High severity %</div><div class="val" id="kpiHigh">—</div></div>
+          <div class="kpi" role="listitem"><div class="label">Top risk</div><div class="val" id="kpiTop">—</div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Heatmap: Avg Risk by Industry × Country</h2>
+        <canvas id="heatmap" width="1000" height="480" role="img" aria-label="Heatmap of average risk by Industry and Country"></canvas>
+        <div class="legend" aria-hidden="true">
+          <span class="chip" style="background:#1a9850"></span> Low
+          <span class="chip" style="background:#91cf60"></span>
+          <span class="chip" style="background:#d9ef8b"></span>
+          <span class="chip" style="background:#fee08b"></span>
+          <span class="chip" style="background:#fc8d59"></span>
+          <span class="chip" style="background:#d73027"></span> High
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Architecture (MVP→V1)</h2>
+        <div style="height:320px; border:1px dashed var(--border); border-radius:12px; display:flex; align-items:center; justify-content:center; color:var(--muted)">Architecture diagram placeholder for demo</div>
+      </div>
+
+      <div class="card">
+        <h2>Data Flow</h2>
+        <div style="height:320px; border:1px dashed var(--border); border-radius:12px; display:flex; align-items:center; justify-content:center; color:var(--muted)">Data flow diagram placeholder for demo</div>
+      </div>
+    </section>
+  </main>
+
+  <div class="tooltip" id="tip" role="tooltip" aria-hidden="true"></div>
+
+  <footer class="wrap">
+    <p>Demo UI — balanced for clarity and speed. Dark/light modes, keyboard-accessible filters, responsive layout, and export hooks.</p>
+  </footer>
+
+  <script>
+    // Theme toggle
+    const themeToggle = document.getElementById('themeToggle');
+    themeToggle.addEventListener('click', () => {{
+      const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+      document.documentElement.setAttribute('data-theme', isLight ? 'dark' : 'light');
+      themeToggle.setAttribute('aria-pressed', (!isLight).toString());
+    }});
+
+    // Synthetic dataset generator (deterministic by filters)
+    const industries = ["Retail","Finance","Health","Gaming","Social","Education"];
+    const countries = ["US-CA","US-NY","EU","UK","AU","BR"];
+    const sizes = ["Startup (<50)", "Mid-market", "Enterprise"];
+    const rcats = ["ADM","Data Sale/Share","Dark Patterns","Missing Rights","Retention"];
+    const ptypes = ["ToS","Privacy Policy","In-app UX"];
+
+    function seedRand(seed) {{
+      let t = seed;
+      return function() {{
+        t = (t * 9301 + 49297) % 233280;
+        return t / 233280;
+      }}
+    }}
+
+    function hashFilters(f) {{
+      return Array.from(f).reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
+    }}
+
+    function synthData(filters) {{
+      const baseSeed = hashFilters(JSON.stringify(filters));
+      const rand = seedRand(baseSeed);
+      const N = Math.floor(300 + rand()*500);
+      const rows = [];
+      for (let i=0; i<N; i++) {{
+        const ind = industries[Math.floor(rand()*industries.length)];
+        const cty = countries[Math.floor(rand()*countries.length)];
+        const siz = sizes[Math.floor(rand()*sizes.length)];
+        const pty = ptypes[Math.floor(rand()*ptypes.length)];
+        const rc = rcats[Math.floor(rand()*rcats.length)];
+        let risk = 0.45 + (rc === "Dark Patterns" ? 0.10 : 0) + (rc === "ADM" ? 0.06 : 0) + (ind === "Gaming" ? 0.07 : 0) + (cty === "EU" ? -0.03 : 0);
+        risk += (rand()-0.5)*0.25;
+        risk = Math.max(0.02, Math.min(0.98, risk));
+        rows.push({{ industry: ind, country: cty, size: siz, policy: pty, rcat: rc, risk }});
+      }}
+      return rows;
+    }}
+
+    // Heatmap draw
+    const canvas = document.getElementById('heatmap');
+    const ctx = canvas.getContext('2d');
+    const tip = document.getElementById('tip');
+
+    function colorFor(value) {{
+      const colors = ["#1a9850","#91cf60","#d9ef8b","#fee08b","#fc8d59","#d73027"];
+      const idx = Math.max(0, Math.min(colors.length-1, Math.floor(value*colors.length)));
+      return colors[idx];
+    }}
+
+    function drawHeatmap(rows) {{
+      const w = canvas.width, h = canvas.height;
+      ctx.clearRect(0,0,w,h);
+      const padLeft = 120, padTop = 40, padRight = 20, padBottom = 60;
+      const gridW = w - padLeft - padRight;
+      const gridH = h - padTop - padBottom;
+
+      ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text');
+      ctx.font = '12px Inter, Arial, sans-serif';
+      industries.forEach((ind, i) => {{
+        ctx.fillText(ind, 30, padTop + i * (gridH/industries.length) + (gridH/industries.length)/2 + 4);
+      }});
+      countries.forEach((ct, j) => {{
+        const x = padLeft + j * (gridW/countries.length) + 8;
+        ctx.save();
+        ctx.translate(x, h - padBottom + 20);
+        ctx.rotate(-Math.PI/4);
+        ctx.fillText(ct, 0, 0);
+        ctx.restore();
+      }});
+
+      const agg = {{}}, counts = {{}};
+      rows.forEach(r => {{
+        const key = r.industry + '|' + r.country;
+        agg[key] = (agg[key] || 0) + r.risk;
+        counts[key] = (counts[key] || 0) + 1;
+      }});
+
+      const cellW = gridW / countries.length;
+      const cellH = gridH / industries.length;
+
+      const cells = [];
+      for (let i=0; i<industries.length; i++) {{
+        for (let j=0; j<countries.length; j++) {{
+          const key = industries[i] + '|' + countries[j];
+          const avg = counts[key] ? agg[key]/counts[key] : 0;
+          const x = padLeft + j * cellW;
+          const y = padTop + i * cellH;
+          ctx.fillStyle = colorFor(avg);
+          ctx.fillRect(x, y, cellW-2, cellH-2);
+          cells.push({{x, y, w: cellW, h: cellH, industry: industries[i], country: countries[j], avg: avg || 0, samples: counts[key] || 0 }});
+        }}
+      }}
+
+      ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--border');
+      ctx.strokeRect(padLeft, padTop, gridW, gridH);
+
+      canvas.onmousemove = (e) => {{
+        const rect = canvas.getBoundingClientRect();
+        const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+        const my = (e.clientY - rect.top) * (canvas.height / rect.height);
+        let found = null;
+        for (const c of cells) {{ if (mx >= c.x && mx <= c.x + c.w && my >= c.y && my <= c.y + c.h) {{ found = c; break; }} }}
+        if (found) {{
+          tip.style.display = 'block';
+          tip.style.left = (e.clientX + 10) + 'px';
+          tip.style.top = (e.clientY + 10) + 'px';
+          tip.innerHTML = `<strong>${{found.industry}}</strong> × <strong>${{found.country}}</strong><br/>Avg risk: ${{found.avg.toFixed(2)}}<br/>Samples: ${{found.samples}}`;
+          tip.setAttribute('aria-hidden', 'false');
+        }} else {{
+          tip.style.display = 'none';
+          tip.setAttribute('aria-hidden', 'true');
+        }}
+      }};
+
+      const count = rows.length;
+      const avg = rows.reduce((a,b)=>a+b.risk,0) / (count||1);
+      const high = rows.filter(r=>r.risk>=0.75).length / (count||1);
+      const rcSort = {{}}
+      rows.forEach(r=> rcSort[r.rcat] = (rcSort[r.rcat]||0)+1);
+      const topR = Object.entries(rcSort).sort((a,b)=>b[1]-a[1])[0]?.[0] || '—';
+      document.getElementById('kpiCount').textContent = count.toLocaleString();
+      document.getElementById('kpiAvg').textContent = avg.toFixed(2);
+      document.getElementById('kpiHigh').textContent = (high*100).toFixed(0) + '%';
+      document.getElementById('kpiTop').textContent = topR;
+    }}
+
+    function getFilters() {{
+      return {{
+        industry: document.getElementById('industry').value,
+        country: document.getElementById('country').value,
+        size: document.getElementById('size').value,
+        policy: document.getElementById('ptype').value,
+        rcat: document.getElementById('rcat').value,
+        start: document.getElementById('dateStart').value || null,
+        end: document.getElementById('dateEnd').value || null
+      }};
+    }}
+
+    function applyFilters() {{
+      const f = getFilters();
+      let rows = synthData(f);
+      rows = rows.filter(r => (f.industry==='All' || r.industry===f.industry)
+        && (f.country==='All' || r.country===f.country)
+        && (f.size==='All' || r.size===f.size)
+        && (f.policy==='All' || r.policy===f.policy)
+        && (f.rcat==='All' || r.rcat===f.rcat));
+      drawHeatmap(rows);
+      window._rows = rows;
+    }}
+
+    document.getElementById('apply').addEventListener('click', applyFilters);
+    applyFilters();
+
+    function download(filename, text) {{
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([text], {{type:'text/plain'}}));
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }}
+
+    document.getElementById('exportCsv').addEventListener('click', () => {{
+      const rows = window._rows || [];
+      const head = ['industry','country','size','policy','rcat','risk'];
+      const csv = [head.join(',')].concat(rows.map(r => head.map(k => r[k]).join(','))).join('\n');
+      download('rolling_report.csv', csv);
+    }});
+
+    document.getElementById('exportJson').addEventListener('click', () => {{
+      const rows = window._rows || [];
+      download('rolling_report.json', JSON.stringify(rows, null, 2));
+    }});
+
+    document.getElementById('downloadPng').addEventListener('click', (e) => {{
+      e.preventDefault();
+      const link = e.currentTarget;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    }});
+  </script>
+</body>
+</html>

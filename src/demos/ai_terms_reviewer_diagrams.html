@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Terms & Policies Reviewer – Architecture & Flows</title>
+  <meta name="description" content="Self-contained single-file HTML rendering System Architecture, Data Flow, User Journey, and BPMN Business Process diagrams for the AI Terms & Policies Reviewer." />
+  <style>
+    :root{--bg:#0b0f14;--card:#0f172a;--ink:#e5e7eb;--muted:#9ca3af;--accent:#14b8a6}
+    html,body{height:100%}
+    body{margin:0;background:#0b0f14;color:var(--ink);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+    header{position:sticky;top:0;background:linear-gradient(180deg,#0b0f14,#0f172a);border-bottom:1px solid #1f2937;z-index:10}
+    .wrap{max-width:1100px;margin:0 auto;padding:16px}
+    h1{margin:0;font-size:18px;letter-spacing:.2px}
+    nav{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+    nav a{color:var(--ink);text-decoration:none;border:1px solid #334155;padding:6px 10px;border-radius:10px;background:#0b1220}
+    nav a:hover{border-color:#475569}
+    main{max-width:1100px;margin:0 auto;padding:24px}
+    section{margin:20px 0;padding:16px;border:1px solid #1f2937;border-radius:14px;background:radial-gradient(80% 120% at 0 0,#0f172a,#0b0f14);box-shadow:0 1px 4px rgba(0,0,0,.25)}
+    h2{margin:0 0 8px;font-size:17px}
+    .meta{color:var(--muted);font-size:12px;margin-bottom:10px}
+    .render{display:flex;align-items:center;justify-content:center;min-height:220px;overflow:auto}
+    .loading{color:var(--muted);font-size:13px}
+    .toolbar{display:flex;gap:8px;margin:8px 0 0}
+    .btn{appearance:none;border:1px solid #334155;background:#0b1220;color:var(--ink);padding:6px 10px;border-radius:10px;cursor:pointer}
+    .btn:hover{border-color:#475569}
+    pre.uml{display:none}
+    footer{max-width:1100px;margin:24px auto 60px;color:#94a3b8;font-size:12px;padding:0 24px}
+  </style>
+  <script src="https://unpkg.com/plantuml-encoder/dist/plantuml-encoder.min.js"></script>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>AI Terms & Policies Reviewer — Architecture & Flows</h1>
+      <nav>
+        <a href="#sys-arch">System Architecture (C4)</a>
+        <a href="#data-flow">Data Flow (Sequence)</a>
+        <a href="#user-journey">User Journey (Activity)</a>
+        <a href="#bpmn">Business Process (BPMN)</a>
+      </nav>
+      <div class="toolbar">
+        <button class="btn" id="download-svg">Download all as SVGs</button>
+        <button class="btn" id="download-png">Download all as PNGs</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section id="sys-arch">
+      <h2>System Architecture (C4 Container)</h2>
+      <div class="meta">Standards-aware: GDPR/EU AI Act (EUR-Lex), CPRA/CCPA (CPPA), FTC dark patterns, NIST AI RMF.</div>
+      <div class="render"><div class="loading">Rendering…</div></div>
+      <pre class="uml" data-name="system-architecture">
+@startuml
+!includeurl https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+LAYOUT_WITH_LEGEND()
+
+Person(user, "Consumer User", "Pastes URL / uploads policy; reviews findings")
+Person(researcher, "Advocate/Researcher", "Explores rolling dashboard & exports")
+
+System_Boundary(coreSys, "AI Terms & Policies Reviewer Platform") {
+  Container_Boundary(frontend, "Client Applications") {
+    Container(webapp, "Web App", "React/Next.js", "Accessible UI, uploads, findings, exports")
+  }
+
+  Container_Boundary(edge, "Edge & Access") {
+    Container(apigw, "API Gateway", "Envoy/Nginx", "Routing, authZ, rate limiting")
+    Container(auth, "Auth Service", "Node/Go", "OIDC login, JWT issuance")
+  }
+
+  Container_Boundary(analysis, "Analysis Services") {
+    Container(ingest, "Ingestion Service", "Python/Node", "URL fetch, PDF upload, snapshot+hash")
+    Container(ocr, "OCR Engine", "Tesseract/LlamaParse", "OCR for image-based PDFs")
+    Container(normalize, "Normalizer", "Python", "HTML→text, PDF→text, cleanup")
+    Container(segment, "Policy Segmenter", "Python", "Sectioning by topics (rights, ADM, etc.)")
+    Container(rights, "Rights Mapper", "Python", "Map clauses to GDPR/AI Act/CPRA rights")
+    Container(dark, "Dark-Pattern Analyzer", "Python", "Heuristics + patterns (FTC taxonomy)")
+    Container(llm, "LLM Reasoner (RAG)", "Service", "Synthesize findings with citations")
+    Container(exporter, "Report Exporter", "Service", "PDF/Word/JSON outputs")
+  }
+
+  Container_Boundary(data, "Data & Knowledge") {
+    ContainerDb(results, "Results DB", "PostgreSQL", "Findings, scores, audit trail")
+    Container(obj, "Evidence Store", "S3/GCS", "Policy snapshots, excerpt proofs, hashes")
+    ContainerDb(vector, "Embeddings Index", "pgvector/FAISS", "Clause embeddings for RAG")
+    ContainerDb(kb, "Legal KB", "Versioned Corpus", "EUR-Lex, CPPA, FTC, NIST extracts")
+    ContainerQueue(bus, "Event Bus", "Kafka/SNS+SQS", "Async events: analysis.complete, export.created")
+    Container(wh, "Analytics Warehouse", "BigQuery/Snowflake", "Rolling dashboard aggregations")
+  }
+
+  Container_Boundary(obs, "Ops & Observability") {
+    Container(mon, "Monitoring", "Prometheus/Grafana", "SLIs/SLOs, dashboards")
+    Container(trace, "Tracing", "OpenTelemetry/Jaeger", "Distributed traces")
+    Container(logs, "Log Aggregation", "ELK/Datadog", "Centralized logs & search")
+  }
+
+  Container_Boundary(viz, "Visualization") {
+    Container(dash, "Rolling Dashboard", "React+D3/Plotly", "Filters: industry, country, size, type")
+  }
+}
+
+System_Ext(idp, "Identity Provider", "Auth0/Okta — OIDC/SAML")
+System_Ext(mail, "Email Service", "SendGrid/SES — transactional notices")
+System_Ext(llmapi, "LLM Provider", "Hosted API (e.g., OpenAI, Anthropic)")
+System_Ext(sources, "Authoritative Sources", "EUR-Lex, CPPA, FTC, NIST")
+
+Rel(user, webapp, "Uses", "HTTPS")
+Rel(researcher, dash, "Explores metrics", "HTTPS")
+Rel(webapp, apigw, "API calls", "HTTPS/JSON")
+Rel(apigw, auth, "Authenticate", "OIDC/JWT")
+Rel(apigw, ingest, "Upload URL/PDF", "HTTP/gRPC")
+Rel(ingest, ocr, "OCR if needed")
+Rel(ingest, normalize, "Normalize text")
+Rel(normalize, segment, "Section policy")
+Rel(segment, rights, "Map to rights")
+Rel(segment, dark, "Scan patterns")
+Rel(rights, llm, "Context →")
+Rel(dark, llm, "Signals →")
+Rel(llm, kb, "Retrieve citations", "RAG")
+Rel(llm, vector, "Embed/query clauses")
+Rel(llm, results, "Persist findings")
+Rel(ingest, obj, "Store snapshot & hash")
+Rel(apigw, exporter, "Generate reports")
+Rel(exporter, obj, "Write PDFs/Word/JSON")
+Rel(results, bus, "Publish events")
+Rel(bus, wh, "ETL/stream aggregations")
+Rel(dash, wh, "Query aggregates", "SQL/BI API")
+Rel(webapp, mail, "Send notifications")
+Rel(kb, sources, "Periodic updates")
+Rel(llm, llmapi, "Model inference", "HTTPS")
+Rel(apigw, mon, "Metrics/health")
+Rel(apigw, trace, "Traces")
+Rel(apigw, logs, "Logs")
+
+@enduml
+      </pre>
+    </section>
+
+    <section id="data-flow">
+      <h2>Data Flow (UML Sequence)</h2>
+      <div class="render"><div class="loading">Rendering…</div></div>
+      <pre class="uml" data-name="data-flow">
+@startuml
+actor User
+participant "Web App\n(Next.js)" as Web
+participant "API Gateway" as APIGW
+participant "Ingestion" as Ingest
+participant "OCR" as OCR
+participant "Normalizer" as Norm
+participant "Segmenter" as Seg
+participant "Rights Mapper" as Rights
+participant "Dark-Pattern Analyzer" as Dark
+participant "LLM Reasoner (RAG)" as LLM
+database "Embeddings Index" as Vec
+database "Legal KB" as KB
+folder "Evidence Store" as Obj
+database "Results DB" as DB
+queue "Event Bus" as Bus
+participant "Exporter" as Export
+participant "Dashboard Service" as Dash
+
+== Submit Document ==
+User -> Web : Paste URL / Upload PDF
+Web -> APIGW : POST /analysis
+APIGW -> Ingest : startAnalysis(docRef, opts)
+Ingest -> Ingest : Snapshot + hash
+Ingest -> Obj : PUT policy snapshot (hash)
+Ingest -> OCR : OCR if image-based
+OCR --> Ingest : text
+Ingest -> Norm : normalize(text)
+Norm --> Ingest : clean_text
+Ingest -> Seg : segment(clean_text)
+Seg --> Ingest : sections (rights, ADM, data sale, etc.)
+
+== Analysis ==
+par parallel checks
+  Ingest -> Rights : map_to_rights(sections, jurisdiction)
+  Ingest -> Dark : scan_dark_patterns(sections)
+end
+Rights --> Ingest : rights_findings
+Dark --> Ingest : pattern_findings
+
+Ingest -> LLM : synthesize(findings, excerpts)
+LLM -> Vec : query(embeddings)
+LLM -> KB : retrieve(citations)
+Vec --> LLM : matches
+KB --> LLM : citations
+LLM --> Ingest : final_findings + citations + scores
+
+Ingest -> DB : save(findings, scores, audit)
+DB --> Ingest : id
+Ingest -> Bus : publish analysis.completed(id)
+Bus -> Dash : update aggregates
+
+== Results & Export ==
+APIGW <-- Ingest : analysisId
+Web <-- APIGW : 202 Accepted + polling URL
+Web -> APIGW : GET /analysis/{id}
+APIGW -> DB : fetch(id)
+DB --> APIGW : findings+scores
+APIGW --> Web : findings panel (with evidence links)
+
+User -> Web : Export (PDF/Word/JSON)
+Web -> APIGW : POST /export/{id}
+APIGW -> Export : generate(id)
+Export -> Obj : write report files
+Export --> APIGW : presigned URLs
+APIGW --> Web : download links
+@enduml
+      </pre>
+    </section>
+
+    <section id="user-journey">
+      <h2>User Journey Flow (UML Activity with Swimlanes)</h2>
+      <div class="render"><div class="loading">Rendering…</div></div>
+      <pre class="uml" data-name="user-journey">
+@startuml
+|User|
+start
+:Open Reviewer UI;
+:Paste URL / Upload PDF;
+:Select jurisdiction (EU/CA/US baseline);
+:Optional: opt-in to contribute anonymized results;
+
+|App UI|
+:Validate inputs; show consent text;
+:POST analysis request;
+
+|Backend|
+:Snapshot policy + hash;
+:Normalize & segment content;
+:Run rights mapping & dark-pattern checks;
+:LLM+RAG synthesis with citations;
+:Persist findings & publish event;
+
+|App UI|
+:Poll for results;
+:Render findings panel (severity, rights, evidence);
+:Show uncertainty notes & legal citations;
+
+|User|
+:Drill down to excerpts;
+:Generate rights request (access/delete/correct/opt-out);
+:Export report (PDF/Word/JSON);
+if (Share anonymized to rolling dashboard?) then (Yes)
+  |Backend|
+  :Aggregate into warehouse;
+else (No)
+endif
+
+|User|
+:Provide feedback on accuracy/clarity;
+stop
+@enduml
+      </pre>
+    </section>
+
+    <section id="bpmn">
+      <h2>Business Process Flow (BPMN 2.0)</h2>
+      <div class="render"><div class="loading">Rendering…</div></div>
+      <pre class="uml" data-name="bpmn">
+@startuml
+!includeurl https://raw.githubusercontent.com/plantuml-stdlib/BPMN/master/BPMN.puml
+
+Pool("AI Terms Reviewer") {
+  Lane("User") {
+    StartEvent(start, "Start")
+    UserTask(submit, "Submit URL/PDF & select jurisdiction")
+  }
+  Lane("App UI") {
+    Task(validate, "Validate input & consent")
+    Task(request, "POST analysis request")
+    Task(render, "Render findings & exports")
+  }
+  Lane("Backend") {
+    Task(snapshot, "Snapshot & hash policy")
+    Task(normalize, "Normalize & segment content")
+    ParallelGateway(split, "Parallel checks")
+    Task(maprights, "Map rights (GDPR/AI Act/CPRA)")
+    Task(darkscan, "Dark-pattern scan (FTC taxonomy)")
+    ParallelGateway(join, "Join")
+    Task(synthesize, "LLM+RAG synthesis with citations")
+    DataObject(evidence, "Evidence snapshot")
+    DataStore(results, "Results DB (findings, audit)")
+    IntermediateThrowEvent(pub, "analysis.completed")
+  }
+  Lane("Analytics") {
+    DataStore(wh, "Analytics Warehouse")
+    Task(aggregate, "Update rolling aggregates")
+    EndEvent(reportend, "Report Ready")
+  }
+}
+
+SequenceFlow(start, submit)
+SequenceFlow(submit, validate)
+SequenceFlow(validate, request)
+SequenceFlow(request, snapshot)
+SequenceFlow(snapshot, normalize)
+SequenceFlow(normalize, split)
+SequenceFlow(split, maprights)
+SequenceFlow(split, darkscan)
+SequenceFlow(maprights, join)
+SequenceFlow(darkscan, join)
+SequenceFlow(join, synthesize)
+SequenceFlow(synthesize, results)
+SequenceFlow(results, pub)
+SequenceFlow(pub, render)
+ExclusiveGateway(optin, "Opt-in share?")
+SequenceFlow(render, optin)
+SequenceFlow(optin, aggregate, "Yes")
+SequenceFlow(optin, reportend, "No")
+SequenceFlow(aggregate, wh)
+SequenceFlow(wh, reportend)
+@enduml
+      </pre>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      Rendered client-side via PlantUML Server. Diagrams reflect PRD: ingestion, rights mapping, dark-pattern detection, LLM+RAG, evidence store, exports, and rolling analytics.
+    </div>
+  </footer>
+
+  <script>
+    function toBlob(img){
+      return fetch(img.src, {mode:'no-cors'}).then(r=>r.blob()).catch(()=>null)
+    }
+
+    (function renderAll(){
+      const blocks = document.querySelectorAll('pre.uml');
+      blocks.forEach(pre => {
+        const uml = pre.textContent.trim();
+        const name = pre.getAttribute('data-name')||'diagram';
+        const target = pre.previousElementSibling.querySelector('.loading').parentElement;
+        const encoded = plantumlEncoder.encode(uml);
+        const urlSvg = 'https://www.plantuml.com/plantuml/svg/' + encoded;
+        const urlPng = 'https://www.plantuml.com/plantuml/png/' + encoded;
+
+        const img = new Image();
+        img.alt = name;
+        img.loading = 'lazy';
+        img.decoding = 'async';
+        img.src = urlSvg;
+        img.dataset.png = urlPng;
+        img.dataset.name = name;
+        img.onerror = () => {
+          target.innerHTML = '<div class="loading">Could not load from PlantUML server. Check connectivity or firewall.</div>';
+        };
+        target.innerHTML = '';
+        target.appendChild(img);
+      });
+    })();
+
+    function downloadAll(type){
+      const imgs = Array.from(document.querySelectorAll('.render img'));
+      imgs.forEach((img,i)=>{
+        const a = document.createElement('a');
+        const name = (img.dataset.name||('diagram-'+(i+1))) + (type==='png'?'.png':'.svg');
+        a.download = name;
+        a.href = type==='png' ? img.dataset.png : img.src;
+        a.rel = 'noopener';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      });
+    }
+
+    document.getElementById('download-svg').addEventListener('click',()=>downloadAll('svg'));
+    document.getElementById('download-png').addEventListener('click',()=>downloadAll('png'));
+  </script>
+</body>
+</html>

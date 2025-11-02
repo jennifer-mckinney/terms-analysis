@@ -1,0 +1,598 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AI Terms Reviewer — Beta Demo</title>
+<style>
+  :root {
+    --bg: #0b0d10; --panel:#111418; --text:#e7ecf1; --muted:#a8b0ba;
+    --green:#3ecf8e; --yellow:#ffcc66; --red:#ff6b6b; --blue:#5aa9ff; --border:#263241;
+    --accent:#8ab4ff; --shadow: rgba(0,0,0,0.3);
+  }
+  html, body { background:var(--bg); color:var(--text); margin:0; font-family:Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+  header { position:sticky; top:0; background:linear-gradient(0deg, rgba(11,13,16,0.6), rgba(11,13,16,0.9)); backdrop-filter: blur(6px); border-bottom:1px solid var(--border); z-index:10; }
+  .bar { display:flex; gap:12px; align-items:center; padding:14px 16px; max-width:1200px; margin:0 auto; }
+  .brand { font-weight:700; letter-spacing:.2px; }
+  .tag { font-size:12px; padding:4px 8px; border:1px solid var(--border); border-radius:999px; color:var(--muted); }
+  nav { margin-left:auto; display:flex; gap:8px; flex-wrap:wrap; }
+  nav button { background:#0f1318; color:var(--text); border:1px solid var(--border); padding:8px 12px; border-radius:10px; cursor:pointer; }
+  nav button.active { border-color:var(--accent); box-shadow:0 0 0 2px rgba(138,180,255,0.18) inset; }
+  main { max-width:1200px; margin:16px auto 80px; padding:0 16px; }
+  .grid { display:grid; grid-template-columns: 1.2fr .8fr; gap:16px; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:16px; box-shadow: 0 10px 30px var(--shadow); }
+  .card h3 { margin:0 0 12px 0; font-size:16px; }
+  .card .p { color:var(--muted); font-size:14px; }
+  .card .body { padding:16px; }
+  textarea { width:100%; min-height:220px; background:#0f1318; color:var(--text); border:1px solid var(--border); border-radius:12px; padding:12px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .row > * { margin:4px 0; }
+  select, input[type="text"], input[type="file"], button, .chip { background:#0f1318; color:var(--text); border:1px solid var(--border); border-radius:10px; padding:8px 10px; }
+  button.primary { background:var(--accent); color:#081018; border:none; }
+  button.ghost { background:transparent; border:1px dashed var(--border); }
+  .pill { padding:4px 8px; border-radius:999px; font-size:12px; }
+  .green { background:rgba(62,207,142,0.15); color:var(--green); border:1px solid rgba(62,207,142,0.4); }
+  .yellow { background:rgba(255,204,102,0.15); color:var(--yellow); border:1px solid rgba(255,204,102,0.45); }
+  .red { background:rgba(255,107,107,0.15); color:var(--red); border:1px solid rgba(255,107,107,0.45); }
+  .muted { color:var(--muted); }
+  .list { display:flex; flex-direction:column; gap:12px; }
+  .finding { border:1px solid var(--border); border-radius:12px; padding:12px; background:#0f1318; }
+  .finding h4 { margin:0 0 6px 0; font-size:15px; }
+  .why { font-size:12px; color:var(--muted); margin-top:6px; }
+  .verify { margin-top:8px; }
+  .hl { background:rgba(138,180,255,0.22); padding:0 2px; border-radius:4px; }
+  .badge { font-size:11px; color:var(--muted); border:1px solid var(--border); padding:2px 6px; border-radius:8px; }
+  .kpis { display:grid; grid-template-columns: repeat(4, 1fr); gap:8px; }
+  .kpi { background:#0f1318; border:1px solid var(--border); border-radius:12px; padding:12px; }
+  canvas { background:#0f1318; border-radius:12px; border:1px solid var(--border); }
+  .obs { border-left:3px solid #7a8696; padding-left:10px; }
+  .obs .label { font-size:11px; color:#cbd5e1; }
+  .meter { height:10px; background:#0f1318; border:1px solid var(--border); border-radius:999px; overflow:hidden; }
+  .meter > div { height:100%; background:linear-gradient(90deg, var(--green), var(--yellow), var(--red)); width:0%; transition:width .5s ease; }
+  .footer { color:var(--muted); font-size:12px; padding:16px; border-top:1px solid var(--border); }
+  .hide { display:none; }
+  .help { cursor:help; border-bottom:1px dotted var(--muted); }
+  .stack { display:flex; flex-direction:column; gap:8px; }
+  .valgrid { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="brand">AI Terms Reviewer <span class="tag">Beta</span></div>
+    <div class="tag">Snapshot: <span id="snapshot">2025-09-18</span></div>
+    <nav>
+      <button id="tab-reviewer" class="active">Reviewer</button>
+      <button id="tab-dashboard">Dashboard</button>
+      <button id="tab-visuals">Visuals</button>
+      <button id="tab-validation">Validation</button>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <!-- REVIEWER -->
+  <section id="panel-reviewer">
+    <div class="grid">
+      <div class="card">
+        <div class="body">
+          <h3>1) Paste text or upload a file <span class="badge">Local-only</span></h3>
+          <div class="row">
+            <input id="fileInput" type="file" accept=".txt,.md,.pdf" />
+            <button id="btnLoadSample" class="ghost">Load Sample</button>
+          </div>
+          <p class="p">PDF parsing is experimental in this beta. If it fails, paste text below.</p>
+          <textarea id="policyText" placeholder="Paste Terms/Privacy text here…"></textarea>
+        </div>
+      </div>
+      <div class="card">
+        <div class="body">
+          <h3>2) Context & options</h3>
+          <div class="stack">
+            <div class="row">
+              <label>Jurisdiction:</label>
+              <select id="jurisdiction">
+                <option value="US-CA">US — California</option>
+                <option value="US-CO">US — Colorado</option>
+                <option value="US-CT">US — Connecticut</option>
+                <option value="US-NY">US — New York</option>
+                <option value="US-FED">US — Federal</option>
+                <option value="EU">EU — GDPR</option>
+                <option value="UK">UK — Children’s Code</option>
+              </select>
+            </div>
+            <div class="row">
+              <label>Industry:</label>
+              <select id="industry">
+                <option>Retail</option><option>Finance</option><option>Health</option><option>Gaming</option><option>Social</option><option>Education</option>
+              </select>
+              <label>Company size:</label>
+              <select id="size">
+                <option>1–49</option><option>50–249</option><option>250–999</option><option>1000+</option>
+              </select>
+            </div>
+            <div class="row">
+              <label><input type="checkbox" id="minors" /> Mentions children/teens</label>
+              <label><input type="checkbox" id="contrib" /> Contribute anonymized results to dashboard</label>
+            </div>
+            <div class="row">
+              <button id="btnAnalyze" class="primary">Analyze</button>
+              <button id="btnVerify" class="">Verify</button>
+              <button id="btnExport" class="">Export JSON</button>
+            </div>
+            <div class="row">
+              <span class="help" title="Completeness checks for expected sections (rights, retention, minors, contact). Not part of the score.">Completeness</span>
+              <div class="meter" style="flex:1;"><div id="meterFill"></div></div>
+              <span id="meterPct" class="muted">0%</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid" style="margin-top:16px;">
+      <div class="card">
+        <div class="body">
+          <h3>Findings (color = risk)</h3>
+          <div id="findings" class="list"></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="body">
+          <h3>Observations <span class="badge">Not Rated</span></h3>
+          <div id="observations" class="list"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- DASHBOARD -->
+  <section id="panel-dashboard" class="hide">
+    <div class="grid">
+      <div class="card">
+        <div class="body">
+          <h3>Rolling KPIs</h3>
+          <div class="kpis">
+            <div class="kpi"><div class="muted">Analyses</div><div id="kpiCount" style="font-size:22px;">0</div></div>
+            <div class="kpi"><div class="muted">Avg IRP</div><div id="kpiIRP" style="font-size:22px;">0.00</div></div>
+            <div class="kpi"><div class="muted">Red %</div><div id="kpiRed" style="font-size:22px;">0%</div></div>
+            <div class="kpi"><div class="muted">Minors flagged</div><div id="kpiMinors" style="font-size:22px;">0</div></div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="body">
+          <h3>Filters</h3>
+          <div class="row">
+            <label>Industry:</label><select id="fIndustry"><option>All</option><option>Retail</option><option>Finance</option><option>Health</option><option>Gaming</option><option>Social</option><option>Education</option></select>
+            <label>State/Region:</label><select id="fState"><option>All</option><option>US-CA</option><option>US-CO</option><option>US-CT</option><option>US-NY</option><option>US-FED</option><option>EU</option><option>UK</option></select>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="grid" style="margin-top:16px;">
+      <div class="card">
+        <div class="body">
+          <h3>Heatmap (Avg IRP by Industry × State)</h3>
+          <canvas id="heatmap" width="800" height="360"></canvas>
+        </div>
+      </div>
+      <div class="card">
+        <div class="body">
+          <h3>Recent Contributions</h3>
+          <div id="recent" class="list"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- VISUALS -->
+  <section id="panel-visuals" class="hide">
+    <div class="card">
+      <div class="body">
+        <h3>System Architecture</h3>
+        <svg width="100%" height="220" viewBox="0 0 900 220" xmlns="http://www.w3.org/2000/svg">
+          <rect x="10" y="10" width="880" height="200" rx="16" fill="#0f1318" stroke="#263241"/>
+          <g font-size="12" fill="#e7ecf1">
+            <rect x="30" y="40" width="200" height="60" rx="10" fill="#11181f" stroke="#263241"/>
+            <text x="130" y="70" text-anchor="middle">Reviewer (local)</text>
+            <rect x="350" y="40" width="200" height="60" rx="10" fill="#11181f" stroke="#263241"/>
+            <text x="450" y="70" text-anchor="middle">Scoring (I/L/S → IRP)</text>
+            <rect x="670" y="40" width="200" height="60" rx="10" fill="#11181f" stroke="#263241"/>
+            <text x="770" y="70" text-anchor="middle">Dashboard (localStorage)</text>
+            <rect x="350" y="130" width="200" height="60" rx="10" fill="#11181f" stroke="#263241"/>
+            <text x="450" y="160" text-anchor="middle">Snapshot Pack (offline)</text>
+          </g>
+          <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#8ab4ff"/></marker></defs>
+          <line x1="230" y1="70" x2="350" y2="70" stroke="#8ab4ff" stroke-width="2" marker-end="url(#arrow)"/>
+          <line x1="550" y1="70" x2="670" y2="70" stroke="#8ab4ff" stroke-width="2" marker-end="url(#arrow)"/>
+          <line x1="450" y1="100" x2="450" y2="130" stroke="#8ab4ff" stroke-width="2" marker-end="url(#arrow)"/>
+        </svg>
+      </div>
+    </div>
+    <div class="grid" style="margin-top:16px;">
+      <div class="card">
+        <div class="body">
+          <h3>Data Flow</h3>
+          <ol class="p">
+            <li>User pastes or uploads text (local).</li>
+            <li>Heuristics map phrases → categories; compute I/L/S and IRP; color thresholds apply.</li>
+            <li>Opt-in: anonymized row pushed to localStorage store for aggregates.</li>
+            <li>Dashboard renders KPIs and heatmap from the store; filters adjust view only.</li>
+          </ol>
+        </div>
+      </div>
+      <div class="card">
+        <div class="body">
+          <h3>Dashboard Wireframe + Sample Heatmap</h3>
+          <img src="rolling_dashboard_heatmap.png" alt="Sample heatmap" style="width:100%; border:1px solid var(--border); border-radius:12px;" />
+          <p class="p"><a href="rolling_dashboard_heatmap.png" download>Download the heatmap PNG</a></p>
+        </div>
+      </div>
+    </div>
+    <div class="footer">This beta runs fully local in your browser. Snapshot version: <span id="snap2">2025-09-18</span>. PDF parsing is limited in this build.</div>
+  </section>
+
+  <!-- VALIDATION -->
+  <section id="panel-validation" class="hide">
+    <div class="card">
+      <div class="body">
+        <h3>Validation (Accuracy & Drift)</h3>
+        <p class="p">Runs a tiny built-in test pack to compute per-category F1, macro-F1, color agreement, Cohen’s κ (colors), and simple drift indicators.</p>
+        <div class="row">
+          <button id="btnRunVal" class="primary">Run validation</button>
+          <button id="btnClearVal" class="">Clear results</button>
+        </div>
+      </div>
+    </div>
+    <div class="valgrid" style="margin-top:16px;">
+      <div class="card"><div class="body">
+        <h3>Scores</h3>
+        <div id="valScores" class="mono"></div>
+      </div></div>
+      <div class="card"><div class="body">
+        <h3>Drift signals</h3>
+        <div id="valDrift" class="mono"></div>
+      </div></div>
+    </div>
+    <div class="card" style="margin-top:16px;"><div class="body">
+      <h3>Gold vs Predicted (Last Run)</h3>
+      <div id="valTable" class="mono" style="font-size:12px; overflow:auto;"></div>
+    </div></div>
+  </section>
+</main>
+
+<script>
+// Tabs
+const tabs = ["reviewer","dashboard","visuals","validation"];
+tabs.forEach(t => document.getElementById("tab-"+t).addEventListener("click", () => {
+  tabs.forEach(x => {
+    document.getElementById("tab-"+x).classList.remove("active");
+    document.getElementById("panel-"+x).classList.add("hide");
+  });
+  document.getElementById("tab-"+t).classList.add("active");
+  document.getElementById("panel-"+t).classList.remove("hide");
+  if (t === "dashboard") renderDashboard();
+}));
+
+// Signals
+const signals = {
+  SaleShare: [/sell\\b/i, /sale of personal/i, /share with third/i, /targeted advertising/i, /data broker/i],
+  OptOut: [/opt-?out/i, /do not sell/i, /global privacy control/i, /\\bGPC\\b/i, /universal opt-?out/i],
+  ADM: [/automated decision/i, /solely automated/i, /profiling/i, /significant effect/i, /human review/i],
+  Dark: [/consent by using/i, /pre-?ticked/i, /without notice/i, /at our discretion/i, /nag/i],
+  Retention: [/retain/i, /retention/i, /as long as necessary/i, /indefinite/i],
+  Rights: [/access/i, /deletion|erase/i, /correction|rectification/i, /portability/i, /appeal/i, /how to/i],
+  Minors: [/children|minors|under\\s?(13|16|18)/i, /parental consent/i, /guardian/i, /teen/i],
+  Sensitive: [/biometric/i, /precise location/i, /health data/i, /genetic/i, /sexual orientation/i],
+  Unilateral: [/change (these )?terms at any time/i, /terminate (your|the) account at (our )?discretion/i],
+  Liability: [/not liable/i, /no liability/i, /arbitration/i, /class action/i, /jury trial waiver/i]
+};
+
+// Scoring
+function scoreIssue(cat, text, ctx) {
+  let I=0, L=0, S=0;
+  const m = {};
+  Object.keys(signals).forEach(k => { m[k] = signals[k].filter(rx => rx.test(text)); });
+  if (cat==="SaleShare") { L = m.SaleShare.length ? 5 : (m.OptOut.length ? 3 : 0); }
+  if (cat==="ADM")       { L = m.ADM.length ? 5 : 0; }
+  if (cat==="Dark")      { L = m.Dark.length ? 4 : 0; }
+  if (cat==="Retention") { L = m.Retention.length ? 4 : 0; }
+  if (cat==="Rights")    { L = m.Rights.length ? 3 : 0; }
+  if (cat==="Minors")    { L = (ctx.minors || m.Minors.length) ? 5 : 0; }
+  if (cat==="Sensitive") { L = m.Sensitive.length ? 4 : 0; }
+  if (cat==="Unilateral"){ L = m.Unilateral.length ? 4 : 0; }
+  if (cat==="Liability") { L = m.Liability.length ? 5 : 0; }
+
+  if (cat==="ADM") I = 5;
+  else if (cat==="Minors") I = 5;
+  else if (cat==="Sensitive") I = 4;
+  else if (cat==="SaleShare") I = 4;
+  else if (cat==="Liability") I = 4;
+  else if (cat==="Retention") I = /indefinite|as long as necessary/i.test(text) ? 3 : 2;
+  else if (cat==="Dark") I = 3;
+  else if (cat==="Rights") I = 3;
+  else if (cat==="Unilateral") I = 3;
+
+  if (cat==="SaleShare") S = m.OptOut.length ? 4 : 1;
+  if (cat==="ADM")       S = /human review|appeal/i.test(text) ? 4 : 1;
+  if (cat==="Retention") S = /(\\b\\d+\\s?(days|weeks|months|years)\\b)|until\\b/i.test(text) ? 4 : 1;
+  if (cat==="Rights")    S = /how to|contact|email/i.test(text) ? 4 : 1;
+  if (cat==="Minors")    S = /parental consent|teen opt-?in/i.test(text) ? 4 : 1;
+  if (cat==="Sensitive") S = /opt-?in|explicit consent/i.test(text) ? 4 : 1;
+  if (cat==="Dark")      S = /you can change your mind|withdraw consent/i.test(text) ? 3 : 1;
+  if (cat==="Unilateral")S = /notice/i.test(text) ? 3 : 1;
+  if (cat==="Liability") S = /to the extent permitted by law|consumer rights unaffected/i.test(text) ? 2 : 1;
+
+  const irp = Math.max(0, Math.min(1, 0.5*(I/5) + 0.4*(L/5) - 0.3*(S/5)));
+  const color = irp>=0.75 ? "red" : (irp>=0.45 ? "yellow" : "green");
+  return {I,L,S,irp,color};
+}
+
+const cats = ["SaleShare","ADM","Dark","Retention","Rights","Minors","Sensitive","Unilateral","Liability"];
+
+// Reviewer actions (subset needed for validation to reuse)
+document.getElementById("btnLoadSample").addEventListener("click", () => {
+  const sample = `We may share your personal information with third parties for advertising. You can opt-out via our Do Not Sell page or by honoring the Global Privacy Control (GPC). We retain data as long as necessary for our business purposes. Children under 13 require parental consent; teens 13-15 must opt-in for sale/sharing. Some decisions are made by automated systems; you can request human review and appeal. You may access, delete, or correct your data by emailing privacy@example.com within 30 days.`;
+  document.getElementById("policyText").value = sample;
+});
+
+// Minimal analyze, observations, completeness (unchanged from previous build)
+document.getElementById("btnAnalyze").addEventListener("click", () => {
+  const text = document.getElementById("policyText").value || "";
+  const ctx = {
+    jurisdiction: document.getElementById("jurisdiction").value,
+    industry: document.getElementById("industry").value,
+    size: document.getElementById("size").value,
+    minors: document.getElementById("minors").checked
+  };
+  const findingsEl = document.getElementById("findings");
+  const obsEl = document.getElementById("observations");
+  findingsEl.innerHTML = ""; obsEl.innerHTML = "";
+
+  const observations = [];
+  if (/\\[insert url\\]|\\[tbd\\]/i.test(text)) observations.push("Placeholder text detected (e.g., “[insert URL]”).");
+  if (!/contact|email|@/i.test(text)) observations.push("No clear contact/how-to found for rights requests.");
+  if (!/retain|retention/i.test(text)) observations.push("No retention information detected.");
+  if (!/children|minor|under\\s?(13|16|18)/i.test(text) && document.getElementById("minors").checked) observations.push("Minors toggle is on but no minors language found in text.");
+  observations.forEach(o => {
+    const d = document.createElement("div"); d.className="obs finding";
+    d.innerHTML = `<div class="label">⚑ Not Rated</div><div>${o}</div>`; obsEl.appendChild(d);
+  });
+
+  const expected = ["rights","retention","children|minors","contact|email","opt-out|do not sell","automated decision|profiling"];
+  let have = 0; expected.forEach(rx => { if (new RegExp(rx,"i").test(text)) have++; });
+  const pct = Math.round(have/expected.length*100);
+  document.getElementById("meterFill").style.width = pct+"%";
+  document.getElementById("meterPct").innerText = pct+"%";
+
+  const results = cats.map(c => ({cat:c, ...scoreIssue(c, text, ctx)}));
+  const findingsElInner = results.map(r => {
+    const colorClass = r.color;
+    const why = `I=${r.I}, L=${r.L}, S=${r.S} ⇒ IRP=${r.irp.toFixed(2)}`;
+    return `<div class="finding"><h4>${r.cat} <span class="pill ${colorClass}">${r.color.toUpperCase()}</span></h4>
+      <div class="why">${why}. <span class="muted">Impact×Likelihood − Safeguards.</span></div>
+      <div class="verify"><button class="ghost" onclick="openVerify('${r.cat}')">See evidence</button></div></div>`;
+  }).join("");
+  const top = results.map(r=>r.irp).sort((a,b)=>b-a).slice(0,3);
+  const mean = results.reduce((s,r)=>s+r.irp,0)/results.length || 0;
+  const CRS = Math.max(top[0]||0, 0.5*mean);
+  const docColor = CRS>=0.70? "red" : (CRS>=0.40? "yellow" : "green");
+  findingsEl.innerHTML = `<div class="finding"><h4>Document Score <span class="pill ${docColor}">${docColor.toUpperCase()}</span></h4><div class="why">CRS=${CRS.toFixed(2)} (max of top IRP vs weighted mean).</div></div>` + findingsElInner;
+
+  if (document.getElementById("contrib").checked) {
+    const store = JSON.parse(localStorage.getItem("ai_terms_rollups")||"[]");
+    store.push({ ts: Date.now(), jurisdiction: ctx.jurisdiction, industry: ctx.industry, size: ctx.size, minors: ctx.minors, CRS, results });
+    localStorage.setItem("ai_terms_rollups", JSON.stringify(store));
+  }
+});
+
+// Verify (simple highlighter based on category)
+window.openVerify = function(category) {
+  const text = document.getElementById("policyText").value || "";
+  let patterns = [];
+  if (category==="SaleShare") patterns = signals.SaleShare.concat(signals.OptOut);
+  else patterns = signals[category] || [];
+  let html = text.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  patterns.forEach(rx => { html = html.replace(rx, m => `<span class="hl">${m}</span>`); });
+  const w = window.open("", "_blank", "width=800,height=600");
+  w.document.write(`<pre style="white-space:pre-wrap; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; background:#0b0d10; color:#e7ecf1; padding:16px;">${html}</pre>`);
+  w.document.title = "Verify — " + category;
+};
+
+// Dashboard
+function renderDashboard() {
+  const store = JSON.parse(localStorage.getItem("ai_terms_rollups")||"[]");
+  const fi = document.getElementById("fIndustry").value || "All";
+  const fs = document.getElementById("fState").value || "All";
+  const rows = store.filter(r => (fi==="All"||r.industry===fi) && (fs==="All"||r.jurisdiction===fs));
+  const kpiCount = rows.length;
+  const avgIRP = rows.reduce((s,r)=>s+r.CRS,0)/(rows.length||1);
+  const redPct = Math.round(100*rows.filter(r=>((r.CRS>=0.70)?"red":(r.CRS>=0.40?"yellow":"green"))==="red").length/(rows.length||1));
+  const minors = rows.filter(r=>r.minors).length;
+  document.getElementById("kpiCount").innerText = kpiCount;
+  document.getElementById("kpiIRP").innerText = avgIRP.toFixed(2);
+  document.getElementById("kpiRed").innerText = redPct+"%";
+  document.getElementById("kpiMinors").innerText = minors;
+
+  // Recent
+  const recent = document.getElementById("recent"); recent.innerHTML = "";
+  rows.slice(-8).reverse().forEach(r => {
+    const color = (r.CRS>=0.70)?"red":(r.CRS>=0.40?"yellow":"green");
+    const d = document.createElement("div"); d.className="finding";
+    d.innerHTML = `<div>${new Date(r.ts).toLocaleString()} — ${r.industry} (${r.jurisdiction}) <span class="pill ${color}" style="float:right">${color.toUpperCase()}</span></div>`;
+    recent.appendChild(d);
+  });
+
+  // Heatmap
+  const inds = ["Retail","Finance","Health","Gaming","Social","Education"];
+  const regs = ["US-CA","US-CO","US-CT","US-NY","US-FED","EU","UK"];
+  const grid = inds.map(()=> regs.map(()=>[]));
+  rows.forEach(r => { const i=inds.indexOf(r.industry), j=regs.indexOf(r.jurisdiction); if (i>=0 && j>=0) grid[i][j].push(r.CRS); });
+  const avgs = grid.map(row => row.map(cell => cell.length? cell.reduce((a,b)=>a+b,0)/cell.length : 0));
+  drawHeatmap(document.getElementById("heatmap"), avgs, inds, regs);
+}
+function drawHeatmap(canvas, avgs, inds, regs) {
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0,0,W,H);
+  const pad = 60, cols = regs.length, rows = inds.length;
+  const cw = (W - pad - 20)/cols, ch = (H - pad - 20)/rows;
+  ctx.fillStyle = "#a8b0ba"; ctx.font = "12px sans-serif";
+  regs.forEach((r,idx)=> { ctx.fillText(r, pad + idx*cw + 6, H-6); });
+  inds.forEach((r,idx)=> { ctx.fillText(r, 6, pad + idx*ch + 14); });
+  for (let i=0;i<rows;i++){
+    for (let j=0;j<cols;j++){
+      const v = avgs[i][j];
+      const x = pad + j*cw, y = pad + i*ch;
+      const color = vToColor(v);
+      ctx.fillStyle = color; ctx.fillRect(x, y, cw-6, ch-6);
+      ctx.fillStyle = "#e7ecf1"; ctx.fillText(v.toFixed(2), x+6, y+16);
+    }
+  }
+  ctx.strokeStyle = "#263241"; ctx.strokeRect(pad-10, pad-10, cols*cw, rows*ch);
+}
+function vToColor(v){ const r=Math.min(255,Math.max(0,Math.floor(510*v))); const g=Math.min(255,Math.max(0,Math.floor(510*(1-v)))); return `rgba(${r},${g},80,0.8)`; }
+
+// --- VALIDATION ---
+// Tiny built-in test pack (3 examples). Each item: text, gold per-category color (R/Y/G), gold doc color.
+const TEST_PACK = [
+  {
+    id: "A",
+    text: "We sell personal information to third parties for targeted advertising. Users may opt-out via the Do Not Sell link. We retain data as long as necessary. Children under 13 require parental consent.",
+    gold: { SaleShare:"Y", ADM:"G", Dark:"G", Retention:"Y", Rights:"Y", Minors:"G", Sensitive:"G", Unilateral:"G", Liability:"G", doc:"Y" }
+  },
+  {
+    id: "B",
+    text: "Some decisions are made solely by automated systems and may significantly affect you. You may request human review and appeal. Data is retained for 30 days.",
+    gold: { SaleShare:"G", ADM:"Y", Dark:"G", Retention:"G", Rights:"G", Minors:"G", Sensitive:"G", Unilateral:"G", Liability:"G", doc:"Y" }
+  },
+  {
+    id: "C",
+    text: "We may change these terms at any time without notice. We are not liable for any damages. Children under 13 are prohibited. We do not sell personal information.",
+    gold: { SaleShare:"G", ADM:"G", Dark:"Y", Retention:"Y", Rights:"Y", Minors:"Y", Sensitive:"G", Unilateral:"R", Liability:"R", doc:"R" }
+  }
+];
+
+function colorToLetter(c){ return c==="red"?"R":(c==="yellow"?"Y":"G"); }
+function f1(golds, preds){
+  const labels = ["R","Y","G"];
+  const res = {};
+  labels.forEach(L => {
+    let tp=0, fp=0, fn=0;
+    for (let i=0;i<golds.length;i++){
+      const g=golds[i], p=preds[i];
+      if (p===L && g===L) tp++;
+      if (p===L && g!==L) fp++;
+      if (p!==L && g===L) fn++;
+    }
+    const prec = tp? tp/(tp+fp):0; const rec = tp? tp/(tp+fn):0; const f = (prec+rec)? 2*prec*rec/(prec+rec):0;
+    res[L] = {precision:prec, recall:rec, f1:f};
+  });
+  const macro = (res.R.f1 + res.Y.f1 + res.G.f1)/3;
+  return { perLabel: res, macroF1: macro };
+}
+function cohensKappa(golds, preds){
+  const labels = ["R","Y","G"]; const n = golds.length;
+  const counts = {R:{R:0,Y:0,G:0}, Y:{R:0,Y:0,G:0}, G:{R:0,Y:0,G:0}};
+  for (let i=0;i<n;i++) counts[golds[i]][preds[i]]++;
+  const total = n;
+  let po = 0;
+  labels.forEach(L => { po += counts[L][L]; });
+  po = po/total;
+  // marginals
+  const row = {}, col = {};
+  labels.forEach(L=>{ row[L]=0; col[L]=0; });
+  labels.forEach(r=>labels.forEach(c=>{ row[r]+=counts[r][c]; col[c]+=counts[r][c]; }));
+  let pe = 0; labels.forEach(L => { pe += (row[L]/total)*(col[L]/total); });
+  const k = (po - pe) / (1 - pe || 1);
+  return k;
+}
+
+document.getElementById("btnRunVal").addEventListener("click", () => {
+  const scoresDiv = document.getElementById("valScores");
+  const driftDiv = document.getElementById("valDrift");
+  const tableDiv = document.getElementById("valTable");
+  const catStats = {};
+  const rows = [];
+  TEST_PACK.forEach(item => {
+    const ctx = { jurisdiction:"US-CA", industry:"Social", size:"250–999", minors:/under\s?(13|16|18)/i.test(item.text) };
+    const results = cats.map(c => ({cat:c, ...scoreIssue(c, item.text, ctx)}));
+    const docTop = results.map(r=>r.irp).sort((a,b)=>b-a)[0]||0;
+    const mean = results.reduce((s,r)=>s+r.irp,0)/results.length || 0;
+    const CRS = Math.max(docTop, 0.5*mean);
+    const docColor = CRS>=0.70? "red" : (CRS>=0.40? "yellow" : "green");
+    const preds = {}; results.forEach(r => preds[r.cat] = colorToLetter(r.color)); preds.doc = colorToLetter(docColor);
+    rows.push({ id:item.id, gold:item.gold, pred:preds });
+
+    cats.concat(["doc"]).forEach(c => {
+      if (!catStats[c]) catStats[c] = { gold:[], pred:[] };
+      catStats[c].gold.push(item.gold[c]); catStats[c].pred.push(preds[c]);
+    });
+  });
+
+  // Compute metrics
+  let out = "";
+  cats.concat(["doc"]).forEach(c => {
+    const { perLabel, macroF1 } = f1(catStats[c].gold, catStats[c].pred);
+    const kappa = cohensKappa(catStats[c].gold, catStats[c].pred);
+    out += `${c.padEnd(10)}  macro-F1=${macroF1.toFixed(2)}  κ=${kappa.toFixed(2)}  ` +
+           `[R f1=${perLabel.R.f1.toFixed(2)} Y f1=${perLabel.Y.f1.toFixed(2)} G f1=${perLabel.G.f1.toFixed(2)}]\n`;
+  });
+  scoresDiv.textContent = out;
+
+  // Simple drift: compare current keyword frequencies in localStorage vs test pack
+  function kwFreq(text){
+    const toks = (text.toLowerCase().match(/[a-z]+/g)||[]); const map={};
+    toks.forEach(t => { map[t]=(map[t]||0)+1; }); return map;
+  }
+  const testCorpus = TEST_PACK.map(t=>t.text).join(" ");
+  const testMap = kwFreq(testCorpus);
+  const store = JSON.parse(localStorage.getItem("ai_terms_rollups")||"[]");
+  const currentTexts = []; // we don't persist texts for privacy; simulate by using category names as proxies
+  const proxy = store.map(r => r.results.map(x=>x.cat).join(" ")).join(" ");
+  const curMap = kwFreq(proxy);
+  // cosine similarity over shared keys
+  const keys = new Set([...Object.keys(testMap), ...Object.keys(curMap)]);
+  let dot=0, a=0, b=0;
+  keys.forEach(k => { const x=testMap[k]||0, y=curMap[k]||0; dot+=x*y; a+=x*x; b+=y*y; });
+  const cos = (a&&b)? dot/Math.sqrt(a*b) : 0;
+  driftDiv.textContent = `Keyword distribution similarity (proxy): ${cos.toFixed(2)}  (1.00 = identical; <0.70 suggests drift)`;
+
+  // Table
+  let tbl = "ID | Category | Gold | Pred\n";
+  tbl += "-".repeat(40)+"\n";
+  rows.forEach(r => {
+    cats.forEach(c => { tbl += `${r.id} | ${c.padEnd(10)} | ${r.gold[c]} | ${r.pred[c]}\n`; });
+    tbl += `${r.id} | ${"doc".padEnd(10)} | ${r.gold.doc} | ${r.pred.doc}\n`;
+    tbl += "-".repeat(40)+"\n";
+  });
+  tableDiv.textContent = tbl;
+});
+document.getElementById("btnClearVal").addEventListener("click", () => {
+  document.getElementById("valScores").textContent = "";
+  document.getElementById("valDrift").textContent = "";
+  document.getElementById("valTable").textContent = "";
+});
+
+// File input
+document.getElementById("fileInput").addEventListener("change", ev => {
+  const f = ev.target.files[0]; if (!f) return;
+  if (/pdf$/i.test(f.name)) { alert("PDF parsing is limited in this beta; please paste text if extraction fails."); }
+  const reader = new FileReader();
+  if (f.type.startsWith("text") || /\\.md$/i.test(f.name)) {
+    reader.onload = e => document.getElementById("policyText").value = e.target.result;
+    reader.readAsText(f);
+  } else {
+    reader.onload = e => {
+      const bytes = new Uint8Array(e.target.result);
+      let ascii = ""; for (let i=0;i<Math.min(bytes.length, 200000);i++){ const c=bytes[i]; if ((c>=32 && c<=126) || c===10 || c===13 || c===9) ascii += String.fromCharCode(c); }
+      document.getElementById("policyText").value = ascii || "(PDF text extraction not available in this beta)";
+    };
+    reader.readAsArrayBuffer(f);
+  }
+});
+</script>
+</body>
+</html>

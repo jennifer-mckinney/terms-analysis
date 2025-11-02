@@ -1,0 +1,129 @@
+<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>AI Terms Reviewer — Simple Demo</title>
+<style>
+:root { --max: 980px; --border:#263241; --bg:#0b0d10; --panel:#111418; --text:#e7ecf1; --muted:#a8b0ba; }
+html,body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+header{position:sticky;top:0;background:#0c1015;border-bottom:1px solid var(--border)}
+.bar{max-width:var(--max);margin:0 auto;padding:12px 14px;display:flex;gap:8px;align-items:center}
+.tag{font-size:12px;color:var(--muted);border:1px solid var(--border);padding:2px 8px;border-radius:999px}
+main{max-width:var(--max);margin:12px auto 80px;padding:0 14px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+.body{padding:12px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+textarea,select,input[type=file],button{background:#0f1318;color:var(--text);border:1px solid var(--border);border-radius:10px;padding:8px 10px;font-size:14px}
+textarea{width:100%;min-height:200px}
+button.primary{background:#8ab4ff;color:#081018;border:none}
+.kpi{background:#0f1318;border:1px solid var(--border);border-radius:12px;padding:10px}
+.kpi h4{margin:0 0 6px 0;font-size:12px;color:var(--muted)}
+.kpi .num{font-size:20px;font-weight:600}
+.pill{padding:2px 8px;border-radius:999px;font-size:12px;border:1px solid #32465e}
+.green{background:rgba(62,207,142,.12);color:#34d399}
+.yellow{background:rgba(255,204,102,.12);color:#fbbf24}
+.red{background:rgba(255,107,107,.12);color:#f87171}
+.grid{display:grid;gap:12px}
+.grid3{grid-template-columns:repeat(3,1fr)}
+.list{display:flex;flex-direction:column;gap:10px}
+.finding{background:#0f1318;border:1px solid var(--border);border-radius:12px;padding:10px}
+.meter{height:8px;background:#0f1318;border:1px solid var(--border);border-radius:999px;overflow:hidden}
+.meter>div{height:100%;width:0%;background:linear-gradient(90deg,#34d399,#fbbf24,#f87171)}
+.muted{color:var(--muted);font-size:12px}
+.hl{background:rgba(138,180,255,.22);padding:0 2px;border-radius:3px}
+.util{max-width:var(--max);margin:8px auto 0;padding:0 14px;display:flex;gap:8px;justify-content:flex-end}
+</style></head>
+<body>
+<header><div class="bar"><strong>AI Terms Reviewer</strong><span class="tag">Demo</span></div></header>
+<div class="util"><button id="btnSelfTest" title="Quick PASS/FAIL checks">Self‑Test</button><a href="rolling_dashboard_heatmap.png" download><button>Heatmap PNG</button></a></div>
+<main>
+  <div class="card"><div class="body">
+    <h3>Reviewer</h3>
+    <label class="muted">Paste text or upload → set context → Analyze → See findings.</label>
+    <textarea id="policyText" placeholder="Paste Terms/Privacy text here…"></textarea>
+    <div class="row" style="justify-content:space-between;margin-top:6px;">
+      <div class="row"><input id="fileInput" type="file" accept=".txt,.md,.pdf"/><button id="btnLoadSample">Sample</button></div>
+      <button id="btnAnalyze" class="primary">Analyze</button>
+    </div>
+    <div class="grid grid3" style="margin-top:10px;">
+      <div class="kpi"><h4>Action Readiness</h4><div id="kpiAction" class="num">—</div><div id="kpiActionNote" class="muted">—</div></div>
+      <div class="kpi"><h4>Completeness</h4><div class="meter"><div id="meterFill"></div></div><div class="muted"><span id="meterPct">0%</span> sections</div></div>
+      <div class="kpi"><h4>Top Risks</h4><div id="kpiTopRisks" class="muted">—</div></div>
+    </div>
+    <div class="row" style="margin-top:8px;">
+      <select id="jurisdiction"><option value="US-CA">US—CA</option><option value="US-CO">US—CO</option><option value="US-CT">US—CT</option><option value="US-NY">US—NY</option><option value="US-FED">US—FED</option><option value="EU">EU—GDPR</option><option value="UK">UK—Code</option></select>
+      <select id="industry"><option>Retail</option><option>Finance</option><option>Health</option><option>Gaming</option><option>Social</option><option>Education</option></select>
+      <select id="size"><option>1–49</option><option>50–249</option><option>250–999</option><option>1000+</option></select>
+      <label><input type="checkbox" id="minors"/> Minors</label>
+      <label><input type="checkbox" id="contrib"/> Add to dashboard</label>
+    </div>
+    <div class="row" style="justify-content:space-between;margin-top:8px;">
+      <div class="row"><label class="muted">Filter:</label>
+        <select id="filterCat"><option>All</option><option>SaleShare</option><option>ADM</option><option>Dark</option><option>Retention</option><option>Rights</option><option>Minors</option><option>Sensitive</option><option>Unilateral</option><option>Liability</option></select>
+        <select id="filterSev"><option>All</option><option>GREEN</option><option>YELLOW</option><option>RED</option></select>
+      </div>
+      <div class="row"><button id="btnVerify">Verify</button><button id="btnExport">Export JSON</button></div>
+    </div>
+    <div class="grid" style="grid-template-columns:1fr 1fr;gap:12px;margin-top:10px;">
+      <div><div id="findings" class="list"></div></div>
+      <div><h4>Observations <span class="pill">Not Rated</span></h4><div id="observations" class="list"></div></div>
+    </div>
+  </div></div>
+</main>
+<script>
+const signals = {
+  SaleShare:[/sell\b/i,/sale of personal/i,/share with third/i,/targeted advertising/i,/data broker/i],
+  OptOut:[/opt-?out/i,/do not sell/i,/global privacy control/i,/\bGPC\b/i,/universal opt-?out/i],
+  ADM:[/automated decision/i,/solely automated/i,/profiling/i,/significant effect/i,/human review/i],
+  Dark:[/consent by using/i,/pre-?ticked/i,/without notice/i,/at our discretion/i,/nag/i],
+  Retention:[/retain/i,/retention/i,/as long as necessary/i,/indefinite/i],
+  Rights:[/access/i,/deletion|erase/i,/correction|rectification/i,/portability/i,/appeal/i,/how to/i],
+  Minors:[/children|minors|under\s?(13|16|18)/i,/parental consent/i,/guardian/i,/teen/i],
+  Sensitive:[/biometric/i,/precise location/i,/health data/i,/genetic/i,/sexual orientation/i],
+  Unilateral:[/change (these )?terms at any time/i,/terminate (your|the) account at (our )?discretion/i],
+  Liability:[/not liable/i,/no liability/i,/arbitration/i,/class action/i,/jury trial waiver/i]
+};
+function scoreIssue(cat,text,ctx){
+  let I=0,L=0,S=0; const m={}; Object.keys(signals).forEach(k=>m[k]=signals[k].filter(rx=>rx.test(text)));
+  if(cat==="SaleShare"){L=m.SaleShare.length?5:(m.OptOut.length?3:0);} if(cat==="ADM"){L=m.ADM.length?5:0;}
+  if(cat==="Dark"){L=m.Dark.length?4:0;} if(cat==="Retention"){L=m.Retention.length?4:0;} if(cat==="Rights"){L=m.Rights.length?3:0;}
+  if(cat==="Minors"){L=(ctx.minors||m.Minors.length)?5:0;} if(cat==="Sensitive"){L=m.Sensitive.length?4:0;} if(cat==="Unilateral"){L=m.Unilateral.length?4:0;} if(cat==="Liability"){L=m.Liability.length?5:0;}
+  if(cat==="ADM")I=5; else if(cat==="Minors")I=5; else if(cat==="Sensitive")I=4; else if(cat==="SaleShare")I=4; else if(cat==="Liability")I=4; else if(cat==="Retention")I=/indefinite|as long as necessary/i.test(text)?3:2; else I=3;
+  if(cat==="SaleShare")S=m.OptOut.length?4:1; if(cat==="ADM")S=/human review|appeal/i.test(text)?4:1;
+  if(cat==="Retention")S=/(\b\d+\s?(days|weeks|months|years)\b)|until\b/i.test(text)?4:1;
+  if(cat==="Rights")S=/how to|contact|email/i.test(text)?4:1; if(cat==="Minors")S=/parental consent|teen opt-?in/i.test(text)?4:1;
+  if(cat==="Sensitive")S=/opt-?in|explicit consent/i.test(text)?4:1; if(cat==="Dark")S=/you can change your mind|withdraw consent/i.test(text)?3:1;
+  if(cat==="Unilateral")S=/notice/i.test(text)?3:1; if(cat==="Liability")S=/to the extent permitted by law|consumer rights unaffected/i.test(text)?2:1;
+  const irp=Math.max(0,Math.min(1,0.5*(I/5)+0.4*(L/5)-0.3*(S/5))); const color=irp>=0.75?"red":(irp>=0.45?"yellow":"green");
+  return {I,L,S,irp,color};
+}
+const cats=["SaleShare","ADM","Dark","Retention","Rights","Minors","Sensitive","Unilateral","Liability"];
+function analyze(){
+  const text=(document.getElementById("policyText").value||""); const ctx={jurisdiction:document.getElementById("jurisdiction").value,industry:document.getElementById("industry").value,size:document.getElementById("size").value,minors:document.getElementById("minors").checked};
+  const obsEl=document.getElementById("observations"); obsEl.innerHTML="";
+  const observations=[];
+  if(/\[insert url\]|\[tbd\]/i.test(text)) observations.push("Placeholder text detected (e.g., “[insert URL]”).");
+  if(!/contact|email|@/i.test(text)) observations.push("No clear contact/how-to found for rights requests.");
+  if(!/retain|retention/i.test(text)) observations.push("No retention information detected.");
+  if(!/children|minor|under\s?(13|16|18)/i.test(text) && ctx.minors) observations.push("Minors toggle is on but no minors language found in text.");
+  observations.forEach(o=>{const d=document.createElement("div"); d.className="finding"; d.innerHTML=`<div class="pill">⚑ Not Rated</div> ${o}`; obsEl.appendChild(d);});
+  const expected=["rights","retention","children|minors","contact|email","opt-out|do not sell","automated decision|profiling"];
+  let have=0; expected.forEach(rx=>{if(new RegExp(rx,"i").test(text)) have++;});
+  document.getElementById("meterFill").style.width=Math.round(have/expected.length*100)+"%";
+  document.getElementById("meterPct").innerText=Math.round(have/expected.length*100)+"%";
+  const results=cats.map(c=>({cat:c,...scoreIssue(c,text,ctx)}));
+  const topCats=results.slice().sort((a,b)=>b.irp-a.irp).slice(0,3).map(r=>`${r.cat} (${r.color.toUpperCase()})`);
+  document.getElementById("kpiTopRisks").textContent=topCats.join(", ")||"None";
+  const topIRPs=results.map(r=>r.irp).sort((a,b)=>b-a); const CRS=Math.max(topIRPs[0]||0,0.5*(results.reduce((s,r)=>s+r.irp,0)/results.length||0));
+  const docColor=CRS>=0.70?"red":(CRS>=0.40?"yellow":"green");
+  let ar="Review", note="Read the top issues before trusting this policy."; if(docColor==="green" && have/expected.length>=0.7){ar="Go"; note="Meets baseline; keep a record and monitor.";} if(docColor==="red" || have/expected.length<0.4){ar="Stop"; note="Address high-risk findings before relying on this policy.";} document.getElementById("kpiAction").textContent=ar; document.getElementById("kpiActionNote").textContent=note;
+  const fcat=document.getElementById("filterCat").value; const fsev=document.getElementById("filterSev").value;
+  const findingsEl=document.getElementById("findings"); findingsEl.innerHTML="";
+  results.filter(r=>(fcat==="All"||r.cat===fcat)).filter(r=>(fsev==="All"||r.color.toUpperCase()===fsev)).forEach(r=>{const why=`I=${r.I}, L=${r.L}, S=${r.S} ⇒ IRP=${r.irp.toFixed(2)}`; findingsEl.insertAdjacentHTML("beforeend",`<div class="finding"><h4>${r.cat} <span class="pill ${r.color}">${r.color.toUpperCase()}</span></h4><div class="muted">${why}. Impact×Likelihood − Safeguards.</div><div><button onclick="openVerify('${r.cat}')">See evidence</button></div></div>`);});
+  if(document.getElementById("contrib").checked){const store=JSON.parse(localStorage.getItem("ai_terms_rollups")||"[]"); store.push({ts:Date.now(),ctx,CRS,results}); localStorage.setItem("ai_terms_rollups",JSON.stringify(store));}
+}
+document.getElementById("btnAnalyze").addEventListener("click", analyze);
+document.getElementById("filterCat").addEventListener("change", analyze);
+document.getElementById("filterSev").addEventListener("change", analyze);
+window.openVerify=function(category){const text=(document.getElementById("policyText").value||""); let patterns=[]; if(category==="SaleShare") patterns=signals.SaleShare.concat(signals.OptOut); else patterns=signals[category]||[]; let html=text.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); patterns.forEach(rx=>{html=html.replace(rx,m=>`<span class='hl'>${m}</span>`);}); const w=window.open("","_blank","width=800,height=600"); w.document.write(`<pre style="white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;background:#0b0d10;color:#e7ecf1;padding:16px;">${html}</pre>`); w.document.title="Verify — "+category;};
+document.getElementById("btnLoadSample").addEventListener("click",()=>{document.getElementById("policyText").value=`We may share your personal information with third parties for advertising. You can opt-out via our Do Not Sell page or by honoring the Global Privacy Control (GPC). We retain data as long as necessary for our business purposes. Children under 13 require parental consent; teens 13-15 must opt-in for sale/sharing. Some decisions are made by automated systems; you can request human review and appeal. You may access, delete, or correct your data by emailing privacy@example.com within 30 days.`;});
+document.getElementById("fileInput").addEventListener("change",ev=>{const f=ev.target.files[0]; if(!f) return; const reader=new FileReader(); if(f.type.startsWith("text")||/\.md$/i.test(f.name)){reader.onload=e=>document.getElementById("policyText").value=e.target.result; reader.readAsText(f);} else {reader.onload=e=>{const bytes=new Uint8Array(e.target.result); let ascii=""; for(let i=0;i<Math.min(bytes.length,200000);i++){const c=bytes[i]; if((c>=32&&c<=126)||c===10||c===13||c===9) ascii+=String.fromCharCode(c);} document.getElementById("policyText").value=ascii||"(PDF text extraction not available in this demo)";}; reader.readAsArrayBuffer(f);}});
+// Mini self-test
+document.getElementById("btnSelfTest").addEventListener("click",()=>{const ta=document.getElementById("policyText").getBoundingClientRect(); const ab=document.getElementById("btnAnalyze").getBoundingClientRect(); const dx=Math.max(0,Math.max(ta.left,ab.left)-Math.min(ta.right,ab.right)); const dy=Math.max(0,Math.max(ta.top,ab.top)-Math.min(ta.bottom,ab.bottom)); const dist=Math.hypot(dx,dy); const ok=dist<260; document.getElementById("btnLoadSample").click(); setTimeout(()=>{document.getElementById("btnAnalyze").click(); setTimeout(()=>{const findings=(document.getElementById("findings").children||[]).length; alert(`Self‑Test: Analyze proximity=${ok?'PASS':'FAIL'} (dist=${Math.round(dist)}px); Findings rendered=${findings>0?'PASS':'FAIL'} (count=${findings})`); },60); },40);});
+</script></body></html>

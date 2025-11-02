@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Terms & Policies Reviewer - AI Compliance & Governance Tool</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <!-- Header Navigation -->
+    <header class="header">
+        <div class="header-container">
+            <div class="header-brand">
+                <i class="fas fa-shield-alt"></i>
+                <h1>Terms & Policies Reviewer</h1>
+            </div>
+            <nav class="header-nav">
+                <button class="nav-btn active" data-page="dashboard">
+                    <i class="fas fa-tachometer-alt"></i> Dashboard
+                </button>
+                <button class="nav-btn" data-page="review">
+                    <i class="fas fa-search"></i> Document Review
+                </button>
+                <button class="nav-btn" data-page="compare">
+                    <i class="fas fa-balance-scale"></i> Compare Vendors
+                </button>
+                <button class="nav-btn" data-page="watchlist">
+                    <i class="fas fa-eye"></i> Watchlist
+                </button>
+                <button class="nav-btn" data-page="reports">
+                    <i class="fas fa-chart-bar"></i> Reports & Export
+                </button>
+                <button class="nav-btn" data-page="settings">
+                    <i class="fas fa-cog"></i> Settings
+                </button>
+            </nav>
+            <div class="header-actions">
+                <button class="theme-toggle" id="themeToggle">
+                    <i class="fas fa-moon"></i>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main-content">
+        <!-- Dashboard Page -->
+        <div class="page active" id="dashboard">
+            <div class="page-header">
+                <h2>Compliance Dashboard</h2>
+                <p class="page-subtitle">AI-powered governance and legal document analysis</p>
+            </div>
+            
+            <div class="dashboard-grid">
+                <div class="dashboard-stats">
+                    <div class="stat-card">
+                        <div class="stat-icon">
+                            <i class="fas fa-file-alt"></i>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-number">247</div>
+                            <div class="stat-label">Documents Analyzed</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon risk-high">
+                            <i class="fas fa-exclamation-triangle"></i>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-number">18</div>
+                            <div class="stat-label">Critical Risks Found</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">
+                            <i class="fas fa-eye"></i>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-number">32</div>
+                            <div class="stat-label">Vendors Tracked</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">
+                            <i class="fas fa-bell"></i>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-number">5</div>
+                            <div class="stat-label">New Alerts</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="dashboard-main">
+                    <div class="recent-analysis">
+                        <h3>Recent Analysis</h3>
+                        <div class="analysis-list" id="recentAnalysis">
+                            <!-- Populated by JavaScript -->
+                        </div>
+                    </div>
+
+                    <div class="quick-actions">
+                        <h3>Quick Actions</h3>
+                        <div class="action-buttons">
+                            <button class="btn btn--primary" data-action="new-review">
+                                <i class="fas fa-plus"></i> Start New Review
+                            </button>
+                            <button class="btn btn--secondary" data-action="compare">
+                                <i class="fas fa-balance-scale"></i> Compare Vendors
+                            </button>
+                            <button class="btn btn--secondary" data-action="export">
+                                <i class="fas fa-download"></i> Export Reports
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="watchlist-alerts">
+                        <h3>Watchlist Alerts</h3>
+                        <div class="alert-list" id="watchlistAlerts">
+                            <!-- Populated by JavaScript -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Document Review Page -->
+        <div class="page" id="review">
+            <div class="page-header">
+                <h2>Document Review</h2>
+                <p class="page-subtitle">Analyze terms, policies, and legal documents for compliance risks</p>
+            </div>
+
+            <div class="review-container">
+                <div class="input-section">
+                    <div class="input-tabs">
+                        <button class="tab-btn active" data-input="url">URL</button>
+                        <button class="tab-btn" data-input="upload">Upload</button>
+                        <button class="tab-btn" data-input="text">Paste Text</button>
+                    </div>
+
+                    <div class="input-content">
+                        <div class="input-panel active" id="url-input">
+                            <label class="form-label">Document URL</label>
+                            <input type="url" class="form-control" placeholder="https://example.com/privacy-policy" id="documentUrl">
+                            <div class="input-help">Enter the URL of a privacy policy, terms of service, or other legal document</div>
+                        </div>
+
+                        <div class="input-panel" id="upload-input">
+                            <div class="upload-area" id="uploadArea">
+                                <div class="upload-icon">
+                                    <i class="fas fa-cloud-upload-alt"></i>
+                                </div>
+                                <div class="upload-text">
+                                    <p><strong>Drop files here</strong> or click to browse</p>
+                                    <p class="upload-formats">Supports PDF, DOCX, RTF, TXT, HTML</p>
+                                </div>
+                                <input type="file" id="fileInput" multiple accept=".pdf,.docx,.rtf,.txt,.html" class="hidden">
+                            </div>
+                        </div>
+
+                        <div class="input-panel" id="text-input">
+                            <label class="form-label">Document Text</label>
+                            <textarea class="form-control" rows="8" placeholder="Paste your document text here..." id="documentText"></textarea>
+                        </div>
+                    </div>
+
+                    <div class="analysis-options">
+                        <label class="form-label">Analysis Mode</label>
+                        <div class="analysis-modes">
+                            <label class="mode-option">
+                                <input type="radio" name="analysisMode" value="quick" checked>
+                                <div class="mode-card">
+                                    <div class="mode-icon"><i class="fas fa-bolt"></i></div>
+                                    <div class="mode-title">Quick Scan</div>
+                                    <div class="mode-desc">Fast analysis of critical issues</div>
+                                </div>
+                            </label>
+                            <label class="mode-option">
+                                <input type="radio" name="analysisMode" value="full">
+                                <div class="mode-card">
+                                    <div class="mode-icon"><i class="fas fa-microscope"></i></div>
+                                    <div class="mode-title">Full Analysis</div>
+                                    <div class="mode-desc">Comprehensive review with all findings</div>
+                                </div>
+                            </label>
+                            <label class="mode-option">
+                                <input type="radio" name="analysisMode" value="progressive">
+                                <div class="mode-card">
+                                    <div class="mode-icon"><i class="fas fa-layer-group"></i></div>
+                                    <div class="mode-title">Progressive</div>
+                                    <div class="mode-desc">Summary first, expandable details</div>
+                                </div>
+                            </label>
+                            <label class="mode-option">
+                                <input type="radio" name="analysisMode" value="guided">
+                                <div class="mode-card">
+                                    <div class="mode-icon"><i class="fas fa-compass"></i></div>
+                                    <div class="mode-title">Guided</div>
+                                    <div class="mode-desc">Step-by-step walkthrough</div>
+                                </div>
+                            </label>
+                        </div>
+                    </div>
+
+                    <button class="btn btn--primary btn--full-width" id="analyzeBtn">
+                        <i class="fas fa-search"></i> Analyze Document
+                    </button>
+                </div>
+
+                <div class="results-section" id="resultsSection">
+                    <!-- Results populated by JavaScript -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Compare Vendors Page -->
+        <div class="page" id="compare">
+            <div class="page-header">
+                <h2>Compare Vendors</h2>
+                <p class="page-subtitle">Side-by-side comparison of vendor policies and risk profiles</p>
+            </div>
+
+            <div class="comparison-container">
+                <div class="vendor-selector">
+                    <div class="vendor-input">
+                        <label class="form-label">Select Vendors to Compare</label>
+                        <select class="form-control" id="vendor1Select">
+                            <option value="">Choose first vendor...</option>
+                        </select>
+                    </div>
+                    <div class="vendor-input">
+                        <select class="form-control" id="vendor2Select">
+                            <option value="">Choose second vendor...</option>
+                        </select>
+                    </div>
+                    <div class="vendor-input">
+                        <select class="form-control" id="vendor3Select">
+                            <option value="">Choose third vendor (optional)...</option>
+                        </select>
+                    </div>
+                    <button class="btn btn--primary" id="compareBtn">Compare</button>
+                </div>
+
+                <div class="comparison-results" id="comparisonResults">
+                    <!-- Comparison table populated by JavaScript -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Watchlist Page -->
+        <div class="page" id="watchlist">
+            <div class="page-header">
+                <h2>Vendor Watchlist</h2>
+                <p class="page-subtitle">Monitor vendor policy changes and receive alerts</p>
+            </div>
+
+            <div class="watchlist-container">
+                <div class="watchlist-actions">
+                    <button class="btn btn--primary" id="addVendorBtn">
+                        <i class="fas fa-plus"></i> Add Vendor
+                    </button>
+                    <div class="watchlist-filters">
+                        <select class="form-control" id="statusFilter">
+                            <option value="">All Status</option>
+                            <option value="updated">Recently Updated</option>
+                            <option value="no-changes">No Changes</option>
+                            <option value="error">Check Failed</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="watchlist-grid" id="watchlistGrid">
+                    <!-- Watchlist items populated by JavaScript -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Reports & Export Page -->
+        <div class="page" id="reports">
+            <div class="page-header">
+                <h2>Reports & Export</h2>
+                <p class="page-subtitle">Generate and export compliance reports</p>
+            </div>
+
+            <div class="reports-container">
+                <div class="report-types">
+                    <div class="report-card">
+                        <div class="report-icon">
+                            <i class="fas fa-file-pdf"></i>
+                        </div>
+                        <h3>Risk Assessment Report</h3>
+                        <p>Comprehensive analysis with findings and recommendations</p>
+                        <button class="btn btn--primary">Generate PDF</button>
+                    </div>
+
+                    <div class="report-card">
+                        <div class="report-icon">
+                            <i class="fas fa-table"></i>
+                        </div>
+                        <h3>Data Export</h3>
+                        <p>Raw analysis data in CSV or JSON format</p>
+                        <button class="btn btn--secondary">Export CSV</button>
+                    </div>
+
+                    <div class="report-card">
+                        <div class="report-icon">
+                            <i class="fas fa-share"></i>
+                        </div>
+                        <h3>Shareable Report</h3>
+                        <p>Generate read-only link for stakeholder sharing</p>
+                        <button class="btn btn--secondary">Create Link</button>
+                    </div>
+                </div>
+
+                <div class="rubric-scores">
+                    <h3>Rubric Scoring System</h3>
+                    <div class="rubric-grid" id="rubricGrid">
+                        <!-- Rubric scores populated by JavaScript -->
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Settings Page -->
+        <div class="page" id="settings">
+            <div class="page-header">
+                <h2>Settings</h2>
+                <p class="page-subtitle">Configure preferences and system settings</p>
+            </div>
+
+            <div class="settings-container">
+                <div class="settings-sections">
+                    <div class="settings-section">
+                        <h3>User Preferences</h3>
+                        <div class="form-group">
+                            <label class="form-label">Theme</label>
+                            <select class="form-control" id="themeSelect">
+                                <option value="auto">Auto (System)</option>
+                                <option value="light">Light</option>
+                                <option value="dark">Dark</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Default Analysis Mode</label>
+                            <select class="form-control">
+                                <option value="quick">Quick Scan</option>
+                                <option value="full">Full Analysis</option>
+                                <option value="progressive">Progressive Disclosure</option>
+                                <option value="guided">Guided Walkthrough</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="settings-section">
+                        <h3>Notifications</h3>
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" checked>
+                                <span class="checkbox-custom"></span>
+                                Email alerts for policy changes
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox">
+                                <span class="checkbox-custom"></span>
+                                Slack notifications
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="settings-section">
+                        <h3>Legal Disclaimers</h3>
+                        <div class="disclaimer-box">
+                            <p><strong>Important Notice:</strong> This tool provides informational analysis only and does not constitute legal advice. Always consult with qualified legal professionals for official compliance guidance.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay hidden" id="loadingOverlay">
+        <div class="loading-spinner">
+            <div class="spinner"></div>
+            <div class="loading-text">Analyzing document...</div>
+        </div>
+    </div>
+
+    <!-- Modal -->
+    <div class="modal hidden" id="modal">
+        <div class="modal-backdrop" id="modalBackdrop"></div>
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modalTitle">Modal Title</h3>
+                <button class="modal-close" id="modalClose">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <!-- Modal content -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div class="toast-container" id="toastContainer">
+        <!-- Toast notifications will be inserted here -->
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
