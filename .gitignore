@@ -49,6 +49,11 @@ pids
 coverage/
 .nyc_output/
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
 # Dependencies
 node_modules/
 jspm_packages/
