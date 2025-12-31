@@ -1,0 +1,14 @@
+fastapi
+httpx
+beautifulsoup4
+pytesseract
+pillow
+pypdf
+python-docx
+python-dotenv
+python-multipart
+pytest
+reportlab
+sqlalchemy
+striprtf
+uvicorn

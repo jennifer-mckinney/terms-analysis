@@ -1,0 +1,26 @@
+[
+  {
+    "id": "DOC-001",
+    "text": "We sell personal information to advertising partners. You may opt out via the Do Not Sell link. We retain data as long as necessary. Children under 13 require parental consent. You can access and delete your data.",
+    "jurisdictions": ["US-CA", "GDPR"],
+    "expected_categories": ["Sale/Share", "Retention", "User Rights", "Minors"]
+  },
+  {
+    "id": "DOC-002",
+    "text": "Some decisions are made solely by automated systems and profiling. You may request human review and appeal. We retain data for 30 days.",
+    "jurisdictions": ["US-CA", "GDPR"],
+    "expected_categories": ["ADM", "Retention", "User Rights"]
+  },
+  {
+    "id": "DOC-003",
+    "text": "We may change these terms at any time without notice. By continuing to use the service, you are deemed to consent. We are not liable for any damages.",
+    "jurisdictions": ["US-CA", "GDPR"],
+    "expected_categories": ["Unilateral Changes", "Dark Patterns", "Liability"]
+  },
+  {
+    "id": "DOC-004",
+    "text": "We collect sensitive personal information including biometric identifiers, health data, and precise geolocation.",
+    "jurisdictions": ["US-CA", "GDPR"],
+    "expected_categories": ["Sensitive Data"]
+  }
+]

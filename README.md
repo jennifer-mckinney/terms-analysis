@@ -98,6 +98,9 @@ It accelerates triage and due diligence by highlighting potential issues with tr
 ## Development Notes
 
 See `docs/specs/` for detailed technical specifications and requirements.
+See `docs/LOCAL_DATA.md` for local-only data handling and backup guidance.
+OCR fallback for scanned PDFs requires local Tesseract (`brew install tesseract`).
+If you want a different LM Studio target, add a `./.env` with e.g. `LM_STUDIO_BASE_URL=http://localhost:1234/v1` and rerun.
 
 ## License
 

@@ -31,11 +31,17 @@
                 <button class="nav-btn" data-page="reports">
                     <i class="fas fa-chart-bar"></i> Reports & Export
                 </button>
+                <button class="nav-btn" data-page="reviews">
+                    <i class="fas fa-user-check"></i> Review Queue
+                </button>
                 <button class="nav-btn" data-page="settings">
                     <i class="fas fa-cog"></i> Settings
                 </button>
             </nav>
             <div class="header-actions">
+                <div class="backend-status" id="backendStatus">
+                    <span class="status status--warning">Backend: Checking...</span>
+                </div>
                 <button class="theme-toggle" id="themeToggle">
                     <i class="fas fa-moon"></i>
                 </button>
@@ -59,7 +65,7 @@
                             <i class="fas fa-file-alt"></i>
                         </div>
                         <div class="stat-content">
-                            <div class="stat-number">247</div>
+                            <div class="stat-number" id="statDocuments">0</div>
                             <div class="stat-label">Documents Analyzed</div>
                         </div>
                     </div>
@@ -68,8 +74,8 @@
                             <i class="fas fa-exclamation-triangle"></i>
                         </div>
                         <div class="stat-content">
-                            <div class="stat-number">18</div>
-                            <div class="stat-label">Critical Risks Found</div>
+                            <div class="stat-number" id="statNeedsReview">0</div>
+                            <div class="stat-label">Needs Review</div>
                         </div>
                     </div>
                     <div class="stat-card">
@@ -77,7 +83,7 @@
                             <i class="fas fa-eye"></i>
                         </div>
                         <div class="stat-content">
-                            <div class="stat-number">32</div>
+                            <div class="stat-number" id="statWatchlist">0</div>
                             <div class="stat-label">Vendors Tracked</div>
                         </div>
                     </div>
@@ -86,7 +92,7 @@
                             <i class="fas fa-bell"></i>
                         </div>
                         <div class="stat-content">
-                            <div class="stat-number">5</div>
+                            <div class="stat-number" id="statAlerts">0</div>
                             <div class="stat-label">New Alerts</div>
                         </div>
                     </div>
@@ -163,6 +169,26 @@
                         <div class="input-panel" id="text-input">
                             <label class="form-label">Document Text</label>
                             <textarea class="form-control" rows="8" placeholder="Paste your document text here..." id="documentText"></textarea>
+                        </div>
+                    </div>
+
+                    <div class="analysis-options">
+                        <label class="form-label">Jurisdictions</label>
+                        <div class="analysis-modes">
+                            <label class="mode-option">
+                                <input type="checkbox" name="jurisdiction" value="US-CA" checked>
+                                <div class="mode-card">
+                                    <div class="mode-title">US-CA (CCPA/CPRA)</div>
+                                    <div class="mode-desc">California privacy requirements</div>
+                                </div>
+                            </label>
+                            <label class="mode-option">
+                                <input type="checkbox" name="jurisdiction" value="GDPR" checked>
+                                <div class="mode-card">
+                                    <div class="mode-title">GDPR</div>
+                                    <div class="mode-desc">EU privacy requirements</div>
+                                </div>
+                            </label>
                         </div>
                     </div>
 
@@ -266,7 +292,7 @@
                             <option value="">All Status</option>
                             <option value="updated">Recently Updated</option>
                             <option value="no-changes">No Changes</option>
-                            <option value="error">Check Failed</option>
+                            <option value="check-failed">Check Failed</option>
                         </select>
                     </div>
                 </div>
@@ -292,7 +318,7 @@
                         </div>
                         <h3>Risk Assessment Report</h3>
                         <p>Comprehensive analysis with findings and recommendations</p>
-                        <button class="btn btn--primary">Generate PDF</button>
+                        <button class="btn btn--primary" onclick="exportReports('pdf')">Generate PDF</button>
                     </div>
 
                     <div class="report-card">
@@ -301,7 +327,10 @@
                         </div>
                         <h3>Data Export</h3>
                         <p>Raw analysis data in CSV or JSON format</p>
-                        <button class="btn btn--secondary">Export CSV</button>
+                        <div class="action-buttons">
+                            <button class="btn btn--secondary" onclick="exportReports('csv')">Export CSV</button>
+                            <button class="btn btn--secondary" onclick="exportReports('json')">Export JSON</button>
+                        </div>
                     </div>
 
                     <div class="report-card">
@@ -310,7 +339,7 @@
                         </div>
                         <h3>Shareable Report</h3>
                         <p>Generate read-only link for stakeholder sharing</p>
-                        <button class="btn btn--secondary">Create Link</button>
+                        <button class="btn btn--secondary" onclick="showToast('Share links are not enabled yet', 'info')">Create Link</button>
                     </div>
                 </div>
 
@@ -319,6 +348,27 @@
                     <div class="rubric-grid" id="rubricGrid">
                         <!-- Rubric scores populated by JavaScript -->
                     </div>
+                </div>
+
+                <div class="rubric-scores">
+                    <h3>Review Queue</h3>
+                    <div class="review-queue" id="reviewQueue">
+                        <!-- Review queue populated by JavaScript -->
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Review Queue Page -->
+        <div class="page" id="reviews">
+            <div class="page-header">
+                <h2>Review Queue</h2>
+                <p class="page-subtitle">Analyses needing human review (confidence below 0.80)</p>
+            </div>
+
+            <div class="review-container">
+                <div class="review-list" id="reviewList">
+                    <!-- Review items populated by JavaScript -->
                 </div>
             </div>
         </div>

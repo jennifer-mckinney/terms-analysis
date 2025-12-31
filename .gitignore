@@ -76,6 +76,10 @@ tmp/
 temp/
 *.tmp
 
+# Local data
+data/
+*.db
+
 # Archive backups (already in archive/ but ignore if generated)
 *.bak
 *.backup
