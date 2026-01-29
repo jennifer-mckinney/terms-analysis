@@ -1,0 +1,64 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#4a9d9a', 'primaryTextColor': '#fff', 'primaryBorderColor': '#357a77', 'lineColor': '#5c4d3d', 'secondaryColor': '#f5f0e8', 'tertiaryColor': '#fff'}}}%%
+
+flowchart TB
+    subgraph Client["Browser (Client-Side)"]
+        UI["Web UI<br/>index.html"]
+        JS["Application Logic<br/>app.js"]
+        CSS["Styling<br/>style.css"]
+        LS[("localStorage<br/>Persistence")]
+    end
+
+    subgraph Backend["FastAPI Backend (localhost:9000)"]
+        API["API Routes<br/>main.py"]
+
+        subgraph Services["Service Layer"]
+            ING["Ingest Service<br/>PDF/URL/Text Parsing"]
+            RUL["Rules Engine<br/>Regex Pattern Matching"]
+            ANA["Analyzer<br/>Risk Scoring (IRP)"]
+            VAL["Validation<br/>Pydantic Schemas"]
+            DIF["Diffing Service<br/>Change Detection"]
+        end
+
+        subgraph Data["Data Layer"]
+            DB[("SQLite<br/>terms.db")]
+            MOD["SQLAlchemy Models"]
+        end
+    end
+
+    subgraph External["External Services (Local)"]
+        LM["LM Studio Server<br/>localhost:1234"]
+        MODEL["Local LLM<br/>qwen3-vl-4b-instruct"]
+    end
+
+    subgraph DocumentSources["Document Sources"]
+        URL["URLs"]
+        PDF["PDF Files"]
+        TXT["Text/Paste"]
+        DOC["DOCX/RTF"]
+    end
+
+    %% Client connections
+    UI --> JS
+    JS --> CSS
+    JS <--> LS
+
+    %% API connections
+    JS -->|"HTTP REST"| API
+    API --> ING
+    API --> VAL
+
+    %% Service flow
+    ING --> RUL
+    RUL --> ANA
+    ANA --> DIF
+
+    %% LLM connection
+    ANA -->|"OpenAI-compatible API"| LM
+    LM --> MODEL
+
+    %% Data connections
+    API <--> MOD
+    MOD <--> DB
+
+    %% Document sources
+    DocumentSources --> ING
