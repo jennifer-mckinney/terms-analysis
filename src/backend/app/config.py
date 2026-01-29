@@ -24,7 +24,7 @@ def _data_dir() -> Path:
 @dataclass(frozen=True)
 class Settings:
     lm_studio_base_url: str = os.getenv(
-        "LM_STUDIO_BASE_URL", "http://192.168.1.7:1234/v1"
+        "LM_STUDIO_BASE_URL", "http://localhost:1234/v1"
     )
     lm_studio_model: str = os.getenv(
         "LM_STUDIO_MODEL", "qwen3-vl-4b-instruct-mlx"
