@@ -10,7 +10,7 @@
 
 | Overall Risk Score | Grade | Assessment |
 |--------------------|-------|------------|
-| **0.38** | **B+** | Low Risk |
+| **0.112** | **A** | Low Risk |
 
 The backend technology stack presents **low overall risk** from a terms/data practices perspective. All Python libraries are permissively licensed (MIT, BSD, Apache 2.0) with no telemetry or data collection. The primary risk comes from **LM Studio**, which has concerning liability limitations and unilateral change clauses, though its privacy practices are excellent for local use.
 
