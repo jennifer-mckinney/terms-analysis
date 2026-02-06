@@ -20,10 +20,7 @@ This project has been organized and prepared for GitHub version control.
 
 ### Source Locations
 
-Files were consolidated from:
-- `/Users/jennifermckinney/Downloads/` (original wireframes and demos)
-- `/Users/jennifermckinney/Documents/03_AI_Research/` (specification PDFs)
-- `/Users/jennifermckinney/Documents/05_Technical_Development/` (demo HTML)
+Files were consolidated from various local directories (wireframes, demos, specification PDFs, and demo HTML files).
 
 ### Directory Structure
 
@@ -65,7 +62,7 @@ terms-analysis/
 
 ### 1. Initialize Repository
 ```bash
-cd /Users/jennifermckinney/Documents/_AUTOMATION/Claude_Projects/terms-analysis
+cd /path/to/terms-analysis
 git init
 ```
 

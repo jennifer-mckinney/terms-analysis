@@ -48,6 +48,20 @@ pids
 # Testing
 coverage/
 .nyc_output/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
 
 # Dependencies
 node_modules/
@@ -75,6 +89,10 @@ out/
 tmp/
 temp/
 *.tmp
+
+# Local data
+data/
+*.db
 
 # Archive backups (already in archive/ but ignore if generated)
 *.bak

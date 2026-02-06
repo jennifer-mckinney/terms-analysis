@@ -812,6 +812,11 @@ select.form-control {
   gap: var(--space-12);
 }
 
+.backend-status {
+  display: flex;
+  align-items: center;
+}
+
 .theme-toggle {
   display: flex;
   align-items: center;
@@ -1229,6 +1234,21 @@ select.form-control {
   color: var(--color-text-secondary);
 }
 
+.verify-view pre {
+  max-height: 420px;
+  overflow: auto;
+}
+
+.verify-line {
+  display: block;
+  padding: 0 var(--space-8);
+}
+
+.verify-line--hit {
+  background: rgba(234, 179, 8, 0.18);
+  border-left: 3px solid #eab308;
+}
+
 .confidence-bar {
   width: 100px;
   height: 4px;
@@ -1429,6 +1449,26 @@ select.form-control {
 .rubric-score {
   font-weight: var(--font-weight-bold);
   color: var(--color-primary);
+}
+
+.review-queue {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  margin-top: var(--space-16);
+}
+
+.review-item {
+  border: 1px solid var(--color-card-border-inner);
+  border-radius: var(--radius-base);
+  padding: var(--space-12);
+  background: var(--color-surface);
+}
+
+.review-actions {
+  display: flex;
+  gap: var(--space-8);
+  margin-top: var(--space-8);
 }
 
 /* Settings Styles */

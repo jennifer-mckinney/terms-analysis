@@ -1,0 +1,84 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#4a9d9a', 'primaryTextColor': '#fff', 'primaryBorderColor': '#357a77', 'lineColor': '#5c4d3d'}}}%%
+
+sequenceDiagram
+    autonumber
+
+    participant U as User
+    participant UI as Web UI<br/>(Browser)
+    participant API as FastAPI<br/>(localhost:9000)
+    participant ING as Ingest<br/>Service
+    participant RUL as Rules<br/>Engine
+    participant LLM as LM Studio<br/>(localhost:1234)
+    participant DB as SQLite<br/>Database
+
+    %% Document Analysis Flow
+    rect rgb(245, 240, 232)
+        Note over U,DB: Document Analysis Flow
+
+        U->>UI: Upload document / Enter URL / Paste text
+        UI->>API: POST /analyze/file<br/>POST /analyze/url<br/>POST /analyze
+
+        API->>ING: Parse document
+        ING->>ING: Extract text<br/>(PDF/DOCX/RTF/HTML)
+        ING-->>API: Extracted text content
+
+        API->>RUL: Apply pattern matching
+        RUL->>RUL: Run regex rules<br/>for 9 risk categories
+        RUL-->>API: Rule-based findings
+
+        API->>LLM: POST /v1/chat/completions
+        Note over LLM: Analyze ambiguous<br/>clauses with local model
+        LLM-->>API: LLM-enhanced findings
+
+        API->>API: Merge findings<br/>Calculate IRP scores
+        API->>DB: INSERT analysis record
+        DB-->>API: analysis_id
+
+        API-->>UI: AnalysisPayload JSON
+        UI-->>U: Display results with<br/>risk scores & citations
+    end
+
+    %% Watchlist Flow
+    rect rgb(232, 245, 240)
+        Note over U,DB: Watchlist Monitoring Flow
+
+        U->>UI: Add document to watchlist
+        UI->>API: POST /watchlist
+        API->>DB: INSERT watchlist item
+        DB-->>API: item_id
+        API-->>UI: WatchlistItemPayload
+        UI-->>U: Confirm added to watchlist
+    end
+
+    %% Refresh/Change Detection Flow
+    rect rgb(245, 232, 240)
+        Note over U,DB: Change Detection Flow
+
+        U->>UI: Refresh watchlist item
+        UI->>API: POST /watchlist/{id}/refresh
+
+        API->>ING: Re-fetch document from URL
+        ING-->>API: New document content
+
+        API->>DB: GET previous analysis
+        DB-->>API: Previous findings
+
+        API->>API: Diff analysis<br/>Calculate risk delta
+
+        API->>DB: UPDATE watchlist item
+        API-->>UI: Updated findings + delta
+        UI-->>U: Show changes highlighted
+    end
+
+    %% Export Flow
+    rect rgb(240, 245, 232)
+        Note over U,DB: Export Flow
+
+        U->>UI: Request PDF/CSV export
+        UI->>API: GET /exports/analysis/{id}.pdf<br/>GET /exports/analyses.csv
+        API->>DB: Fetch analysis data
+        DB-->>API: Analysis records
+        API->>API: Generate report<br/>(ReportLab for PDF)
+        API-->>UI: File download
+        UI-->>U: Save file
+    end

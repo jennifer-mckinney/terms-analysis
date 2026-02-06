@@ -1,0 +1,20 @@
+[
+  {
+    "id": "doc-sale-retention",
+    "jurisdictions": ["US-CA", "GDPR"],
+    "text": "We may sell personal information to third parties for advertising. We retain data as long as necessary. You may access or delete your data by contacting support.",
+    "labels": ["Sale/Share", "Retention", "User Rights"]
+  },
+  {
+    "id": "doc-adm-minors",
+    "jurisdictions": ["US-CA", "GDPR"],
+    "text": "Our service uses automated decision making and profiling. Children under 13 require parental consent.",
+    "labels": ["ADM", "Minors"]
+  },
+  {
+    "id": "doc-clean",
+    "jurisdictions": ["US-CA", "GDPR"],
+    "text": "We provide customer support and maintain service availability. Contact us for questions.",
+    "labels": []
+  }
+]
