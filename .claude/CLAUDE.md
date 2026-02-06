@@ -52,6 +52,18 @@ Access these via `@.claude/library/<file>` when deeper context is needed.
 | **LIB-RULES** | `@.claude/library/LIB-RULES.md` | Rule engine patterns, 9 risk categories, IRP scoring |
 | **LIB-EVAL** | `@.claude/library/LIB-EVAL.md` | Quality rubric, F1/Kappa metrics, grading thresholds |
 
+## Skills
+
+Invoke via `/skill-name` or auto-triggered by matching descriptions.
+
+| Skill | Trigger | Purpose |
+|-------|---------|---------|
+| `/test-suite` | "run tests", "check coverage" | Run pytest + coverage, analyze failures, report gaps |
+| `/write-tests` | "write tests for X", "add coverage" | Guided workflow: read source → plan cases → write tests → verify |
+| `/evaluate` | "run evaluation", "check F1" | Run gold dataset evaluation, report F1/Kappa vs targets |
+| `/review` | "review this", "check changes" | Code quality review against project conventions |
+| `/webapp-testing` | "test the webapp", "browser test" | Playwright-based frontend + API testing |
+
 ## Critical Constraints
 
 - **IMPORTANT:** All data stays local. No external API calls except to local LM Studio.
