@@ -4,23 +4,34 @@
 
 | Key | Value |
 |-----|-------|
-| Purpose | Analyze ToS/Privacy Policies for compliance risks using rule-based + LLM detection |
-| Stack | FastAPI (Python) backend, vanilla JS SPA frontend, SQLite, LM Studio (local LLM) |
-| Jurisdictions | US-CA (CCPA/CPRA), EU (GDPR) |
+| Purpose | Analyze ToS/Privacy Policies for compliance risks using rule-based + LLM + RAG detection |
+| Stack | FastAPI backend, vanilla JS SPA, SQLite, SaulLM-7B (local legal LLM), FAISS (embeddings) |
+| Jurisdictions | US-CA (CCPA/CPRA), EU (GDPR), Canada (PIPEDA), US-CO, US-CT, US-NY |
 | Risk Method | IRP Score = 0.5*(I/5) + 0.4*(L/5) - 0.3*(S/5) |
-| Status | Beta — backend on branch `claude/analyze-project-1Q21W`, tests on `claude/improve-test-coverage-DGT1c` |
+| Status | Beta — backend on `claude/analyze-project-1Q21W`, tests on `claude/improve-test-coverage-DGT1c` |
+
+## Hard Requirements
+
+- **IMPORTANT:** All dependencies must be open source (Apache 2.0, MIT, BSD preferred).
+- **IMPORTANT:** No tools/services from companies facing investor lawsuits.
+- **IMPORTANT:** All dependencies must score IRP Grade A or higher.
+- **IMPORTANT:** All data stays local. No external API calls.
+- **IMPORTANT:** LLM failures must always fall back to rule-only findings with reduced confidence.
+- **IMPORTANT:** No OpenAI dependency. LLM inference is local-only via Ollama + SaulLM.
+- Confidence < 0.80 triggers human-in-the-loop review.
+- Rule confidence is clamped to [0.35, 0.95].
+- Risk scores map to grades: A (0-3), B (3-5), C+ (5-7), C (7-8), D+ (8-9), D (9-10).
 
 ## Project Map
 
 | Path | Purpose |
 |------|---------|
-| `src/webapp/` | Static SPA: `index.html`, `app.js` (1284 lines), `style.css` |
-| `src/backend/app/` | FastAPI app: `main.py` (15+ endpoints), `services/`, `schemas.py`, `models.py` |
+| `src/webapp/` | Static SPA: `index.html`, `app.js`, `style.css` |
+| `src/backend/app/` | FastAPI app: `main.py` (16 endpoints), `services/`, `schemas.py`, `models.py` |
 | `src/backend/app/services/` | Core logic: `rules.py`, `analyzer.py`, `validation.py`, `ingest.py`, `lm_studio.py`, `diffing.py`, `prompts.py` |
-| `src/backend/tests/` | pytest suite: `test_rules.py`, `test_ingest.py`, `test_llm_failure.py` |
+| `src/backend/tests/` | pytest suite |
 | `src/backend/evaluation/` | Gold dataset + F1/Kappa evaluation scripts |
-| `src/demos/` | 6 standalone HTML demos (v1-v7) |
-| `docs/` | `DESIGN.md`, `TODO.md`, `LOCAL_DATA.md`, `reports/`, `specs/`, `wireframes/` |
+| `docs/` | `DESIGN.md`, `TODO.md`, `reports/`, `specs/`, `wireframes/` |
 
 ## Commands
 
@@ -41,20 +52,19 @@
 
 ## Reference Library
 
-Access these via `@.claude/library/<file>` when deeper context is needed.
+Access via `@.claude/library/<file>` when deeper context is needed.
 
 | Key | File | Use When |
 |-----|------|----------|
-| **LIB-ARCH** | `@.claude/library/LIB-ARCH.md` | Understanding architecture, data flow, failure modes |
-| **LIB-STACK** | `@.claude/library/LIB-STACK.md` | Checking dependencies, versions, config settings |
-| **LIB-TEST** | `@.claude/library/LIB-TEST.md` | Planning test implementation, checking coverage gaps |
+| **LIB-ARCH** | `@.claude/library/LIB-ARCH.md` | Architecture, data flow, failure modes, RAG pipeline |
+| **LIB-STACK** | `@.claude/library/LIB-STACK.md` | Dependencies, versions, config, approved tools |
+| **LIB-LEGAL** | `@.claude/library/LIB-LEGAL.md` | Legal LLM/embedding models, RAG architecture, legal corpora |
+| **LIB-TEST** | `@.claude/library/LIB-TEST.md` | Test coverage gaps, implementation plan |
 | **LIB-API** | `@.claude/library/LIB-API.md` | API endpoints, request/response contracts |
 | **LIB-RULES** | `@.claude/library/LIB-RULES.md` | Rule engine patterns, 9 risk categories, IRP scoring |
 | **LIB-EVAL** | `@.claude/library/LIB-EVAL.md` | Quality rubric, F1/Kappa metrics, grading thresholds |
 
 ## Skills
-
-Invoke via `/skill-name` or auto-triggered by matching descriptions.
 
 | Skill | Trigger | Purpose |
 |-------|---------|---------|
@@ -63,11 +73,5 @@ Invoke via `/skill-name` or auto-triggered by matching descriptions.
 | `/evaluate` | "run evaluation", "check F1" | Run gold dataset evaluation, report F1/Kappa vs targets |
 | `/review` | "review this", "check changes" | Code quality review against project conventions |
 | `/webapp-testing` | "test the webapp", "browser test" | Playwright-based frontend + API testing |
-
-## Critical Constraints
-
-- **IMPORTANT:** All data stays local. No external API calls except to local LM Studio.
-- **IMPORTANT:** LLM failures must always fall back to rule-only findings with reduced confidence.
-- Confidence < 0.80 triggers human-in-the-loop review.
-- Rule confidence is clamped to [0.35, 0.95].
-- Risk scores map to grades: A (0-3), B (3-5), C+ (5-7), C (7-8), D+ (8-9), D (9-10).
+| `/dependency-audit` | "audit dependency", "check license" | IRP-score a dependency against hard requirements |
+| `/legal-kb` | "update legal corpus", "add jurisdiction" | Manage legal knowledge base for RAG pipeline |
