@@ -75,3 +75,4 @@ Access via `@.claude/library/<file>` when deeper context is needed.
 | `/webapp-testing` | "test the webapp", "browser test" | Playwright-based frontend + API testing |
 | `/dependency-audit` | "audit dependency", "check license" | IRP-score a dependency against hard requirements |
 | `/legal-kb` | "update legal corpus", "add jurisdiction" | Manage legal knowledge base for RAG pipeline |
+| `/ralph-loop` | "iterate on X", "loop until done" | Self-referential dev loop: same prompt repeated until completion promise met |
