@@ -32,6 +32,7 @@
 | `src/backend/tests/` | pytest suite |
 | `src/backend/evaluation/` | Gold dataset + F1/Kappa evaluation scripts |
 | `docs/` | `DESIGN.md`, `TODO.md`, `reports/`, `specs/`, `wireframes/` |
+| `docs/plans/` | Architecture analysis, agent/skills audit, roadmap documents |
 
 ## Commands
 
@@ -63,6 +64,13 @@ Access via `@.claude/library/<file>` when deeper context is needed.
 | **LIB-API** | `@.claude/library/LIB-API.md` | API endpoints, request/response contracts |
 | **LIB-RULES** | `@.claude/library/LIB-RULES.md` | Rule engine patterns, 9 risk categories, IRP scoring |
 | **LIB-EVAL** | `@.claude/library/LIB-EVAL.md` | Quality rubric, F1/Kappa metrics, grading thresholds |
+
+## Plans & Analysis Documents
+
+| Document | Path | Purpose |
+|----------|------|---------|
+| **Data Integrity & Architecture** | `docs/plans/data-integrity-architecture-analysis.md` | Pipeline integrity audit, current→future state, codebase gaps (P0-P3) |
+| **Agent & Skills Audit** | `docs/plans/agent-skills-surface-area-audit.md` | Skills inventory, PEAS per skill, subagent patterns, gap analysis |
 
 ## Skills
 
