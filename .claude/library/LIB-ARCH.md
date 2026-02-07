@@ -7,7 +7,7 @@
 | Web UI | HTML/CSS/JS | `src/webapp/` | Static SPA, communicates via fetch to backend |
 | API Server | FastAPI + Uvicorn | `src/backend/app/main.py` | 15+ REST endpoints, async |
 | Rule Engine | Python regex | `src/backend/app/services/rules.py` | Baseline signal detection for 9 categories |
-| LLM Client | httpx async | `src/backend/app/services/lm_studio.py` | OpenAI-compatible calls to local LM Studio |
+| LLM Client | httpx async | `src/backend/app/services/lm_studio.py` | Chat completions calls to local LM Studio |
 | Analyzer | Python async | `src/backend/app/services/analyzer.py` | Orchestrates rules + LLM + validation + scoring |
 | Validator | Python | `src/backend/app/services/validation.py` | Hallucination guard, citation checker |
 | Ingestion | Python | `src/backend/app/services/ingest.py` | Multi-format text extraction (HTML/PDF/DOCX/RTF/TXT/OCR) |

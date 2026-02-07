@@ -8,7 +8,7 @@
 ## Architecture
 - `src/webapp/`: static UI (HTML/CSS/JS) served via local HTTP server.
 - `src/backend/`: FastAPI backend for ingestion, analysis, and storage.
-- LM Studio: OpenAI-compatible endpoint at `LM_STUDIO_BASE_URL` (default `http://192.168.1.7:1234/v1`).
+- LM Studio: Local LLM inference server at `LM_STUDIO_BASE_URL` (default `http://localhost:1234/v1`).
 - Local data: SQLite at `data/terms_analysis.db` (gitignored).
 
 ## Data Flow
