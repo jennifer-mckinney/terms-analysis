@@ -3,10 +3,41 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictFloat
 
 
-Jurisdiction = Literal["US-CA", "GDPR"]
+Jurisdiction = Literal[
+    "US-CA",
+    "US-FED",
+    "US-NY",
+    "US-TX",
+    "US-VA",
+    "US-CO",
+    "US-CT",
+    "US-IL",
+    "US-NJ",
+    "US-MN",
+    "US-OR",
+    "GDPR",
+    "UK-GDPR",
+    "LGPD",
+    "PIPEDA",
+    "CA-QC",
+    "POPIA",
+    "PDPA-KE",
+    "DPDP",
+    "APPI",
+    "PIPA",
+    "APP",
+    "PDPA-TH",
+    "NDPR",
+    "ICCPR-17",
+    "COE-108",
+    "EU-AI-ACT",
+    "COE-AI-225",
+    "OECD-AI",
+    "UNESCO-AI",
+]
 Severity = Literal["Low", "Medium", "High", "Critical"]
 
 
@@ -103,7 +134,7 @@ class WatchlistItemPayload(BaseModel):
     last_checked: datetime
     changes_since: Optional[datetime] = None
     change_count: int
-    risk_delta: str
+    risk_delta: Optional[StrictFloat] = None
     change_summary: Optional[str] = None
 
 

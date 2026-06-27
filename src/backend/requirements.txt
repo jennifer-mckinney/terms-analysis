@@ -12,3 +12,5 @@ reportlab
 sqlalchemy
 striprtf
 uvicorn
+langdetect
+rank_bm25

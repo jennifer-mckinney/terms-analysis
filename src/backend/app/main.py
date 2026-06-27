@@ -1,17 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+import csv
 import json
 import logging
+from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timezone
+from io import BytesIO, StringIO
 from uuid import uuid4
-from datetime import datetime
-from io import BytesIO
-import threading
-import time
-import asyncio
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import Session
 
 from .config import settings
@@ -34,8 +34,23 @@ from .services.ingest import extract_text_from_bytes, fetch_url_text
 from .services.rules import detect_findings
 
 
-app = FastAPI(title="Terms Analysis Backend", version="0.1.0")
 logger = logging.getLogger("uvicorn.error")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    task: asyncio.Task | None = None
+    if settings.watchlist_refresh_seconds > 0:
+        task = asyncio.create_task(_watchlist_loop_async())
+    yield
+    if task:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+app = FastAPI(title="Terms Analysis Backend", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -46,35 +61,26 @@ app.add_middleware(
 )
 
 
-@app.on_event("startup")
-def on_startup() -> None:
-    init_db()
-    if settings.watchlist_refresh_seconds > 0:
-        thread = threading.Thread(target=_watchlist_loop, daemon=True)
-        thread.start()
-
-
 @app.get("/health")
 def health() -> dict:
     return {
         "status": "ok",
-        "lm_studio_base_url": settings.lm_studio_base_url,
-        "lm_studio_model": settings.lm_studio_model,
+        "model_world": settings.model_world,
+        "model_eu": settings.model_eu,
         "review_threshold": settings.review_threshold,
-        "database_url": settings.database_url,
     }
 
 
-def _watchlist_loop() -> None:
+async def _watchlist_loop_async() -> None:
     while True:
         try:
-            _refresh_all_watchlist_items()
+            await _refresh_all_watchlist_items()
         except Exception:
             pass
-        time.sleep(settings.watchlist_refresh_seconds)
+        await asyncio.sleep(settings.watchlist_refresh_seconds)
 
 
-def _refresh_all_watchlist_items() -> None:
+async def _refresh_all_watchlist_items() -> None:
     with db_session() as db:
         if settings.watchlist_refresh_seconds <= 0:
             return
@@ -87,22 +93,22 @@ def _refresh_all_watchlist_items() -> None:
             try:
                 if item.source_url is None:
                     continue
-                text = asyncio.run(fetch_url_text(item.source_url))
+                text = await fetch_url_text(item.source_url)
             except Exception:
                 item.status = "Check Failed"
                 continue
-            new_hash = content_hash(text or "")
-            change_count, summary = diff_summary(item.last_document_text or "", text or "")
+            current_text = text or ""
+            new_hash = content_hash(current_text)
+            change_count, summary = diff_summary(item.last_document_text or "", current_text)
             changed = item.last_document_hash and item.last_document_hash != new_hash
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             item.last_checked = now
-            rule_findings = detect_findings(text or "", ["US-CA", "GDPR"])
+            rule_findings = detect_findings(current_text, ["US-CA", "GDPR"])
             new_score = calculate_risk_score(rule_findings)
             if item.last_risk_score is not None:
-                delta = round(new_score - item.last_risk_score, 2)
-                item.risk_delta = f"{delta:+.2f}"
+                item.risk_delta = round(new_score - item.last_risk_score, 2)
             else:
-                item.risk_delta = "0"
+                item.risk_delta = 0.0
             item.last_risk_score = new_score
             if changed:
                 item.status = "Updated"
@@ -113,13 +119,49 @@ def _refresh_all_watchlist_items() -> None:
                 item.status = "No Changes"
                 item.change_count = 0
                 item.change_summary = ""
-            item.last_document_text = text
+            item.last_document_text = current_text[:50_000]
             item.last_document_hash = new_hash
         db.commit()
 
 
 def _clamp(value: float, lower: float = 0.0, upper: float = 10.0) -> float:
     return max(lower, min(upper, value))
+
+
+def _persist_analysis(
+    payload: AnalysisPayload,
+    source_type: str,
+    source_value: str | None,
+    doc_type: str | None,
+    source_url: str | None,
+    db: Session,
+) -> None:
+    """Persist an analysis payload and optional review item to the database."""
+    if hasattr(payload, "model_dump_json"):
+        payload_json = payload.model_dump_json()
+    else:
+        payload_json = payload.json()
+
+    analysis = Analysis(
+        id=payload.id,
+        source_type=source_type,
+        source_value=source_value,
+        doc_name=payload.name,
+        doc_type=doc_type,
+        source_url=source_url,
+        status=payload.status,
+        confidence=payload.confidence,
+        risk_score=payload.risk_score,
+        grade=payload.grade,
+        document_text=payload.document_text,
+        result_json=payload_json,
+    )
+    db.add(analysis)
+
+    if payload.review_required:
+        db.add(ReviewItem(id=str(uuid4()), analysis_id=payload.id, status="pending"))
+
+    db.commit()
 
 
 def _compute_rubric_scores(records: list[Analysis]) -> RubricScores:
@@ -160,36 +202,14 @@ async def analyze(request: AnalyzeRequest, db: Session = Depends(get_db)):
         source_url=request.source_url,
     )
     payload = result.payload
-    if hasattr(payload, "model_dump_json"):
-        payload_json = payload.model_dump_json()
-    else:
-        payload_json = payload.json()
-
-    analysis = Analysis(
-        id=payload.id,
+    _persist_analysis(
+        payload=payload,
         source_type="text",
         source_value=request.source_url,
-        doc_name=resolved_name,
         doc_type=request.doc_type,
         source_url=request.source_url,
-        status=payload.status,
-        confidence=payload.confidence,
-        risk_score=payload.risk_score,
-        grade=payload.grade,
-        document_text=payload.document_text,
-        result_json=payload_json,
+        db=db,
     )
-    db.add(analysis)
-
-    if payload.review_required:
-        review_item = ReviewItem(
-            id=str(uuid4()),
-            analysis_id=payload.id,
-            status="pending",
-        )
-        db.add(review_item)
-
-    db.commit()
     return payload
 
 
@@ -202,8 +222,10 @@ async def analyze_url(request: AnalyzeUrlRequest, db: Session = Depends(get_db))
     )
     try:
         text = await fetch_url_text(request.url)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
     except Exception:
-        raise HTTPException(status_code=400, detail="Failed to fetch URL")
+        return JSONResponse(status_code=500, content={"detail": "Failed to fetch URL"})
 
     if not text:
         raise HTTPException(status_code=400, detail="URL content is empty")
@@ -217,36 +239,14 @@ async def analyze_url(request: AnalyzeUrlRequest, db: Session = Depends(get_db))
         source_url=request.url,
     )
     payload = result.payload
-    if hasattr(payload, "model_dump_json"):
-        payload_json = payload.model_dump_json()
-    else:
-        payload_json = payload.json()
-
-    analysis = Analysis(
-        id=payload.id,
+    _persist_analysis(
+        payload=payload,
         source_type="url",
         source_value=request.url,
-        doc_name=resolved_name,
         doc_type=request.doc_type,
         source_url=request.url,
-        status=payload.status,
-        confidence=payload.confidence,
-        risk_score=payload.risk_score,
-        grade=payload.grade,
-        document_text=payload.document_text,
-        result_json=payload_json,
+        db=db,
     )
-    db.add(analysis)
-
-    if payload.review_required:
-        review_item = ReviewItem(
-            id=str(uuid4()),
-            analysis_id=payload.id,
-            status="pending",
-        )
-        db.add(review_item)
-
-    db.commit()
     return payload
 
 
@@ -263,7 +263,17 @@ async def analyze_file(
         file.filename,
         file.content_type,
     )
-    data = await file.read()
+    max_bytes = settings.max_upload_bytes
+    data = b""
+    while True:
+        chunk = await file.read(65536)
+        if not chunk:
+            break
+        data += chunk
+        if len(data) > max_bytes:
+            raise HTTPException(
+                status_code=413, detail="File exceeds maximum upload size"
+            )
     text = extract_text_from_bytes(file.filename, file.content_type, data)
     if not text:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
@@ -283,36 +293,14 @@ async def analyze_file(
         source_url=None,
     )
     payload = result.payload
-    if hasattr(payload, "model_dump_json"):
-        payload_json = payload.model_dump_json()
-    else:
-        payload_json = payload.json()
-
-    analysis = Analysis(
-        id=payload.id,
+    _persist_analysis(
+        payload=payload,
         source_type="file",
         source_value=file.filename,
-        doc_name=resolved_name,
         doc_type=doc_type,
         source_url=None,
-        status=payload.status,
-        confidence=payload.confidence,
-        risk_score=payload.risk_score,
-        grade=payload.grade,
-        document_text=payload.document_text,
-        result_json=payload_json,
+        db=db,
     )
-    db.add(analysis)
-
-    if payload.review_required:
-        review_item = ReviewItem(
-            id=str(uuid4()),
-            analysis_id=payload.id,
-            status="pending",
-        )
-        db.add(review_item)
-
-    db.commit()
     return payload
 
 
@@ -371,25 +359,34 @@ def export_analysis_json(analysis_id: str, db: Session = Depends(get_db)):
 @app.get("/exports/analyses.csv")
 def export_analyses_csv(db: Session = Depends(get_db)):
     records = db.query(Analysis).order_by(Analysis.created_at.desc()).all()
-    header = ["id", "name", "doc_type", "source_url", "status", "confidence", "risk_score", "grade", "created_at"]
-    rows = [",".join(header)]
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "id",
+        "name",
+        "doc_type",
+        "source_url",
+        "status",
+        "confidence",
+        "risk_score",
+        "grade",
+        "created_at",
+    ])
     for record in records:
-        rows.append(
-            ",".join(
-                [
-                    record.id,
-                    (record.doc_name or "").replace(",", " "),
-                    (record.doc_type or "").replace(",", " "),
-                    (record.source_url or "").replace(",", " "),
-                    record.status,
-                    f"{record.confidence:.2f}",
-                    f"{record.risk_score:.2f}",
-                    record.grade,
-                    record.created_at.isoformat(),
-                ]
-            )
+        writer.writerow(
+            [
+                record.id,
+                record.doc_name or "",
+                record.doc_type or "",
+                record.source_url or "",
+                record.status,
+                f"{record.confidence:.2f}",
+                f"{record.risk_score:.2f}",
+                record.grade,
+                record.created_at.isoformat(),
+            ]
         )
-    return Response(content="\n".join(rows), media_type="text/csv")
+    return Response(content=output.getvalue(), media_type="text/csv")
 
 
 @app.get("/exports/analysis/{analysis_id}.pdf")
@@ -491,7 +488,7 @@ def add_watchlist(request: WatchlistCreateRequest, db: Session = Depends(get_db)
         source_url=request.source_url,
         status="No Changes",
         change_count=0,
-        risk_delta="0",
+        risk_delta=0.0,
     )
     db.add(item)
     db.commit()
@@ -543,18 +540,18 @@ async def refresh_watchlist(item_id: str, db: Session = Depends(get_db)):
             change_summary=item.change_summary,
         )
 
-    new_hash = content_hash(text)
-    change_count, summary = diff_summary(item.last_document_text or "", text)
+    current_text = text or ""
+    new_hash = content_hash(current_text)
+    change_count, summary = diff_summary(item.last_document_text or "", current_text)
     changed = item.last_document_hash and item.last_document_hash != new_hash
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     item.last_checked = now
-    rule_findings = detect_findings(text, ["US-CA", "GDPR"])
+    rule_findings = detect_findings(current_text, ["US-CA", "GDPR"])
     new_score = calculate_risk_score(rule_findings)
     if item.last_risk_score is not None:
-        delta = round(new_score - item.last_risk_score, 2)
-        item.risk_delta = f"{delta:+.2f}"
+        item.risk_delta = round(new_score - item.last_risk_score, 2)
     else:
-        item.risk_delta = "0"
+        item.risk_delta = 0.0
     item.last_risk_score = new_score
     if changed:
         item.status = "Updated"
@@ -566,7 +563,7 @@ async def refresh_watchlist(item_id: str, db: Session = Depends(get_db)):
         item.change_count = 0
         item.change_summary = ""
 
-    item.last_document_text = text
+    item.last_document_text = current_text[:50_000]
     item.last_document_hash = new_hash
     db.commit()
     db.refresh(item)

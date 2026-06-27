@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from ..config import settings
 from ..schemas import AnalysisPayload, Finding, Jurisdiction
-from .lm_studio import LmStudioClient
+from .localai import LocalAIClient
 from .rules import detect_findings
 from .validation import validate_findings
 
@@ -78,7 +78,7 @@ async def analyze_text(
     rule_findings = detect_findings(cleaned, jurisdictions)
 
     numbered_text = _with_line_numbers(cleaned)
-    client = LmStudioClient()
+    client = LocalAIClient()
     formatted_rules = []
     for finding in rule_findings:
         if hasattr(finding, "model_dump"):

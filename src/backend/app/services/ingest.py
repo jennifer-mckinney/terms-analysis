@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from io import BytesIO
+import ipaddress
 from pathlib import Path
 import re
+import socket
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -17,6 +20,18 @@ except ImportError:  # Optional OCR dependency
 from striprtf.striprtf import rtf_to_text
 
 from ..config import settings
+
+
+_BLOCKED_NETWORKS = [
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+]
 
 
 def _normalize_text(text: str) -> str:
@@ -116,7 +131,43 @@ def extract_text_from_bytes(
     return _normalize_text(_decode_bytes(data))
 
 
+def _validate_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("Only http and https URLs are allowed")
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("URL is not allowed")
+
+    addresses = []
+    try:
+        addresses.append(ipaddress.ip_address(hostname))
+    except ValueError:
+        try:
+            for _, _, _, _, sockaddr in socket.getaddrinfo(hostname, None):
+                address = sockaddr[0]
+                try:
+                    addresses.append(ipaddress.ip_address(address))
+                except ValueError:
+                    continue
+        except socket.gaierror:
+            raise ValueError("URL is not allowed") from None
+
+    if not addresses:
+        raise ValueError("URL is not allowed")
+
+    for address in addresses:
+        if any(address in network for network in _BLOCKED_NETWORKS):
+            raise ValueError("URL is not allowed")
+
+
 async def fetch_url_text(url: str) -> str:
+    try:
+        _validate_url(url)
+    except ValueError:
+        raise
+
     timeout = settings.request_timeout_s
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.get(url, follow_redirects=True)

@@ -3,14 +3,14 @@ import asyncio
 import httpx
 
 from app.services.analyzer import analyze_text
-from app.services.lm_studio import LmStudioClient
+from app.services.localai import LocalAIClient
 
 
 def test_analyze_text_falls_back_to_rules(monkeypatch):
     async def fake_analyze(self, numbered_text, jurisdictions, rule_findings):
         return None
 
-    monkeypatch.setattr(LmStudioClient, "analyze", fake_analyze)
+    monkeypatch.setattr(LocalAIClient, "analyze", fake_analyze)
 
     text = "We sell personal information and use automated decision-making."
     result = asyncio.run(analyze_text(text, ["US-CA", "GDPR"]))
@@ -19,8 +19,8 @@ def test_analyze_text_falls_back_to_rules(monkeypatch):
     assert "ADM" in categories
 
 
-def test_lm_studio_timeout_returns_none(monkeypatch):
-    class TimeoutClient:
+def test_localai_unreachable_returns_none(monkeypatch):
+    class UnreachableClient:
         def __init__(self, *args, **kwargs):
             pass
 
@@ -31,8 +31,10 @@ def test_lm_studio_timeout_returns_none(monkeypatch):
             return False
 
         async def post(self, *args, **kwargs):
-            raise httpx.ReadTimeout("timeout")
+            raise httpx.ConnectError("connection refused")
 
-    monkeypatch.setattr(httpx, "AsyncClient", TimeoutClient)
-    result = asyncio.run(LmStudioClient().analyze("text", ["US-CA"], []))
+    monkeypatch.setattr(httpx, "AsyncClient", UnreachableClient)
+
+    result = asyncio.run(LocalAIClient().analyze("text", ["US-CA"], []))
+
     assert result is None

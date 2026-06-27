@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text
 
@@ -11,7 +11,7 @@ class Analysis(Base):
     __tablename__ = "analyses"
 
     id = Column(String, primary_key=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     doc_name = Column(String, nullable=True)
     doc_type = Column(String, nullable=True)
     source_url = Column(String, nullable=True)
@@ -29,12 +29,17 @@ class ReviewItem(Base):
     __tablename__ = "review_items"
 
     id = Column(String, primary_key=True, index=True)
-    analysis_id = Column(String, ForeignKey("analyses.id"), nullable=False)
+    analysis_id = Column(
+        String, ForeignKey("analyses.id", ondelete="CASCADE"), nullable=False
+    )
     status = Column(String, nullable=False, default="pending")
     notes = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
     )
 
 
@@ -45,10 +50,10 @@ class WatchlistItem(Base):
     vendor = Column(String, nullable=False)
     source_url = Column(String, nullable=True)
     status = Column(String, nullable=False, default="No Changes")
-    last_checked = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_checked = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     changes_since = Column(DateTime, nullable=True)
     change_count = Column(Integer, nullable=False, default=0)
-    risk_delta = Column(String, nullable=False, default="0")
+    risk_delta = Column(Float, nullable=False, default=0.0)
     change_summary = Column(Text, nullable=True)
     last_document_text = Column(Text, nullable=True)
     last_document_hash = Column(String, nullable=True)

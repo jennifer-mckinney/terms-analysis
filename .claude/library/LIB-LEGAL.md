@@ -15,12 +15,13 @@ All tools must pass: open source + no investor lawsuits + positive community + I
 
 ### Embedding (Legal Semantic Search)
 
-| Model | License | Dimensions | Context | Use For |
-|-------|---------|-----------|---------|---------|
-| **freelawproject/modernbert-embed-base-8192** | Apache 2.0 | 768 | 8192 tokens | Primary legal embeddings (Free Law Project, nonprofit) |
-| AdamLucek/ModernBERT-embed-base-legal-MRL | Apache 2.0 | 768 (MRL: 64-768) | 8192 tokens | Variable-dim alternative |
-| BAAI/bge-m3 | MIT | 1024 | 8192 tokens | Multilingual fallback (EU languages) |
-| Qwen3-Embedding-0.6B | Apache 2.0 | 32-1024 | 32K tokens | Long-context multilingual |
+Primary model must be multilingual — the tool covers US, EU, UK, Canada, Brazil, Australia jurisdictions whose source legal texts are in multiple languages.
+
+| Model | License | Dimensions | Languages | Use For |
+|-------|---------|-----------|-----------|---------|
+| **intfloat/multilingual-e5-large-instruct** | MIT | 1024 | 100+ | Primary: world-coverage semantic search (Microsoft Research) |
+| freelawproject/modernbert-embed-base-8192 | Apache 2.0 | 768 | English | English-only legal text (use only for English-language corpus chunks) |
+| AdamLucek/ModernBERT-embed-base-legal-MRL | Apache 2.0 | 768 | English | Variable-dim English-only alternative |
 
 ### Inference Runner
 
@@ -28,12 +29,21 @@ All tools must pass: open source + no investor lawsuits + positive community + I
 |------|---------|-----------|-------|
 | **Ollama CLI** | MIT | A- (0.26) | Local inference, same chat/completions API. CLI only — avoid GUI/Turbo/cloud. |
 
+### Inference Backend (for embeddings)
+
+| Tool | License | Origin | Notes |
+|------|---------|--------|-------|
+| **onnxruntime** | MIT | Microsoft | Runs ONNX-exported models; no PyTorch needed |
+| sentence-transformers[onnx] | Apache 2.0 | UKP Lab (Germany) | Wraps onnxruntime with HuggingFace model support |
+
 ### Vector Store
 
-| Tool | License | IRP Grade | Notes |
-|------|---------|-----------|-------|
-| **FAISS** | MIT | A+ | Facebook AI Similarity Search. Local, in-memory. |
-| sqlite-vss | MIT | A+ | SQLite extension, stays in existing DB stack. |
+**REQUIREMENT: Exact (exhaustive) search only.** This tool produces legal risk findings — approximate nearest neighbor introduces false negatives that could cause missed compliance issues. All retrieval must be exact.
+
+| Tool | License | Search | Notes |
+|------|---------|--------|-------|
+| **numpy exhaustive** | BSD | Exact | Zero new deps. `np.dot(query, corpus.T)` — correct for legal corpus size (<50K chunks). Primary choice. |
+| sqlite-vec | MIT | Exact | SQLite extension by Alex Garcia (independent). Integrates with existing SQLAlchemy stack. Use if corpus grows beyond 100K chunks. |
 
 ### REJECTED Tools
 
@@ -43,6 +53,11 @@ All tools must pass: open source + no investor lawsuits + positive community + I
 | Stability AI models | Investor lawsuits (co-founder fraud, Coatue pressure). |
 | Voyage Law 2 | Proprietary API-only. Fails open-source + local-only. |
 | Ollama GUI/Turbo | Unclear license (GUI), proprietary (Turbo). CLI only is approved. |
+| FAISS / faiss-cpu | Facebook/Meta origin. Fails no-Meta requirement. |
+| torch / PyTorch | Meta origin (donated to Linux Foundation but Meta-created). Use onnxruntime instead. |
+| BAAI/bge-m3 | Beijing Academy of Artificial Intelligence — Chinese government-affiliated. |
+| Qwen / Qwen3-* | Alibaba (Chinese company). Fails no-Chinese-company requirement. |
+| Any HNSW-based vector store | Approximate search. Unacceptable for legal risk analysis — false negatives miss compliance issues. |
 
 ## RAG Architecture
 
