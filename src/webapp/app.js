@@ -382,19 +382,46 @@ function populateReviewQueue() {
 
     if (!state.reviews.length) {
         containers.forEach(container => {
-            container.innerHTML = '<p class="text-secondary">No pending reviews.</p>';
+            container.innerHTML = '<p class="text-secondary">No pending reviews — everything checked out automatically.</p>';
         });
         return;
     }
 
+    // Build a quick lookup map: analysis_id → analysis record
+    const analysisMap = {};
+    (state.analyses || []).forEach(a => { analysisMap[a.id] = a; });
+
     const html = state.reviews.map(item => {
+        const analysis = analysisMap[item.analysis_id] || null;
+        const docName  = analysis ? (analysis.name || analysis.source_url || 'Unnamed document') : 'Unknown document';
+        const grade    = analysis ? (analysis.grade || '?') : '?';
+        const gradeInfo = GRADE_NARRATIVE[grade] || { emoji: '', headline: grade };
+        const confPct  = analysis ? Math.round((analysis.confidence || 0) * 100) : '?';
+        const checkedDate = item.created_at ? new Date(item.created_at).toLocaleDateString() : '';
+
         return `
-            <div class="review-item">
-                <div class="text-secondary">Review ID: ${item.id}</div>
-                <div class="text-secondary">Analysis ID: ${item.analysis_id}</div>
-                <div class="review-actions">
-                    <button class="btn btn--sm btn--primary" onclick="updateReview('${item.id}', 'approved')">Approve</button>
-                    <button class="btn btn--sm btn--outline" onclick="updateReview('${item.id}', 'rejected')">Reject</button>
+            <div class="review-item" style="border:1px solid var(--color-card-border);border-radius:8px;padding:14px;margin-bottom:12px">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+                    <div style="flex:1;min-width:0">
+                        <div style="font-weight:600;font-size:0.95rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${docName}</div>
+                        <div class="text-secondary" style="font-size:0.85rem;margin-top:2px">
+                            Checked ${checkedDate} &middot; Grade ${gradeInfo.emoji} ${grade} &middot; Scan confidence: ${confPct}%
+                        </div>
+                        <div style="font-size:0.82rem;margin-top:6px;color:var(--color-warning)">
+                            <i class="fas fa-exclamation-triangle"></i>
+                            Confidence below 80% — a human should verify these findings before the result is trusted.
+                        </div>
+                    </div>
+                    <div class="review-actions" style="display:flex;gap:8px;flex-shrink:0;align-items:center">
+                        <button class="btn btn--sm btn--primary" onclick="updateReview('${item.id}', 'approved')"
+                            title="The AI findings look correct — mark this analysis as verified">
+                            <i class="fas fa-check"></i> Findings Look Right
+                        </button>
+                        <button class="btn btn--sm btn--outline" onclick="updateReview('${item.id}', 'rejected')"
+                            title="The AI findings seem wrong or misleading — flag this for re-analysis">
+                            <i class="fas fa-times"></i> Findings Seem Wrong
+                        </button>
+                    </div>
                 </div>
             </div>
         `;
@@ -1222,32 +1249,97 @@ function populateRubricScores() {
         return;
     }
 
+    const totalChecked = state.analyses.length;
+
     if (!state.rubricScores) {
-        container.innerHTML = '<p class="text-secondary">Run evaluations to populate rubric scores.</p>';
+        container.innerHTML = `
+            <p class="text-secondary" style="margin-bottom:12px">
+                No policies have been checked yet. Scores will appear after your first analysis.
+            </p>`;
         return;
     }
 
-    const rubricLabels = {
-        productIntegrity: 'Product Integrity',
-        legalSignalQuality: 'Legal Signal Quality',
-        privacySecurity: 'Privacy & Security',
-        accessibilityUsability: 'Accessibility/Usability',
-        visualIxd: 'Visual/IXD',
-        performanceReliability: 'Performance/Reliability',
-        governanceReadiness: 'Governance Readiness',
-        overall: 'Overall Score'
+    const RUBRIC_META = {
+        overall:               { label: 'Overall Score',            desc: 'Weighted average across all dimensions below.' },
+        productIntegrity:      { label: 'Policy Risk Level',        desc: 'How risky the checked policies are on average. Higher = lower average risk score.' },
+        legalSignalQuality:    { label: 'AI Detection Confidence',  desc: 'How confident the AI is in its findings. Low when the AI model is offline (pattern-only mode).' },
+        privacySecurity:       { label: 'Privacy & Security',       desc: 'Blend of risk level and AI confidence — reflects overall data-safety picture.' },
+        accessibilityUsability:{ label: 'Review Workload',          desc: 'How often analyses need human review. Higher = fewer items flagged for manual check.' },
+        visualIxd:             { label: 'Clarity of Results',       desc: 'Combines human-review rate with avg risk — proxy for how clear and actionable the outputs are.' },
+        performanceReliability:{ label: 'Reliability',              desc: 'How often the tool can complete an analysis without needing manual intervention.' },
+        governanceReadiness:   { label: 'Governance Readiness',     desc: 'How close to fully-automated the tool is. Drops when many analyses need human review.' },
     };
 
-    const html = Object.entries(state.rubricScores).map(([key, score]) => {
+    function scoreColor(s) {
+        if (s >= 7) return 'var(--color-success)';
+        if (s >= 4) return 'var(--color-warning)';
+        return 'var(--color-error)';
+    }
+    function scoreLabel(s) {
+        if (s >= 7) return 'Good';
+        if (s >= 4) return 'Fair';
+        return 'Needs work';
+    }
+
+    // Show overall first, then the rest
+    const ordered = ['overall', 'productIntegrity', 'legalSignalQuality', 'privacySecurity',
+                     'accessibilityUsability', 'visualIxd', 'performanceReliability', 'governanceReadiness'];
+
+    const rows = ordered.map(key => {
+        const score = state.rubricScores[key];
+        if (score === undefined) return '';
+        const meta = RUBRIC_META[key] || { label: key, desc: '' };
+        const pct = Math.round((score / 10) * 100);
+        const color = scoreColor(score);
+        const lbl = scoreLabel(score);
+        const isOverall = key === 'overall';
         return `
-            <div class="rubric-item">
-                <div class="rubric-label">${rubricLabels[key]}</div>
-                <div class="rubric-score">${score.toFixed(1)}</div>
+            <div style="padding:${isOverall ? '14px 12px' : '10px 12px'};border:1px solid var(--color-card-border);border-radius:8px;
+                        margin-bottom:8px;${isOverall ? 'background:var(--color-highlight,rgba(15,164,175,0.06))' : ''}">
+                <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
+                    <span style="font-weight:${isOverall ? '700' : '600'};font-size:${isOverall ? '1rem' : '0.9rem'}">${meta.label}</span>
+                    <span style="font-weight:700;font-size:${isOverall ? '1.1rem' : '0.95rem'};color:${color}">
+                        ${score.toFixed(1)}<span style="font-size:0.75rem;font-weight:400;color:var(--color-text-secondary)">/10</span>
+                        <span style="font-size:0.75rem;margin-left:4px">${lbl}</span>
+                    </span>
+                </div>
+                <div style="background:var(--color-border);border-radius:4px;height:6px;margin-bottom:6px;overflow:hidden">
+                    <div style="width:${pct}%;height:100%;background:${color};border-radius:4px;transition:width 0.4s"></div>
+                </div>
+                <div class="text-secondary" style="font-size:0.8rem">${meta.desc}</div>
             </div>
         `;
     }).join('');
 
-    container.innerHTML = html;
+    const irpBox = `
+        <div style="margin-top:16px;padding:12px 14px;border:1px dashed var(--color-border);border-radius:8px;background:var(--color-surface)">
+            <div style="font-weight:600;margin-bottom:6px"><i class="fas fa-calculator"></i> How the Risk Score Is Calculated</div>
+            <p style="font-size:0.85rem;margin-bottom:6px">
+                Each policy gets an <strong>IRP (Integrated Risk Profile) score</strong> from 0–10:
+            </p>
+            <code style="font-size:0.82rem;display:block;padding:6px 10px;background:var(--color-secondary);border-radius:4px;margin-bottom:8px">
+                Score = 0.5 × (Impact/5) + 0.4 × (Likelihood/5) − 0.3 × (Safeguards/5)
+            </code>
+            <ul style="font-size:0.82rem;margin:0;padding-left:18px;line-height:1.7">
+                <li><strong>Impact (0–5)</strong> — how serious the harm could be if the clause is enforced</li>
+                <li><strong>Likelihood (0–5)</strong> — how likely the company is to actually use this clause</li>
+                <li><strong>Safeguards (0–5)</strong> — how many protections exist (opt-out, deletion rights, etc.)</li>
+            </ul>
+            <p style="font-size:0.8rem;margin-top:8px;color:var(--color-text-secondary)">
+                Grades: A (0–3) · B (3–5) · C+ (5–7) · C (7–8) · D+ (8–9) · D (9–10)
+            </p>
+        </div>
+    `;
+
+    container.innerHTML = `
+        <p class="text-secondary" style="font-size:0.85rem;margin-bottom:14px">
+            These scores reflect how our tool is performing across
+            <strong>${totalChecked} ${totalChecked === 1 ? 'policy' : 'policies'}</strong> checked so far.
+            All scores are on a 0–10 scale — higher is better.
+        </p>
+        ${rows}
+        ${irpBox}
+    `;
 }
 
 function generateReport(reportType) {

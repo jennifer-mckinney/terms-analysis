@@ -328,14 +328,16 @@
                 </div>
 
                 <div class="rubric-scores">
-                    <h3>Rubric Scoring System</h3>
+                    <h3>Tool Performance Scores</h3>
+                    <p class="text-secondary" style="font-size:0.85rem;margin-bottom:12px">How well our checker is doing across all policies you've tested</p>
                     <div class="rubric-grid" id="rubricGrid">
                         <!-- Rubric scores populated by JavaScript -->
                     </div>
                 </div>
 
                 <div class="rubric-scores">
-                    <h3>Review Queue</h3>
+                    <h3>Needs Human Review</h3>
+                    <p class="text-secondary" style="font-size:0.85rem;margin-bottom:12px">Low-confidence scans waiting for a person to verify the findings</p>
                     <div class="review-queue" id="reviewQueue">
                         <!-- Review queue populated by JavaScript -->
                     </div>
@@ -346,11 +348,15 @@
         <!-- Review Queue Page -->
         <div class="page" id="reviews">
             <div class="page-header">
-                <h2>Review Queue</h2>
-                <p class="page-subtitle">Analyses needing human review (confidence below 0.80)</p>
+                <h2>Human Review Queue</h2>
+                <p class="page-subtitle">These policy checks scored below 80% confidence — the AI wasn't sure enough. A person should verify the findings before acting on them.</p>
             </div>
 
             <div class="review-container">
+                <div style="padding:12px 16px;background:var(--color-highlight,rgba(15,164,175,0.08));border-radius:8px;margin-bottom:16px;font-size:0.88rem">
+                    <strong>How to review:</strong> Open the original policy in a new tab, then read the findings from the analysis.
+                    Click <em>Findings Look Right</em> if the issues are real, or <em>Findings Seem Wrong</em> if the AI misread the document.
+                </div>
                 <div class="review-list" id="reviewList">
                     <!-- Review items populated by JavaScript -->
                 </div>
@@ -377,12 +383,10 @@
                             </select>
                         </div>
                         <div class="form-group">
-                            <label class="form-label">Default Analysis Mode</label>
+                            <label class="form-label">Default Check Depth</label>
                             <select class="form-control">
-                                <option value="quick">Quick Scan</option>
-                                <option value="full">Full Analysis</option>
-                                <option value="progressive">Progressive Disclosure</option>
-                                <option value="guided">Guided Walkthrough</option>
+                                <option value="quick">Quick Scan — serious issues only</option>
+                                <option value="full">Deep Read — find everything</option>
                             </select>
                         </div>
                     </div>
