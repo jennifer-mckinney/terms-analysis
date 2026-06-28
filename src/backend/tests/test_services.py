@@ -732,7 +732,7 @@ class TestFetchUrlText:
         fake_req = MagicMock()
         fake_req.url = "https://example.com/redirected"
         with patch("app.services.ingest._validate_url") as mock_val:
-            hook(fake_req)  # fires line 194
+            asyncio.run(hook(fake_req))  # hook is async — must be awaited
             mock_val.assert_called_once_with("https://example.com/redirected")
 
 

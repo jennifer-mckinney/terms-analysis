@@ -252,7 +252,8 @@ async def analyze_url(request: AnalyzeUrlRequest, db: Session = Depends(get_db))
         text = await fetch_url_text(request.url)
     except ValueError as e:
         return JSONResponse(status_code=400, content={"detail": str(e)})
-    except Exception:
+    except Exception as exc:
+        logger.error("Failed to fetch URL %s: %s", request.url, exc, exc_info=True)
         return JSONResponse(status_code=500, content={"detail": "Failed to fetch URL"})
 
     if not text:

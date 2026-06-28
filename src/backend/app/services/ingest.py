@@ -183,22 +183,39 @@ def _validate_url(url: str) -> None:
             raise ValueError("URL is not allowed")
 
 
+_FETCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
 async def fetch_url_text(url: str) -> str:
     _validate_url(url)
 
     timeout = settings.request_timeout_s
     max_bytes = settings.max_upload_bytes
 
-    def _on_request(request: httpx.Request) -> None:
+    async def _on_request(request: httpx.Request) -> None:
         """Validate each URL before every request, including redirects."""
         _validate_url(str(request.url))
 
     async with httpx.AsyncClient(
         timeout=timeout,
         follow_redirects=True,
+        headers=_FETCH_HEADERS,
         event_hooks={"request": [_on_request]},
     ) as client:
         response = await client.get(url)
+        if response.status_code in (403, 429):
+            raise ValueError(
+                "This website blocks automated access. "
+                "Copy and paste the policy text instead."
+            )
         response.raise_for_status()
 
         # Reject oversized responses before buffering the full body.

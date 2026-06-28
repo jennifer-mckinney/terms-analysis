@@ -304,11 +304,16 @@ async function fetchJSON(path, options = {}) {
     }
     const response = await fetch(url, options);
     if (!response.ok) {
-        const message = await response.text();
+        const raw = await response.text();
         if (API_LOGGING) {
             const duration = Math.round(performance.now() - startedAt);
             console.info(`[api] ${method} ${url} -> ${response.status} (${duration}ms)`);
         }
+        let message = raw;
+        try {
+            const parsed = JSON.parse(raw);
+            if (parsed && parsed.detail) message = parsed.detail;
+        } catch (_) { /* use raw text */ }
         throw new Error(message || `Request failed (${response.status})`);
     }
     state.backendOnline = true;
@@ -674,8 +679,13 @@ async function startAnalysis() {
         displayAnalysisResults(result, analysisMode);
         showToast('Policy check complete', 'success');
     } catch (error) {
-        setResultsPlaceholder('Check failed. Make sure the backend server is running.');
-        showToast(error.message || 'Analysis failed', 'error');
+        const msg = error.message || 'Analysis failed';
+        const isBlocked = msg.toLowerCase().includes('block') || msg.toLowerCase().includes('403');
+        const placeholder = isBlocked
+            ? 'This website blocks automated access — try the "Paste Text" tab and paste the policy directly.'
+            : `Check failed: ${msg}`;
+        setResultsPlaceholder(placeholder);
+        showToast(msg, 'error');
     } finally {
         hideLoading();
     }
