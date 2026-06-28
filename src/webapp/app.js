@@ -1,5 +1,58 @@
 // Terms & Policies Reviewer Application JavaScript
 
+// Plain-English category labels and impact descriptions for parents/students/caretakers
+const CATEGORY_INFO = {
+    'Dark Patterns': {
+        label: 'Misleading Design',
+        impact: 'The app may use tricks or confusing layouts to get you to agree to things you didn\'t intend to.'
+    },
+    'Sale/Share': {
+        label: 'Selling Your Data',
+        impact: 'Your personal information may be sold or shared with other companies for advertising or profit.'
+    },
+    'Retention': {
+        label: 'Keeps Your Data Indefinitely',
+        impact: 'They may store your information forever with no clear date for deleting it.'
+    },
+    'Unilateral Changes': {
+        label: 'Can Change Terms Without Notice',
+        impact: 'They can quietly update the policy at any time and it still applies to you — even if you never see the new version.'
+    },
+    'Children\'s Privacy': {
+        label: 'Children\'s Data at Risk',
+        impact: 'Your child\'s information may not be adequately protected or could be collected without proper parental consent.'
+    },
+    'Biometric Data': {
+        label: 'Face, Voice & Fingerprint Data',
+        impact: 'The app may record and store your child\'s biometric data such as facial recognition, voice prints, or fingerprints.'
+    },
+    'Sensitive Data': {
+        label: 'Collects Sensitive Personal Info',
+        impact: 'Health, financial, location, or other sensitive details are being collected — often shared more broadly than you\'d expect.'
+    },
+    'Automated Decisions': {
+        label: 'Computer Makes Decisions About You',
+        impact: 'An algorithm automatically makes decisions that affect you or your child — without a human reviewing them.'
+    },
+    'Liability': {
+        label: 'Limits Your Legal Rights',
+        impact: 'You may have signed away your right to sue or join a class action lawsuit if the company causes harm.'
+    },
+    'User Rights': {
+        label: 'Hard to Delete or Access Your Data',
+        impact: 'The policy makes it difficult for you to see what data they have, correct mistakes, or have it deleted.'
+    }
+};
+
+const GRADE_NARRATIVE = {
+    'A':  { emoji: '✅', headline: 'Looks Safe',         detail: 'This policy scored well. We didn\'t find major red flags.' },
+    'B':  { emoji: '🟡', headline: 'Minor Concerns',     detail: 'A few things to be aware of, but nothing alarming. Worth a quick look.' },
+    'C+': { emoji: '🟠', headline: 'Watch Out',          detail: 'Several issues that could affect your privacy. Read the findings carefully.' },
+    'C':  { emoji: '🟠', headline: 'Concerning',         detail: 'Notable privacy or safety problems. Think carefully before using this service.' },
+    'D+': { emoji: '🔴', headline: 'Serious Issues',     detail: 'Significant problems found. We recommend avoiding this service or contacting the company.' },
+    'D':  { emoji: '🔴', headline: 'Very Concerning',    detail: 'Major red flags. This policy has serious privacy or safety violations.' }
+};
+
 // Application Data
 const API_BASE_URL = window.API_BASE_URL || 'http://localhost:9000';
 const API_LOGGING = true;
@@ -435,17 +488,18 @@ function populateRecentAnalysis() {
         const date = new Date(doc.created_at).toLocaleDateString();
         const riskClass = getRiskClass(doc.risk_score);
         const name = doc.name || doc.source_url || 'Untitled Document';
-        
+        const gradeInfo = GRADE_NARRATIVE[doc.grade] || { emoji: '', headline: doc.grade };
+
         const reviewBadge = doc.status === 'needs_review'
-            ? '<span class="status status--warning">Needs Review</span>'
-            : '<span class="status status--success">Completed</span>';
+            ? '<span class="status status--warning">Needs expert review</span>'
+            : '';
         return `
             <div class="analysis-item">
                 <div class="analysis-meta">
                     <div class="analysis-name">${name}</div>
-                    <div class="analysis-date">Analyzed ${date} ${reviewBadge}</div>
+                    <div class="analysis-date">Checked ${date} ${reviewBadge}</div>
                 </div>
-                <div class="risk-badge ${riskClass}">${doc.grade}</div>
+                <div class="risk-badge ${riskClass}" title="${gradeInfo.headline}">${gradeInfo.emoji} ${doc.grade}</div>
             </div>
         `;
     }).join('');
@@ -568,17 +622,20 @@ async function startAnalysis() {
         return;
     }
 
+    // Map UI mode names to backend values
+    const backendMode = analysisMode === 'quick' ? 'quick' : 'full';
+
     // Show loading
-    showLoading('Analyzing document...');
-    setResultsPlaceholder('Analyzing document...');
+    showLoading('Checking policy...');
+    setResultsPlaceholder('Checking policy...');
     try {
         let result = null;
         if (documentUrl) {
-            result = await analyzeUrl(documentUrl, jurisdictions);
+            result = await analyzeUrl(documentUrl, jurisdictions, backendMode);
         } else if (fileInput.files.length > 0) {
-            result = await analyzeFile(fileInput.files[0], jurisdictions);
+            result = await analyzeFile(fileInput.files[0], jurisdictions, backendMode);
         } else {
-            result = await analyzeText(documentText, jurisdictions);
+            result = await analyzeText(documentText, jurisdictions, backendMode);
         }
 
         currentAnalysis = result;
@@ -588,20 +645,17 @@ async function startAnalysis() {
         await refreshRubricScores();
         populateRubricScores();
         displayAnalysisResults(result, analysisMode);
-        showToast('Analysis complete', 'success');
+        showToast('Policy check complete', 'success');
     } catch (error) {
-        setResultsPlaceholder('Analysis failed. Check the console for API logs.');
+        setResultsPlaceholder('Check failed. Make sure the backend server is running.');
         showToast(error.message || 'Analysis failed', 'error');
     } finally {
         hideLoading();
     }
 }
 
-async function analyzeText(text, jurisdictions) {
-    const payload = {
-        text,
-        jurisdictions
-    };
+async function analyzeText(text, jurisdictions, mode = 'full') {
+    const payload = { text, jurisdictions, mode };
     return fetchJSON('/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -609,11 +663,8 @@ async function analyzeText(text, jurisdictions) {
     });
 }
 
-async function analyzeUrl(url, jurisdictions) {
-    const payload = {
-        url,
-        jurisdictions
-    };
+async function analyzeUrl(url, jurisdictions, mode = 'full') {
+    const payload = { url, jurisdictions, mode };
     return fetchJSON('/analyze/url', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -621,10 +672,11 @@ async function analyzeUrl(url, jurisdictions) {
     });
 }
 
-async function analyzeFile(file, jurisdictions) {
+async function analyzeFile(file, jurisdictions, mode = 'full') {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('jurisdictions', jurisdictions.join(','));
+    formData.append('mode', mode);
     return fetchJSON('/analyze/file', {
         method: 'POST',
         body: formData
@@ -635,57 +687,76 @@ function displayAnalysisResults(doc, mode) {
     const resultsSection = document.getElementById('resultsSection');
 
     const name = doc.name || doc.source_url || 'Untitled Document';
-    const docType = doc.doc_type || 'Document';
     const analyzedDate = new Date(doc.created_at).toLocaleDateString();
-    const confidence = formatConfidence(doc.confidence);
-    const reviewLabel = doc.review_required ? 'Needs Review' : 'Completed';
-    const analysisId = doc.id || 'unknown';
-    const summaryHtml = doc.summary
-        ? `<div class="mt-16"><h4>Summary</h4><p class="text-secondary">${doc.summary}</p></div>`
+    const grade = doc.grade || 'C';
+    const gradeInfo = GRADE_NARRATIVE[grade] || GRADE_NARRATIVE['C'];
+    const riskScore = typeof doc.risk_score === 'number' ? doc.risk_score.toFixed(1) : doc.risk_score;
+    const modeLabel = mode === 'quick' ? 'Quick Scan — serious issues only' : 'Deep Read — full analysis';
+
+    const highCount = (doc.findings || []).filter(f => (f.severity || '').toUpperCase() === 'HIGH').length;
+    const medCount  = (doc.findings || []).filter(f => (f.severity || '').toUpperCase() === 'MEDIUM').length;
+    const lowCount  = (doc.findings || []).filter(f => (f.severity || '').toUpperCase() === 'LOW').length;
+
+    const humanReviewNote = doc.review_required
+        ? `<p class="text-secondary" style="margin-top:4px"><i class="fas fa-user-check"></i> A human expert should review this one before you sign up.</p>`
         : '';
 
-    const findingsHtml = doc.findings.length
-        ? doc.findings.map(finding => createFindingHTML(finding)).join('')
-        : '<p class="text-secondary">No findings detected.</p>';
+    const summaryText = doc.summary
+        ? `<p style="margin-top:8px">${doc.summary}</p>`
+        : '';
+
+    const findingsHtml = (doc.findings || []).length
+        ? (doc.findings).map(finding => createFindingHTML(finding)).join('')
+        : '<p class="text-secondary">No issues found in this section.</p>';
 
     const html = `
         <div class="results-header">
-            <div>
+            <div style="flex:1">
                 <h3>${name}</h3>
-                <p class="text-secondary">${docType} • Analyzed ${analyzedDate}</p>
-                <p class="text-secondary">Confidence ${confidence}% • ${reviewLabel}</p>
-                <p class="text-secondary">Analysis ID: ${analysisId}</p>
+                <p class="text-secondary">Checked on ${analyzedDate} &middot; ${modeLabel}</p>
             </div>
             <div class="risk-score">
-                <div class="risk-score-value">${doc.risk_score}</div>
-                <div class="risk-grade">Grade ${doc.grade}</div>
+                <div class="risk-score-value">${riskScore}</div>
+                <div class="risk-grade">Grade ${grade}</div>
             </div>
         </div>
-        
+
+        <div class="finding-item" style="background:var(--color-surface-alt,#f5f0e8);border-left:4px solid var(--color-primary);margin-bottom:16px">
+            <div style="font-size:1.25rem;font-weight:700;margin-bottom:4px">${gradeInfo.emoji} ${gradeInfo.headline}</div>
+            <p>${gradeInfo.detail}</p>
+            ${summaryText}
+            ${humanReviewNote}
+            <div style="margin-top:10px;display:flex;gap:12px;flex-wrap:wrap">
+                ${highCount ? `<span class="finding-severity high">${highCount} Serious</span>` : ''}
+                ${medCount  ? `<span class="finding-severity medium">${medCount} Moderate</span>` : ''}
+                ${lowCount  ? `<span class="finding-severity low">${lowCount} Minor</span>` : ''}
+                ${!highCount && !medCount && !lowCount ? '<span class="text-secondary">No issues flagged</span>' : ''}
+            </div>
+        </div>
+
+        ${(doc.findings || []).length ? '<h4 style="margin-bottom:8px">What We Found</h4>' : ''}
         <div class="findings-list">
             ${findingsHtml}
         </div>
 
-        ${summaryHtml}
-        
         <div class="jurisdiction-summary mt-16">
-            <h4>Jurisdiction Analysis</h4>
-            ${createJurisdictionSummary(doc.findings)}
+            <h4>Privacy Laws Checked Against</h4>
+            ${createJurisdictionSummary(doc.findings || [])}
         </div>
-        
+
         <div class="action-buttons mt-16">
             <button class="btn btn--primary" data-action="export-results">
-                <i class="fas fa-download"></i> Export Report
+                <i class="fas fa-download"></i> Save Report
             </button>
             <button class="btn btn--secondary" data-action="add-watchlist">
-                <i class="fas fa-eye"></i> Add to Watchlist
+                <i class="fas fa-eye"></i> Watch for Changes
             </button>
             <button class="btn btn--outline" onclick="showVerifyView()">
-                <i class="fas fa-list"></i> Verify View
+                <i class="fas fa-list"></i> Show Source Text
             </button>
         </div>
     `;
-    
+
     resultsSection.innerHTML = html;
     currentAnalysis = doc;
 }
@@ -697,21 +768,19 @@ function setResultsPlaceholder(message) {
 }
 
 function createFindingHTML(finding) {
-    const confidence = formatConfidence(finding.confidence);
+    const info = CATEGORY_INFO[finding.category] || { label: finding.category, impact: finding.explanation || '' };
+    const severityUpper = (finding.severity || '').toUpperCase();
+    const severityLabels = { HIGH: 'Serious', MEDIUM: 'Moderate', LOW: 'Minor' };
+    const severityLabel = severityLabels[severityUpper] || finding.severity;
+    const safeCategory = (finding.category || '').replace(/'/g, "\\'");
     return `
-        <div class="finding-item" onclick="showFindingDetails('${finding.category}')">
+        <div class="finding-item" onclick="showFindingDetails('${safeCategory}')">
             <div class="finding-header">
-                <div class="finding-category">${finding.category}</div>
-                <div class="finding-severity ${finding.severity.toLowerCase()}">${finding.severity}</div>
+                <div class="finding-category">${info.label}</div>
+                <div class="finding-severity ${severityUpper.toLowerCase()}">${severityLabel}</div>
             </div>
+            <p style="margin:6px 0 4px;font-size:0.92rem">${info.impact}</p>
             <div class="finding-excerpt">"${finding.excerpt}"</div>
-            <div class="finding-confidence">
-                <span>Confidence:</span>
-                <div class="confidence-bar">
-                    <div class="confidence-fill" style="width: ${confidence}%"></div>
-                </div>
-                <span>${confidence}%</span>
-            </div>
         </div>
     `;
 }
@@ -728,36 +797,37 @@ function showFindingDetails(category) {
     const finding = currentAnalysis.findings.find(f => f.category === category);
     if (!finding) return;
     const evidence = finding.evidence || { line_start: '-', line_end: '-', legal_basis: [] };
+    const info = CATEGORY_INFO[category] || { label: category, impact: finding.explanation || '' };
+    const severityUpper = (finding.severity || '').toUpperCase();
+    const severityLabels = { HIGH: 'Serious', MEDIUM: 'Moderate', LOW: 'Minor' };
+    const severityLabel = severityLabels[severityUpper] || finding.severity;
+    const confidencePct = formatConfidence(finding.confidence);
 
     const content = `
         <div class="finding-details">
             <div class="mb-16">
-                <div class="finding-severity ${finding.severity.toLowerCase()}">${finding.severity} Risk</div>
-                <div class="text-secondary">Confidence: ${formatConfidence(finding.confidence)}%</div>
+                <div class="finding-severity ${severityUpper.toLowerCase()}">${severityLabel} Issue</div>
             </div>
-            
-            <h4>Evidence</h4>
-            <div class="finding-excerpt mb-16">"${finding.excerpt}"</div>
-            
-            <h4>Explanation</h4>
-            <p class="mb-16">${finding.explanation}</p>
-            
-            <h4>Location</h4>
-            <p class="text-secondary">Lines ${evidence.line_start}-${evidence.line_end}</p>
 
-            <h4>Legal Basis</h4>
+            <h4>What This Means for You</h4>
+            <p class="mb-16">${info.impact}</p>
+
+            <h4>Where We Found It</h4>
+            <div class="finding-excerpt mb-16">"${finding.excerpt}"</div>
+
+            <h4>More Detail</h4>
+            <p class="mb-16">${finding.explanation || 'No additional detail available.'}</p>
+
+            ${confidencePct >= 80 ? `<p class="text-secondary mb-16">How sure we are: ${confidencePct}%</p>` : ''}
+
+            <h4>Privacy Laws This May Violate</h4>
             <div class="mt-8">
-                ${(evidence.legal_basis || []).map(basis => `<span class="status status--info">${basis}</span>`).join(' ') || '<span class="text-secondary">Not provided</span>'}
-            </div>
-            
-            <h4>Jurisdictions</h4>
-            <div class="mt-8">
-                ${(finding.jurisdictions || []).map(j => `<span class="status status--info">${j}</span>`).join(' ')}
+                ${(evidence.legal_basis || []).map(basis => `<span class="status status--info">${basis}</span>`).join(' ') || '<span class="text-secondary">None specified</span>'}
             </div>
         </div>
     `;
 
-    showModal(`Finding: ${category}`, content);
+    showModal(info.label, content);
 }
 
 function showVerifyView() {
