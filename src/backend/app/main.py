@@ -17,33 +17,36 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .database import db_session, get_db, init_db
-from .models import Analysis, ReviewItem, WatchlistItem, PolicySnapshot, PolicyWatch
+from .models import Analysis, PolicySnapshot, PolicyWatch, ReviewItem, WatchlistItem
 from .schemas import (
     AnalysisPayload,
     AnalysisSummary,
+    AnalyzeBatchRequest,
     AnalyzeRequest,
     AnalyzeUrlRequest,
-    AnalyzeBatchRequest,
     BatchAnalysisResult,
+    DiffResult,
+    DiffToken,
     DocType,
     IndustryProfile,
+    PolicySnapshotListItem,
+    PolicySnapshotPayload,
+    PolicyWatchCreateRequest,
+    PolicyWatchPayload,
     ReviewItemPayload,
     ReviewUpdate,
     RubricScores,
     WatchlistCreateRequest,
     WatchlistItemPayload,
-    PolicySnapshotPayload,
-    PolicySnapshotListItem,
-    DiffResult,
-    DiffToken,
-    PolicyWatchPayload,
-    PolicyWatchCreateRequest,
 )
-from .services.analyzer import analyze_text, calculate_risk_score, analyze_batch_documents
+from .services.analyzer import (
+    analyze_batch_documents,
+    analyze_text,
+    calculate_risk_score,
+)
 from .services.diffing import content_hash, diff_summary, diff_tokens
 from .services.ingest import extract_text_from_bytes, fetch_url_text
 from .services.rules import detect_findings
-
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -342,8 +345,6 @@ async def analyze_file(
 @app.post("/analyze/batch", response_model=dict)
 async def analyze_batch(request, db: Session = Depends(get_db)):
     """Analyze multiple documents in batch with cross-reference detection."""
-    from .schemas import AnalyzeBatchRequest, BatchAnalysisResult
-    from .services.analyzer import analyze_batch_documents
     
     # Parse request - handle both JSON and form data
     if hasattr(request, 'json'):
@@ -538,10 +539,6 @@ def export_analysis_pdf(analysis_id: str, db: Session = Depends(get_db)):
     small_style = ParagraphStyle(
         "Small", parent=body_style, fontSize=8, textColor=colors.HexColor("#555555")
     )
-    label_style = ParagraphStyle(
-        "Label", parent=body_style, fontSize=8, fontName="Helvetica-Bold"
-    )
-
     _SEV_COLORS = {
         "Critical": colors.HexColor("#DC2626"),
         "High": colors.HexColor("#EA580C"),

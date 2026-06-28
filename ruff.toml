@@ -1,0 +1,14 @@
+line-length = 100
+target-version = "py311"
+src = ["src/backend"]
+
+[lint]
+select = ["E", "F", "I"]
+ignore = [
+    "E501",  # line too long — not enforced
+    "E402",  # module-level import not at top — intentional for optional deps
+]
+
+[lint.isort]
+known-first-party = ["app"]
+force-sort-within-sections = true

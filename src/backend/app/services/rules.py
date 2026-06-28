@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
 from ..schemas import Evidence, Finding, Jurisdiction, Severity
@@ -950,10 +950,9 @@ def _confidence_rules_based(
     pattern_total: int,
 ) -> float:
     """Calculate confidence for rules-based matches (90-95% range).
-    
+
     Rules-based matches are inherently high confidence since they're pattern-matched.
     """
-    base = SEVERITY_BASE.get(severity, 0.6)
     hit_ratio = pattern_hits / pattern_total if pattern_total else 0.0
     # For rules-based: return 0.90-0.95 range based on hit quality
     if pattern_hits >= pattern_total * 0.5:  # Multiple patterns hit

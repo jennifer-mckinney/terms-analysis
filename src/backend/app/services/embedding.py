@@ -24,7 +24,7 @@ Plug-in options for future 4th embedding layer (all qualified under ethical crit
 
 import logging
 import re
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Tuple
 
 from ..config import settings
 

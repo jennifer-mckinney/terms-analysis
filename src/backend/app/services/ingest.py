@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from io import BytesIO
 import ipaddress
-from pathlib import Path
 import re
 import socket
+from io import BytesIO
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 from docx import Document
 from PIL import Image
 from pypdf import PdfReader
+
 try:
     import pytesseract
 except ImportError:  # Optional OCR dependency
@@ -20,7 +21,6 @@ except ImportError:  # Optional OCR dependency
 from striprtf.striprtf import rtf_to_text
 
 from ..config import settings
-
 
 _BLOCKED_NETWORKS = [
     ipaddress.ip_network("127.0.0.0/8"),

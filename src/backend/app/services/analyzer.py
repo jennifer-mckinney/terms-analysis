@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+import json
+import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import json
 from typing import List, Optional
 from uuid import uuid4
-import time
-import asyncio
-import re
 
 from ..config import settings
-from ..schemas import AnalysisPayload, DocType, Finding, IndustryProfile, Jurisdiction, Evidence
+from ..schemas import (
+    AnalysisPayload,
+    DocType,
+    Evidence,
+    Finding,
+    IndustryProfile,
+    Jurisdiction,
+)
 from .localai import LocalAIClient
 from .rules import detect_findings
 from .validation import validate_findings

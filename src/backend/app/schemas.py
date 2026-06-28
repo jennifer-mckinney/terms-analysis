@@ -5,7 +5,6 @@ from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, StrictFloat
 
-
 Jurisdiction = Literal[
     "US-CA",
     "US-FED",

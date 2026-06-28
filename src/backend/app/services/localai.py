@@ -12,7 +12,7 @@ from .prompts import SYSTEM_PROMPT, build_user_prompt
 logger = logging.getLogger("uvicorn.error")
 
 try:
-    from langdetect import detect as _langdetect, LangDetectException
+    from langdetect import detect as _langdetect
 
     _LANGDETECT_AVAILABLE = True
 except ImportError:

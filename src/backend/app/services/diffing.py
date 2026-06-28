@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import hashlib
 import difflib
+import hashlib
 import re
-from typing import Tuple, List, Dict, Literal
+from typing import Dict, List, Literal, Tuple
 
 
 def content_hash(text: str) -> str:
