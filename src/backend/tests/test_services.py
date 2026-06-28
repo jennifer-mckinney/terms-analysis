@@ -275,7 +275,9 @@ class TestAnalyzeTextFullMode:
             result = asyncio.run(analyze_text("We sell your data.", ["GDPR"]))
 
         assert result.payload.summary == "Selling user data."
-        assert len(result.payload.findings) >= 0
+        assert len(result.payload.findings) >= 1
+        excerpts = [f.excerpt for f in result.payload.findings]
+        assert "We sell your data." in excerpts
 
     def test_analyzer_analyze_text_full_mode_llm_returns_none(self):
         from app.services.analyzer import analyze_text
@@ -316,8 +318,12 @@ class TestAnalyzeTextFullMode:
 
             result = asyncio.run(analyze_text("We sell your data.", ["GDPR"]))
 
-        # LLM finding dropped due to missing legal_basis; confidence penalized
-        assert result.payload.confidence < 1.0
+        # LLM finding dropped due to missing legal_basis; no LLM-only finding survives
+        # Rule engine may produce findings for "We sell your data." text
+        for finding in result.payload.findings:
+            assert finding.evidence.legal_basis, (
+                f"All surviving findings must have legal_basis; found empty: {finding}"
+            )
 
     def test_analyzer_analyze_text_full_mode_llm_low_confidence_needs_review(self):
         from app.services.analyzer import analyze_text
@@ -347,10 +353,12 @@ class TestAnalyzeTextFullMode:
 
             result = asyncio.run(analyze_text("We may share your data.", ["GDPR"]))
 
-        # Low confidence LLM finding should be marked needs_review
-        llm_only = [f for f in result.payload.findings if f.confidence <= 0.4]
-        if llm_only:
-            assert llm_only[0].needs_review is True
+        # Low confidence LLM finding must exist and be marked needs_review.
+        # The excerpt "We may share your data." is unique to the LLM mock payload
+        # and won't be produced by the rule engine, so it must survive in findings.
+        llm_only = [f for f in result.payload.findings if f.excerpt == "We may share your data."]
+        assert len(llm_only) >= 1, "Low-confidence LLM finding must appear in merged results"
+        assert llm_only[0].needs_review is True
 
     def test_analyzer_analyze_text_with_source_document(self):
         from app.services.analyzer import analyze_text
@@ -364,6 +372,7 @@ class TestAnalyzeTextFullMode:
             )
 
         assert isinstance(result.payload.findings, list)
+        assert result.payload.analysis_mode in {"full", "quick"}
 
     def test_analyzer_analyze_text_with_doctype_and_industry(self):
         from app.services.analyzer import analyze_text
@@ -382,6 +391,9 @@ class TestAnalyzeTextFullMode:
             )
 
         assert result.payload.confidence >= 0.0
+        assert result.payload.analysis_mode == "full"
+        # Industry/doctype path executed — findings list must exist
+        assert isinstance(result.payload.findings, list)
 
 
 class TestAnalyzeBatchDocuments:
@@ -425,6 +437,7 @@ class TestAnalyzeBatchDocuments:
             )
 
         assert len(results) == 2
+        assert isinstance(cross_refs, list)
 
 
 class TestDetectCrossReferences:
@@ -435,7 +448,8 @@ class TestDetectCrossReferences:
             ("Privacy", "This is our privacy policy."),
         ]
         refs = _detect_cross_references(docs)
-        assert len(refs) >= 0  # May or may not match depending on patterns
+        assert len(refs) >= 1, "Should detect 'Privacy Policy' cross-reference"
+        assert refs[0]["source_document"] == "TOS"
 
     def test_analyzer_detect_cross_references_no_reference(self):
         from app.services.analyzer import _detect_cross_references
@@ -521,7 +535,7 @@ class TestExtractRtf:
         rtf_content = r"{\rtf1\ansi Hello World}"
         data = rtf_content.encode("utf-8")
         text = _extract_rtf(data)
-        assert "Hello" in text or isinstance(text, str)
+        assert "Hello" in text
 
 
 class TestExtractTextFromBytes:
@@ -656,6 +670,70 @@ class TestFetchUrlText:
         from app.services.ingest import fetch_url_text
         with pytest.raises(ValueError, match="not allowed"):
             asyncio.run(fetch_url_text("http://127.0.0.1/admin"))
+
+    def test_ingest_fetch_url_text_content_length_too_large_raises(self):
+        """ingest.py lines 206-210: Content-Length header exceeds max_upload_bytes."""
+        from app.services.ingest import fetch_url_text
+        from app.config import settings
+        oversized = str(settings.max_upload_bytes + 1)
+        with patch("app.services.ingest._validate_url"):
+            with patch("httpx.AsyncClient") as mock_cls:
+                mock_response = MagicMock()
+                mock_response.raise_for_status.return_value = None
+                mock_response.headers = {"content-length": oversized, "content-type": "text/plain"}
+                mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
+                mock_client.get.return_value = mock_response
+                mock_cls.return_value = mock_client
+                with pytest.raises(ValueError, match="exceeds"):
+                    asyncio.run(fetch_url_text("https://example.com/policy"))
+
+    def test_ingest_fetch_url_text_body_too_large_raises(self):
+        """ingest.py lines 212-216: response body exceeds max_upload_bytes."""
+        from app.services.ingest import fetch_url_text
+        from app.config import settings
+        with patch("app.services.ingest._validate_url"):
+            with patch("httpx.AsyncClient") as mock_cls:
+                mock_response = MagicMock()
+                mock_response.raise_for_status.return_value = None
+                # No content-length header so the body check runs
+                mock_response.headers = {"content-type": "text/plain"}
+                mock_response.content = b"x" * (settings.max_upload_bytes + 1)
+                mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
+                mock_client.get.return_value = mock_response
+                mock_cls.return_value = mock_client
+                with pytest.raises(ValueError, match="exceeds"):
+                    asyncio.run(fetch_url_text("https://example.com/policy"))
+
+    def test_ingest_fetch_url_text_request_hook_validates_per_request_url(self):
+        """ingest.py line 194: _on_request hook fires _validate_url for every request."""
+        from app.services.ingest import fetch_url_text
+        captured: dict = {}
+        with patch("app.services.ingest._validate_url"):
+            with patch("httpx.AsyncClient") as mock_cls:
+                mock_response = MagicMock()
+                mock_response.raise_for_status.return_value = None
+                mock_response.headers = {"content-type": "text/plain"}
+                mock_response.content = b"text content"
+                mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
+                mock_client.get.return_value = mock_response
+
+                def capture_kwargs(**kwargs):
+                    captured.update(kwargs.get("event_hooks", {}))
+                    return mock_client
+
+                mock_cls.side_effect = capture_kwargs
+                asyncio.run(fetch_url_text("https://example.com/policy"))
+
+        assert "request" in captured, "event_hooks must register a 'request' hook"
+        hook = captured["request"][0]
+        fake_req = MagicMock()
+        fake_req.url = "https://example.com/redirected"
+        with patch("app.services.ingest._validate_url") as mock_val:
+            hook(fake_req)  # fires line 194
+            mock_val.assert_called_once_with("https://example.com/redirected")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1142,8 +1220,15 @@ class TestAnalyzeTextInvalidLLMFinding:
             mock_client.analyze.return_value = mock_payload
             mock_cls.return_value = mock_client
             result = asyncio.run(analyze_text("We sell your personal data.", ["GDPR"]))
-        # Invalid finding was skipped; function still completes
-        assert result is not None
+        # Invalid finding was skipped; no finding with a nonsense category survives
+        assert result.payload is not None
+        bad_categories = [
+            f.category for f in result.payload.findings
+            if f.category == "completely_invalid_field"
+        ]
+        assert bad_categories == [], (
+            "Malformed LLM finding must be skipped and not appear in results"
+        )
         assert result.payload is not None
 
 

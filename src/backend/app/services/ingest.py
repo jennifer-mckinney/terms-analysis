@@ -14,6 +14,19 @@ from docx import Document
 from PIL import Image
 from pypdf import PdfReader
 
+_ALLOWED_CONTENT_TYPES = {
+    "text/plain",
+    "text/html",
+    "text/htm",
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/msword",
+    "application/rtf",
+    "text/rtf",
+    "text/markdown",
+    "application/octet-stream",
+}
+
 try:
     import pytesseract
 except ImportError:  # Optional OCR dependency
@@ -70,7 +83,8 @@ def _extract_pdf_with_ocr(data: bytes) -> str:
         return ""
     reader = PdfReader(BytesIO(data))
     parts = []
-    for page in reader.pages:
+    page_limit = settings.max_pdf_pages
+    for page in reader.pages[:page_limit]:
         text = page.extract_text()
         if text and text.strip():
             parts.append(text)
@@ -107,6 +121,9 @@ def _extract_rtf(data: bytes) -> str:
     return rtf_to_text(raw)
 
 
+_ALLOWED_EXTENSIONS = {".txt", ".md", ".html", ".htm", ".pdf", ".docx", ".rtf"}
+
+
 def extract_text_from_bytes(
     filename: str,
     content_type: Optional[str],
@@ -126,8 +143,12 @@ def extract_text_from_bytes(
         return _normalize_text(_extract_docx(data))
     if ext == ".rtf":
         return _normalize_text(_extract_rtf(data))
-    if content_type and "html" in content_type:
-        return _normalize_text(_extract_html(_decode_bytes(data)))
+    # For unknown extensions, only trust content_type for known HTML MIME types.
+    # Do not fall through for arbitrary MIME types to avoid parser abuse.
+    if content_type:
+        ct_base = content_type.split(";")[0].strip().lower()
+        if ct_base in {"text/html", "application/xhtml+xml"}:
+            return _normalize_text(_extract_html(_decode_bytes(data)))
     return _normalize_text(_decode_bytes(data))
 
 
@@ -163,16 +184,37 @@ def _validate_url(url: str) -> None:
 
 
 async def fetch_url_text(url: str) -> str:
-    try:
-        _validate_url(url)
-    except ValueError:
-        raise
+    _validate_url(url)
 
     timeout = settings.request_timeout_s
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.get(url, follow_redirects=True)
+    max_bytes = settings.max_upload_bytes
+
+    def _on_request(request: httpx.Request) -> None:
+        """Validate each URL before every request, including redirects."""
+        _validate_url(str(request.url))
+
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=True,
+        event_hooks={"request": [_on_request]},
+    ) as client:
+        response = await client.get(url)
         response.raise_for_status()
-        content_type = response.headers.get("content-type", "")
+
+        # Reject oversized responses before buffering the full body.
+        raw_length = response.headers.get("content-length")
+        if raw_length and int(raw_length) > max_bytes:
+            raise ValueError(
+                f"Response size {raw_length} bytes exceeds the "
+                f"{max_bytes}-byte limit"
+            )
         data = response.content
+        if len(data) > max_bytes:
+            raise ValueError(
+                f"Response size {len(data)} bytes exceeds the "
+                f"{max_bytes}-byte limit"
+            )
+        content_type = response.headers.get("content-type", "")
+
     filename = Path(url).name or "document"
     return extract_text_from_bytes(filename, content_type, data)

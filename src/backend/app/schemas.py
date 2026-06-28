@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field, StrictFloat
+from pydantic import BaseModel, Field, StrictFloat, field_validator
 
 Jurisdiction = Literal[
     "US-CA",
@@ -174,6 +174,19 @@ class WatchlistCreateRequest(BaseModel):
     vendor: str = Field(..., min_length=1)
     source_url: Optional[str] = None
 
+    @field_validator("source_url")
+    @classmethod
+    def validate_source_url_scheme(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        from urllib.parse import urlparse
+        parsed = urlparse(v)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("source_url must use http or https scheme")
+        if not parsed.hostname:
+            raise ValueError("source_url must include a valid hostname")
+        return v
+
 
 class BatchItem(BaseModel):
     """Individual item for batch analysis (URL or file reference)"""
@@ -253,5 +266,10 @@ class PolicyWatchPayload(BaseModel):
 class PolicyWatchCreateRequest(BaseModel):
     """Request to create a new policy watch."""
     url: str = Field(..., min_length=4)
-    user_id: Optional[str] = None
+    user_id: Optional[str] = Field(
+        default=None,
+        max_length=255,
+        pattern=r"^[a-zA-Z0-9@._\-]+$",
+        description="Opaque user identifier; alphanumeric, @, ., _, - only",
+    )
     check_frequency: int = Field(default=86400, ge=300, le=604800)  # 5 minutes to 7 days

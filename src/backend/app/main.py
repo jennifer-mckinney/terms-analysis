@@ -9,8 +9,9 @@ from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from io import BytesIO, StringIO
 from uuid import uuid4
+from xml.sax.saxutils import escape as _xml_escape
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import Session
@@ -51,6 +52,15 @@ from .services.rules import detect_findings
 logger = logging.getLogger("uvicorn.error")
 
 
+def _verify_api_key(x_api_key: str | None = Header(default=None)) -> None:
+    """Enforce API key auth when settings.api_key is set.  No-op when unset."""
+    required = settings.api_key
+    if not required:
+        return
+    if x_api_key != required:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -64,25 +74,25 @@ async def lifespan(app: FastAPI):
             await task
 
 
-app = FastAPI(title="Terms Analysis Backend", version="0.1.0", lifespan=lifespan)
+app = FastAPI(
+    title="Terms Analysis Backend",
+    version="0.1.0",
+    lifespan=lifespan,
+    dependencies=[Depends(_verify_api_key)],
+)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type", "X-API-Key"],
 )
 
 
 @app.get("/health")
 def health() -> dict:
-    return {
-        "status": "ok",
-        "model_world": settings.model_world,
-        "model_eu": settings.model_eu,
-        "review_threshold": settings.review_threshold,
-    }
+    return {"status": "ok"}
 
 
 async def _watchlist_loop_async() -> None:
@@ -167,7 +177,7 @@ def _persist_analysis(
         confidence=payload.confidence,
         risk_score=payload.risk_score,
         grade=payload.grade,
-        document_text=payload.document_text,
+        document_text=(payload.document_text or "")[:50_000] or None,
         result_json=payload_json,
     )
     db.add(analysis)
@@ -343,16 +353,9 @@ async def analyze_file(
 
 
 @app.post("/analyze/batch", response_model=dict)
-async def analyze_batch(request, db: Session = Depends(get_db)):
+async def analyze_batch(request: AnalyzeBatchRequest, db: Session = Depends(get_db)):
     """Analyze multiple documents in batch with cross-reference detection."""
-    
-    # Parse request - handle both JSON and form data
-    if hasattr(request, 'json'):
-        body = await request.json()
-        batch_req = AnalyzeBatchRequest(**body)
-    else:
-        batch_req = request
-    
+    batch_req = request
     logger.info(
         "Batch analyze request: items=%d mode=%s detect_cross_refs=%s",
         len(batch_req.items),
@@ -409,7 +412,10 @@ async def analyze_batch(request, db: Session = Depends(get_db)):
 
 
 @app.get("/analyses", response_model=list[AnalysisSummary])
-def list_analyses(limit: int = 25, db: Session = Depends(get_db)):
+def list_analyses(
+    limit: int = Query(default=25, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
     records = (
         db.query(Analysis)
         .order_by(Analysis.created_at.desc())
@@ -449,6 +455,7 @@ def get_analysis(analysis_id: str, db: Session = Depends(get_db)):
         data = json.loads(record.result_json)
     except json.JSONDecodeError:
         raise HTTPException(status_code=500, detail="Stored analysis is invalid")
+    data["document_text"] = None  # strip raw text from public detail response
     return AnalysisPayload(**data)
 
 
@@ -689,22 +696,23 @@ def export_analysis_pdf(analysis_id: str, db: Session = Depends(get_db)):
         story.append(HRFlowable(width="100%", thickness=1, color=sev_color, spaceAfter=6))
 
         for f in sev_findings:
-            category = f.get("category", "Unknown")
+            category = _xml_escape(f.get("category", "Unknown"))
             conf_pct = int((f.get("confidence") or 0) * 100)
             story.append(Paragraph(f"<b>{category}</b>", h3_style))
             story.append(Paragraph(
-                f"Severity: <b>{severity}</b> &nbsp;|&nbsp; Confidence: {conf_pct}%",
+                f"Severity: <b>{_xml_escape(severity)}</b> &nbsp;|&nbsp; Confidence: {conf_pct}%",
                 small_style,
             ))
 
-            excerpt = (f.get("excerpt") or "")[:500]
-            if len(f.get("excerpt") or "") > 500:
+            raw_excerpt = f.get("excerpt") or ""
+            excerpt = _xml_escape(raw_excerpt[:500])
+            if len(raw_excerpt) > 500:
                 excerpt += "…"
             if excerpt:
                 story.append(Spacer(1, 3))
                 story.append(Paragraph(f'"{excerpt}"', italic_style))
 
-            explanation = f.get("explanation") or ""
+            explanation = _xml_escape(f.get("explanation") or "")
             if explanation:
                 story.append(Spacer(1, 3))
                 story.append(Paragraph(explanation, body_style))
@@ -712,14 +720,14 @@ def export_analysis_pdf(analysis_id: str, db: Session = Depends(get_db)):
             legal = f.get("evidence", {}).get("legal_basis") or []
             if legal:
                 story.append(Paragraph(
-                    "<b>Legal basis:</b> " + "; ".join(legal),
+                    "<b>Legal basis:</b> " + "; ".join(_xml_escape(b) for b in legal),
                     small_style,
                 ))
 
             jurs = f.get("jurisdictions") or []
             if jurs:
                 story.append(Paragraph(
-                    "<b>Jurisdictions:</b> " + ", ".join(jurs),
+                    "<b>Jurisdictions:</b> " + ", ".join(_xml_escape(j) for j in jurs),
                     small_style,
                 ))
 
@@ -965,7 +973,8 @@ async def create_snapshot(url: str, db: Session = Depends(get_db)):
     try:
         text = await fetch_url_text(url)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to fetch URL: {str(e)}")
+        logger.warning("Snapshot URL fetch failed for %s: %s", url, e)
+        raise HTTPException(status_code=400, detail="Failed to fetch the requested URL.")
     
     if not text:
         raise HTTPException(status_code=400, detail="URL content is empty")
@@ -1143,7 +1152,8 @@ async def capture_watch_snapshot(watch_id: str, db: Session = Depends(get_db)):
     try:
         text = await fetch_url_text(watch.url)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to fetch URL: {str(e)}")
+        logger.warning("Policy-watch URL fetch failed for %s: %s", watch.url, e)
+        raise HTTPException(status_code=400, detail="Failed to fetch the requested URL.")
     
     if not text:
         raise HTTPException(status_code=400, detail="URL content is empty")

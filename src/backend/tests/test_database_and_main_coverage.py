@@ -302,16 +302,18 @@ class TestAnalyzeFileErrors:
 class TestRefreshAllWatchlistItems:
     def test_main_refresh_all_watchlist_items_no_items(self, db_session):
         from app.main import _refresh_all_watchlist_items
+        from app.models import WatchlistItem as WatchlistItemModel
         with patch("app.main.settings") as mock_settings:
             mock_settings.watchlist_refresh_seconds = 60
-
-            async def fake_session_ctx():
-                yield db_session
 
             with patch("app.main.db_session") as mock_db_ctx:
                 mock_db_ctx.return_value.__enter__ = lambda s: db_session
                 mock_db_ctx.return_value.__exit__ = MagicMock(return_value=False)
                 asyncio.run(_refresh_all_watchlist_items())
+
+        # With no WatchlistItems in DB, no rows should have been written
+        count = db_session.query(WatchlistItemModel).count()
+        assert count == 0
 
     def test_main_refresh_all_watchlist_items_skips_when_disabled(self, db_session):
         from app.main import _refresh_all_watchlist_items
@@ -661,39 +663,34 @@ class TestPersistAnalysisLegacyPydantic:
 # analyze_batch with async json path (covers main.py lines 351-352)
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestAnalyzeBatchAsyncJsonPath:
-    def test_main_analyze_batch_async_json_path_covers_lines_351_352(
+class TestAnalyzeBatchPydanticValidation:
+    """analyze_batch now uses proper Pydantic type annotation — exercises the endpoint path."""
+
+    def test_main_analyze_batch_valid_request_returns_batch_id(
         self, db_session, monkeypatch
     ):
         from app.main import analyze_batch
+        from app.schemas import AnalyzeBatchRequest, BatchItem
 
         async def fake_fetch(url):
-            return "Privacy policy content for async json test."
+            return "Privacy policy content for pydantic path test."
 
         async def fake_analyze_batch(
             documents, industry, jurisdictions, mode, detect_cross_refs
         ):
-            return [_make_payload(name="AsyncDoc1")], []
+            return [_make_payload(name="Doc1")], []
 
         monkeypatch.setattr("app.main.fetch_url_text", fake_fetch)
         monkeypatch.setattr("app.main.analyze_batch_documents", fake_analyze_batch)
 
-        # MagicMock always has .json attribute → hasattr(..., 'json') is True
-        # AsyncMock for .json() makes it awaitable
-        mock_request = MagicMock()
-        mock_request.json = AsyncMock(
-            return_value={
-                "items": [
-                    {"url": "https://example.com/privacy", "name": "Privacy Policy"}
-                ],
-                "jurisdictions": ["GDPR"],
-                "mode": "full",
-                "industry": None,
-                "detect_cross_references": False,
-            }
+        request = AnalyzeBatchRequest(
+            items=[BatchItem(url="https://example.com/privacy", name="Privacy Policy")],
+            jurisdictions=["GDPR"],
+            mode="full",
+            industry=None,
+            detect_cross_references=False,
         )
-
-        result = asyncio.run(analyze_batch(request=mock_request, db=db_session))
+        result = asyncio.run(analyze_batch(request=request, db=db_session))
         assert "items" in result
         assert "batch_id" in result
 
