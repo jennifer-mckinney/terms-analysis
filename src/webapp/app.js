@@ -697,8 +697,31 @@ function displayAnalysisResults(doc, mode) {
     const medCount  = (doc.findings || []).filter(f => (f.severity || '').toUpperCase() === 'MEDIUM').length;
     const lowCount  = (doc.findings || []).filter(f => (f.severity || '').toUpperCase() === 'LOW').length;
 
+    // Confidence explanation
+    const confidencePct = Math.round((doc.confidence || 0) * 100);
+    let confidenceNote = '';
+    if (confidencePct < 50) {
+        confidenceNote = `<p class="text-secondary" style="margin-top:6px;font-size:0.88rem">
+            <i class="fas fa-info-circle"></i>
+            <strong>Scan confidence: ${confidencePct}%</strong> — The AI assistant wasn't available, so this is a pattern-only scan.
+            Results may miss some issues or have false positives. A human review is recommended.
+        </p>`;
+    } else if (confidencePct < 80) {
+        confidenceNote = `<p class="text-secondary" style="margin-top:6px;font-size:0.88rem">
+            <i class="fas fa-info-circle"></i>
+            <strong>Scan confidence: ${confidencePct}%</strong> — Partial AI analysis completed.
+            Some findings may need human verification before acting on them.
+        </p>`;
+    }
+
+    // Score explanation
+    const scoreContext = riskScore >= 8 ? 'Very high risk (8–10)' :
+                         riskScore >= 7 ? 'High risk (7–8)' :
+                         riskScore >= 5 ? 'Moderate risk (5–7)' :
+                         riskScore >= 3 ? 'Low risk (3–5)' : 'Minimal risk (0–3)';
+
     const humanReviewNote = doc.review_required
-        ? `<p class="text-secondary" style="margin-top:4px"><i class="fas fa-user-check"></i> A human expert should review this one before you sign up.</p>`
+        ? `<p class="text-secondary" style="margin-top:4px"><i class="fas fa-user-check"></i> Low confidence — a human expert should verify these findings before you decide.</p>`
         : '';
 
     const summaryText = doc.summary
@@ -715,16 +738,18 @@ function displayAnalysisResults(doc, mode) {
                 <h3>${name}</h3>
                 <p class="text-secondary">Checked on ${analyzedDate} &middot; ${modeLabel}</p>
             </div>
-            <div class="risk-score">
+            <div class="risk-score" title="${scoreContext}">
                 <div class="risk-score-value">${riskScore}</div>
                 <div class="risk-grade">Grade ${grade}</div>
+                <div style="font-size:0.72rem;color:var(--color-text-secondary);text-align:center;margin-top:2px">${scoreContext}</div>
             </div>
         </div>
 
-        <div class="finding-item" style="background:var(--color-surface-alt,#f5f0e8);border-left:4px solid var(--color-primary);margin-bottom:16px">
+        <div class="finding-item" style="background:var(--color-surface-alt,rgba(94,82,64,0.06));border-left:4px solid var(--color-primary);margin-bottom:16px">
             <div style="font-size:1.25rem;font-weight:700;margin-bottom:4px">${gradeInfo.emoji} ${gradeInfo.headline}</div>
             <p>${gradeInfo.detail}</p>
             ${summaryText}
+            ${confidenceNote}
             ${humanReviewNote}
             <div style="margin-top:10px;display:flex;gap:12px;flex-wrap:wrap">
                 ${highCount ? `<span class="finding-severity high">${highCount} Serious</span>` : ''}
