@@ -278,7 +278,7 @@ async def analyze_text(
             confidence *= 0.8
         elif not llm_findings:
             confidence *= 0.85
-        if 'dropped_for_legal' in locals() and dropped_for_legal:
+        if dropped_for_legal:
             confidence *= max(0.5, 1 - (0.1 * dropped_for_legal))
     confidence = max(0.0, min(1.0, confidence))
 
