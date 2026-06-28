@@ -632,6 +632,8 @@ function setupAnalyzeButton() {
 }
 
 async function startAnalysis() {
+    const activeTab = document.querySelector('.tab-btn.active');
+    const activeInput = activeTab ? activeTab.getAttribute('data-input') : null;
     const documentUrl = document.getElementById('documentUrl').value;
     const documentText = document.getElementById('documentText').value;
     const fileInput = document.getElementById('fileInput');
@@ -639,8 +641,11 @@ async function startAnalysis() {
     const jurisdictions = Array.from(document.querySelectorAll('input[name="jurisdiction"]:checked'))
         .map(input => input.value);
 
-    // Validate input
-    if (!documentUrl && !documentText && fileInput.files.length === 0) {
+    // Validate input based on active tab
+    const hasUrl = activeInput === 'url' && documentUrl;
+    const hasText = activeInput === 'text' && documentText;
+    const hasFile = activeInput === 'upload' && fileInput.files.length > 0;
+    if (!hasUrl && !hasText && !hasFile) {
         showToast('Please provide a document URL, upload a file, or paste text', 'error');
         return;
     }
@@ -662,9 +667,9 @@ async function startAnalysis() {
     setResultsPlaceholder('Checking policy...');
     try {
         let result = null;
-        if (documentUrl) {
+        if (hasUrl) {
             result = await analyzeUrl(documentUrl, jurisdictions, backendMode);
-        } else if (fileInput.files.length > 0) {
+        } else if (hasFile) {
             result = await analyzeFile(fileInput.files[0], jurisdictions, backendMode);
         } else {
             result = await analyzeText(documentText, jurisdictions, backendMode);
