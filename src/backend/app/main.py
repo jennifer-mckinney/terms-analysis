@@ -4,6 +4,7 @@ import asyncio
 import csv
 import json
 import logging
+import typing
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from io import BytesIO, StringIO
@@ -16,20 +17,30 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .database import db_session, get_db, init_db
-from .models import Analysis, ReviewItem, WatchlistItem
+from .models import Analysis, ReviewItem, WatchlistItem, PolicySnapshot, PolicyWatch
 from .schemas import (
     AnalysisPayload,
     AnalysisSummary,
     AnalyzeRequest,
     AnalyzeUrlRequest,
+    AnalyzeBatchRequest,
+    BatchAnalysisResult,
+    DocType,
+    IndustryProfile,
     ReviewItemPayload,
     ReviewUpdate,
     RubricScores,
     WatchlistCreateRequest,
     WatchlistItemPayload,
+    PolicySnapshotPayload,
+    PolicySnapshotListItem,
+    DiffResult,
+    DiffToken,
+    PolicyWatchPayload,
+    PolicyWatchCreateRequest,
 )
-from .services.analyzer import analyze_text, calculate_risk_score
-from .services.diffing import content_hash, diff_summary
+from .services.analyzer import analyze_text, calculate_risk_score, analyze_batch_documents
+from .services.diffing import content_hash, diff_summary, diff_tokens
 from .services.ingest import extract_text_from_bytes, fetch_url_text
 from .services.rules import detect_findings
 
@@ -189,9 +200,10 @@ def _compute_rubric_scores(records: list[Analysis]) -> RubricScores:
 @app.post("/analyze", response_model=AnalysisPayload)
 async def analyze(request: AnalyzeRequest, db: Session = Depends(get_db)):
     logger.info(
-        "Analyze request: type=text len=%s jurisdictions=%s",
+        "Analyze request: type=text len=%s jurisdictions=%s mode=%s",
         len(request.text),
         request.jurisdictions,
+        request.mode,
     )
     resolved_name = request.name or request.source_url or "Pasted Document"
     result = await analyze_text(
@@ -199,7 +211,9 @@ async def analyze(request: AnalyzeRequest, db: Session = Depends(get_db)):
         request.jurisdictions,
         name=resolved_name,
         doc_type=request.doc_type,
+        industry=request.industry,
         source_url=request.source_url,
+        mode=request.mode,
     )
     payload = result.payload
     _persist_analysis(
@@ -216,9 +230,10 @@ async def analyze(request: AnalyzeRequest, db: Session = Depends(get_db)):
 @app.post("/analyze/url", response_model=AnalysisPayload)
 async def analyze_url(request: AnalyzeUrlRequest, db: Session = Depends(get_db)):
     logger.info(
-        "Analyze request: type=url url=%s jurisdictions=%s",
+        "Analyze request: type=url url=%s jurisdictions=%s mode=%s",
         request.url,
         request.jurisdictions,
+        request.mode,
     )
     try:
         text = await fetch_url_text(request.url)
@@ -236,7 +251,9 @@ async def analyze_url(request: AnalyzeUrlRequest, db: Session = Depends(get_db))
         request.jurisdictions,
         name=resolved_name,
         doc_type=request.doc_type,
+        industry=request.industry,
         source_url=request.url,
+        mode=request.mode,
     )
     payload = result.payload
     _persist_analysis(
@@ -255,13 +272,16 @@ async def analyze_file(
     file: UploadFile = File(...),
     name: str | None = Form(default=None),
     doc_type: str | None = Form(default=None),
+    industry: str | None = Form(default=None),
     jurisdictions: str | None = Form(default=None),
+    mode: str | None = Form(default="full"),
     db: Session = Depends(get_db),
 ):
     logger.info(
-        "Analyze request: type=file filename=%s content_type=%s",
+        "Analyze request: type=file filename=%s content_type=%s mode=%s",
         file.filename,
         file.content_type,
+        mode,
     )
     max_bytes = settings.max_upload_bytes
     data = b""
@@ -278,6 +298,19 @@ async def analyze_file(
     if not text:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
+    _valid_doc_types = set(typing.get_args(DocType))
+    _valid_industries = set(typing.get_args(IndustryProfile))
+    if doc_type is not None and doc_type not in _valid_doc_types:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid doc_type '{doc_type}'. Valid values: {sorted(_valid_doc_types)}",
+        )
+    if industry is not None and industry not in _valid_industries:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid industry '{industry}'. Valid values: {sorted(_valid_industries)}",
+        )
+
     selected_jurisdictions = (
         [j.strip() for j in jurisdictions.split(",") if j.strip()]
         if jurisdictions
@@ -290,7 +323,9 @@ async def analyze_file(
         selected_jurisdictions,
         name=resolved_name,
         doc_type=doc_type,
+        industry=industry,
         source_url=None,
+        mode=mode,
     )
     payload = result.payload
     _persist_analysis(
@@ -302,6 +337,74 @@ async def analyze_file(
         db=db,
     )
     return payload
+
+
+@app.post("/analyze/batch", response_model=dict)
+async def analyze_batch(request, db: Session = Depends(get_db)):
+    """Analyze multiple documents in batch with cross-reference detection."""
+    from .schemas import AnalyzeBatchRequest, BatchAnalysisResult
+    from .services.analyzer import analyze_batch_documents
+    
+    # Parse request - handle both JSON and form data
+    if hasattr(request, 'json'):
+        body = await request.json()
+        batch_req = AnalyzeBatchRequest(**body)
+    else:
+        batch_req = request
+    
+    logger.info(
+        "Batch analyze request: items=%d mode=%s detect_cross_refs=%s",
+        len(batch_req.items),
+        batch_req.mode,
+        batch_req.detect_cross_references,
+    )
+    
+    documents = []
+    for item in batch_req.items:
+        if item.url:
+            try:
+                text = await fetch_url_text(item.url)
+                if text:
+                    documents.append((text, item.name, item.url, item.doc_type))
+            except Exception as e:
+                logger.error(f"Failed to fetch URL {item.url}: {e}")
+                continue
+    
+    if not documents:
+        raise HTTPException(status_code=400, detail="No valid documents to analyze")
+    
+    # Analyze documents in batch
+    results, cross_refs = await analyze_batch_documents(
+        documents,
+        batch_req.industry,
+        batch_req.jurisdictions,
+        batch_req.mode,
+        batch_req.detect_cross_references,
+    )
+    
+    # Persist analyses
+    for result in results:
+        _persist_analysis(
+            payload=result,
+            source_type="batch",
+            source_value=result.source_url,
+            doc_type=result.doc_type,
+            source_url=result.source_url,
+            db=db,
+        )
+    
+    batch_result = BatchAnalysisResult(
+        batch_id=str(uuid4()),
+        analysis_mode=batch_req.mode,
+        items=results,
+        cross_references=cross_refs,
+        created_at=datetime.now(timezone.utc),
+    )
+    
+    if hasattr(batch_result, 'model_dump'):
+        return batch_result.model_dump()
+    else:
+        return json.loads(batch_result.json())
 
 
 @app.get("/analyses", response_model=list[AnalysisSummary])
@@ -392,8 +495,19 @@ def export_analyses_csv(db: Session = Depends(get_db)):
 @app.get("/exports/analysis/{analysis_id}.pdf")
 def export_analysis_pdf(analysis_id: str, db: Session = Depends(get_db)):
     try:
+        from reportlab.lib import colors
         from reportlab.lib.pagesizes import letter
-        from reportlab.pdfgen import canvas
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import inch
+        from reportlab.platypus import (
+            HRFlowable,
+            PageBreak,
+            Paragraph,
+            SimpleDocTemplate,
+            Spacer,
+            Table,
+            TableStyle,
+        )
     except ImportError:
         raise HTTPException(status_code=500, detail="PDF export dependency missing")
 
@@ -402,26 +516,250 @@ def export_analysis_pdf(analysis_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Analysis not found")
 
     data = json.loads(record.result_json)
+    findings = data.get("findings", [])
+
+    # ── Styles ────────────────────────────────────────────────────────────
+    base = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "ReportTitle", parent=base["Title"], fontSize=22, spaceAfter=6
+    )
+    h2_style = ParagraphStyle(
+        "H2", parent=base["Heading2"], fontSize=14, spaceAfter=4
+    )
+    h3_style = ParagraphStyle(
+        "H3", parent=base["Heading3"], fontSize=11, spaceAfter=2
+    )
+    body_style = ParagraphStyle(
+        "Body", parent=base["Normal"], fontSize=9, leading=13, spaceAfter=4
+    )
+    italic_style = ParagraphStyle(
+        "Italic", parent=body_style, fontName="Helvetica-Oblique", backColor=colors.HexColor("#F5F5F5")
+    )
+    small_style = ParagraphStyle(
+        "Small", parent=body_style, fontSize=8, textColor=colors.HexColor("#555555")
+    )
+    label_style = ParagraphStyle(
+        "Label", parent=body_style, fontSize=8, fontName="Helvetica-Bold"
+    )
+
+    _SEV_COLORS = {
+        "Critical": colors.HexColor("#DC2626"),
+        "High": colors.HexColor("#EA580C"),
+        "Medium": colors.HexColor("#D97706"),
+        "Low": colors.HexColor("#16A34A"),
+    }
+    _GRADE_COLORS = {
+        "A": colors.HexColor("#16A34A"),
+        "A-": colors.HexColor("#65A30D"),
+        "B": colors.HexColor("#CA8A04"),
+        "B-": colors.HexColor("#D97706"),
+        "C": colors.HexColor("#EA580C"),
+        "C+": colors.HexColor("#DC2626"),
+        "D+": colors.HexColor("#991B1B"),
+    }
+
+    _JURISDICTION_NAMES = {
+        "US-CA": "California CCPA/CPRA",
+        "US-FED": "US Federal (FTC, COPPA, HIPAA, GLBA, CAN-SPAM)",
+        "US-NY": "New York SHIELD Act",
+        "US-TX": "Texas TDPSA",
+        "US-VA": "Virginia CDPA",
+        "US-CO": "Colorado Privacy Act",
+        "US-CT": "Connecticut CTDPA",
+        "US-IL": "Illinois BIPA",
+        "US-NJ": "New Jersey DPA",
+        "US-MN": "Minnesota MCDPA",
+        "US-OR": "Oregon Consumer Privacy Act",
+        "GDPR": "EU General Data Protection Regulation",
+        "UK-GDPR": "UK GDPR (post-Brexit)",
+        "LGPD": "Brazil Lei Geral de Proteção de Dados",
+        "PIPEDA": "Canada Personal Information Protection Act",
+        "CA-QC": "Quebec Law 25",
+        "POPIA": "South Africa Protection of Personal Information Act",
+        "PDPA-KE": "Kenya Data Protection Act 2019",
+        "DPDP": "India Digital Personal Data Protection Act 2023",
+        "APPI": "Japan Act on Protection of Personal Information",
+        "PIPA": "South Korea Personal Information Protection Act",
+        "APP": "Australia Privacy Act / Privacy Principles",
+        "PDPA-TH": "Thailand Personal Data Protection Act",
+        "NDPR": "Nigeria Data Protection Act 2023",
+        "ICCPR-17": "UN ICCPR Article 17 (Privacy)",
+        "COE-108": "Council of Europe Convention 108+",
+        "EU-AI-ACT": "EU Artificial Intelligence Act",
+        "COE-AI-225": "Council of Europe AI Convention (CETS 225)",
+        "OECD-AI": "OECD AI Principles",
+        "UNESCO-AI": "UNESCO AI Ethics Recommendation",
+    }
+
+    # ── Collect stats ─────────────────────────────────────────────────────
+    sev_counts: dict[str, int] = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
+    used_jurisdictions: set[str] = set()
+    for f in findings:
+        sev = f.get("severity", "Low")
+        sev_counts[sev] = sev_counts.get(sev, 0) + 1
+        for j in f.get("jurisdictions", []):
+            used_jurisdictions.add(j)
+
+    grade = data.get("grade", "?")
+    risk_score = data.get("risk_score", 0.0)
+    confidence = data.get("confidence", 0.0)
+    grade_color = _GRADE_COLORS.get(grade, colors.black)
+
+    story = []
+
+    # ── Page 1: Executive Summary ─────────────────────────────────────────
+    story.append(Paragraph("Privacy &amp; Terms Analysis Report", title_style))
+    story.append(Spacer(1, 6))
+
+    meta_rows = [
+        ["Document", data.get("name") or "Untitled"],
+        ["Type", data.get("doc_type") or "—"],
+        ["Industry", data.get("industry") or "—"],
+        ["Analyzed", data.get("created_at", "")[:19].replace("T", " ")],
+    ]
+    meta_table = Table(meta_rows, colWidths=[1.5 * inch, 5 * inch])
+    meta_table.setStyle(TableStyle([
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    story.append(meta_table)
+    story.append(Spacer(1, 12))
+
+    # Grade badge
+    grade_cell = [[Paragraph(f"<b>Grade: {grade}</b>", ParagraphStyle("GB", fontSize=16, textColor=colors.white))]]
+    badge = Table(grade_cell, colWidths=[1.5 * inch])
+    badge.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), grade_color),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("ROUNDEDCORNERS", [4]),
+    ]))
+    score_data = [
+        [badge, Paragraph(
+            f"<b>Risk Score:</b> {risk_score:.1f} / 10<br/>"
+            f"<b>Confidence:</b> {confidence * 100:.0f}%<br/>"
+            f"<b>Status:</b> {data.get('status', '—')}",
+            body_style,
+        )],
+    ]
+    score_table = Table(score_data, colWidths=[1.8 * inch, 4.7 * inch])
+    score_table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (1, 0), (1, 0), 16),
+    ]))
+    story.append(score_table)
+    story.append(Spacer(1, 10))
+
+    # Severity counts
+    sev_row = [[
+        Paragraph(f"<b><font color='#{c[1:]}'>&#9632;</font> {sev}:</b> {sev_counts[sev]}", body_style)
+        for sev, c in [
+            ("Critical", "#DC2626"), ("High", "#EA580C"),
+            ("Medium", "#D97706"), ("Low", "#16A34A"),
+        ]
+    ]]
+    sev_table = Table(sev_row, colWidths=[1.6 * inch] * 4)
+    sev_table.setStyle(TableStyle([("ALIGN", (0, 0), (-1, -1), "CENTER")]))
+    story.append(sev_table)
+    story.append(Spacer(1, 10))
+
+    if data.get("summary"):
+        story.append(Paragraph("<b>Summary</b>", h2_style))
+        story.append(Paragraph(data["summary"], body_style))
+        story.append(Spacer(1, 8))
+
+    if used_jurisdictions:
+        story.append(Paragraph(
+            "<b>Jurisdictions:</b> " + ", ".join(sorted(used_jurisdictions)),
+            small_style,
+        ))
+
+    story.append(PageBreak())
+
+    # ── Page 2+: Findings grouped by severity ────────────────────────────
+    for severity in ("Critical", "High", "Medium", "Low"):
+        sev_findings = [f for f in findings if f.get("severity") == severity]
+        if not sev_findings:
+            continue
+
+        sev_color = _SEV_COLORS.get(severity, colors.black)
+        story.append(Paragraph(
+            f"<font color='#{sev_color.hexval()[2:]}'><b>{severity} Findings ({len(sev_findings)})</b></font>",
+            h2_style,
+        ))
+        story.append(HRFlowable(width="100%", thickness=1, color=sev_color, spaceAfter=6))
+
+        for f in sev_findings:
+            category = f.get("category", "Unknown")
+            conf_pct = int((f.get("confidence") or 0) * 100)
+            story.append(Paragraph(f"<b>{category}</b>", h3_style))
+            story.append(Paragraph(
+                f"Severity: <b>{severity}</b> &nbsp;|&nbsp; Confidence: {conf_pct}%",
+                small_style,
+            ))
+
+            excerpt = (f.get("excerpt") or "")[:500]
+            if len(f.get("excerpt") or "") > 500:
+                excerpt += "…"
+            if excerpt:
+                story.append(Spacer(1, 3))
+                story.append(Paragraph(f'"{excerpt}"', italic_style))
+
+            explanation = f.get("explanation") or ""
+            if explanation:
+                story.append(Spacer(1, 3))
+                story.append(Paragraph(explanation, body_style))
+
+            legal = f.get("evidence", {}).get("legal_basis") or []
+            if legal:
+                story.append(Paragraph(
+                    "<b>Legal basis:</b> " + "; ".join(legal),
+                    small_style,
+                ))
+
+            jurs = f.get("jurisdictions") or []
+            if jurs:
+                story.append(Paragraph(
+                    "<b>Jurisdictions:</b> " + ", ".join(jurs),
+                    small_style,
+                ))
+
+            story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#DDDDDD"), spaceAfter=6))
+            story.append(Spacer(1, 4))
+
+    # ── Last page: Jurisdiction Legend ────────────────────────────────────
+    story.append(PageBreak())
+    story.append(Paragraph("Jurisdictions Referenced", h2_style))
+    story.append(Spacer(1, 6))
+
+    legend_data = [["Code", "Framework"]]
+    for code, name in _JURISDICTION_NAMES.items():
+        legend_data.append([code, name])
+
+    legend_table = Table(legend_data, colWidths=[1.4 * inch, 5.1 * inch])
+    legend_table.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F5F5F5")]),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#DDDDDD")),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    story.append(legend_table)
+
+    # ── Build PDF ─────────────────────────────────────────────────────────
     buffer = BytesIO()
-    pdf = canvas.Canvas(buffer, pagesize=letter)
-    pdf.setFont("Helvetica", 11)
-    text = pdf.beginText(40, 750)
-    text.textLine(f"Analysis ID: {data.get('id')}")
-    text.textLine(f"Name: {data.get('name')}")
-    text.textLine(f"Type: {data.get('doc_type')}")
-    text.textLine(f"Status: {data.get('status')}")
-    text.textLine(f"Confidence: {data.get('confidence')}")
-    text.textLine(f"Risk Score: {data.get('risk_score')}")
-    text.textLine("")
-    text.textLine("Findings:")
-    for finding in data.get("findings", []):
-        text.textLine(f"- {finding.get('category')} ({finding.get('severity')})")
-        text.textLine(f"  Excerpt: {finding.get('excerpt')}")
-        text.textLine(f"  Explanation: {finding.get('explanation')}")
-        text.textLine("")
-    pdf.drawText(text)
-    pdf.showPage()
-    pdf.save()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        rightMargin=0.75 * inch,
+        leftMargin=0.75 * inch,
+        topMargin=0.75 * inch,
+        bottomMargin=0.75 * inch,
+    )
+    doc.build(story)
     buffer.seek(0)
     return Response(content=buffer.read(), media_type="application/pdf")
 
@@ -577,4 +915,279 @@ async def refresh_watchlist(item_id: str, db: Session = Depends(get_db)):
         change_count=item.change_count,
         risk_delta=item.risk_delta,
         change_summary=item.change_summary,
+    )
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Policy Snapshots & Diffs (Enhancement 6)
+# ────────────────────────────────────────────────────────────────────────────
+
+
+@app.get("/snapshots", response_model=list[PolicySnapshotListItem])
+def get_snapshots(url: str, db: Session = Depends(get_db)):
+    """Get historical snapshots of a policy by URL."""
+    snapshots = (
+        db.query(PolicySnapshot)
+        .filter(PolicySnapshot.url == url)
+        .order_by(PolicySnapshot.captured_at.desc())
+        .all()
+    )
+    if not snapshots:
+        raise HTTPException(status_code=404, detail="No snapshots found for this URL")
+    
+    return [
+        PolicySnapshotListItem(
+            id=snapshot.id,
+            url=snapshot.url,
+            content_hash=snapshot.content_hash,
+            captured_at=snapshot.captured_at,
+        )
+        for snapshot in snapshots
+    ]
+
+
+@app.get("/snapshots/detail/{snapshot_id}", response_model=PolicySnapshotPayload)
+def get_snapshot_detail(snapshot_id: str, db: Session = Depends(get_db)):
+    """Get full details of a specific snapshot."""
+    snapshot = db.query(PolicySnapshot).filter(PolicySnapshot.id == snapshot_id).first()
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    
+    return PolicySnapshotPayload(
+        id=snapshot.id,
+        url=snapshot.url,
+        content_hash=snapshot.content_hash,
+        captured_at=snapshot.captured_at,
+        raw_text=snapshot.raw_text,
+    )
+
+
+@app.post("/snapshots", response_model=PolicySnapshotPayload)
+async def create_snapshot(url: str, db: Session = Depends(get_db)):
+    """Capture a new snapshot of a policy by fetching its current content."""
+    try:
+        text = await fetch_url_text(url)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch URL: {str(e)}")
+    
+    if not text:
+        raise HTTPException(status_code=400, detail="URL content is empty")
+    
+    # Check if this content already exists for this URL
+    content_hash_val = content_hash(text)
+    existing = (
+        db.query(PolicySnapshot)
+        .filter(PolicySnapshot.url == url, PolicySnapshot.content_hash == content_hash_val)
+        .first()
+    )
+    
+    if existing:
+        # Return existing snapshot instead of creating a duplicate
+        return PolicySnapshotPayload(
+            id=existing.id,
+            url=existing.url,
+            content_hash=existing.content_hash,
+            captured_at=existing.captured_at,
+            raw_text=None,  # Don't return full text on deduplication
+        )
+    
+    # Create new snapshot
+    snapshot = PolicySnapshot(
+        id=str(uuid4()),
+        url=url,
+        content_hash=content_hash_val,
+        captured_at=datetime.now(timezone.utc),
+        raw_text=text,
+    )
+    db.add(snapshot)
+    db.commit()
+    db.refresh(snapshot)
+    
+    return PolicySnapshotPayload(
+        id=snapshot.id,
+        url=snapshot.url,
+        content_hash=snapshot.content_hash,
+        captured_at=snapshot.captured_at,
+        raw_text=snapshot.raw_text,
+    )
+
+
+@app.get("/diff/{snapshot_id_1}/{snapshot_id_2}", response_model=DiffResult)
+def get_diff(snapshot_id_1: str, snapshot_id_2: str, db: Session = Depends(get_db)):
+    """Compare two policy snapshots and return token-level diffs."""
+    snap1 = db.query(PolicySnapshot).filter(PolicySnapshot.id == snapshot_id_1).first()
+    snap2 = db.query(PolicySnapshot).filter(PolicySnapshot.id == snapshot_id_2).first()
+    
+    if not snap1 or not snap2:
+        raise HTTPException(status_code=404, detail="One or both snapshots not found")
+    
+    if snap1.url != snap2.url:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot diff snapshots from different URLs"
+        )
+    
+    # Get token-level diff
+    diff_data = diff_tokens(snap1.raw_text, snap2.raw_text)
+    
+    # Convert token dicts to DiffToken objects
+    added_tokens = [
+        DiffToken(
+            token=t["token"],
+            type="added",
+            line_number=t.get("line_number"),
+            severity=t.get("severity", "low"),
+        )
+        for t in diff_data["added"]
+    ]
+    
+    removed_tokens = [
+        DiffToken(
+            token=t["token"],
+            type="removed",
+            line_number=t.get("line_number"),
+            severity=t.get("severity", "low"),
+        )
+        for t in diff_data["removed"]
+    ]
+    
+    unchanged_tokens = [
+        DiffToken(
+            token=t["token"],
+            type="unchanged",
+            line_number=t.get("line_number"),
+            severity=t.get("severity", "low"),
+        )
+        for t in diff_data["unchanged"]
+    ]
+    
+    return DiffResult(
+        snapshot_1_id=snapshot_id_1,
+        snapshot_2_id=snapshot_id_2,
+        url=snap1.url,
+        created_at_1=snap1.captured_at,
+        created_at_2=snap2.captured_at,
+        added=added_tokens,
+        removed=removed_tokens,
+        unchanged=unchanged_tokens,
+        change_count=diff_data["change_count"],
+        severity_summary=diff_data["severity_summary"],
+    )
+
+
+@app.post("/policy-watch", response_model=PolicyWatchPayload)
+def create_policy_watch(request: PolicyWatchCreateRequest, db: Session = Depends(get_db)):
+    """Create a new policy watch configuration."""
+    # Check if URL is already being watched
+    existing = db.query(PolicyWatch).filter(PolicyWatch.url == request.url).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="URL is already being watched")
+    
+    watch = PolicyWatch(
+        id=str(uuid4()),
+        url=request.url,
+        user_id=request.user_id,
+        check_frequency=request.check_frequency,
+        enabled="true",
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(watch)
+    db.commit()
+    db.refresh(watch)
+    
+    return PolicyWatchPayload(
+        id=watch.id,
+        url=watch.url,
+        user_id=watch.user_id,
+        check_frequency=watch.check_frequency,
+        last_check=watch.last_check,
+        enabled=watch.enabled,
+        created_at=watch.created_at,
+    )
+
+
+@app.get("/policy-watch", response_model=list[PolicyWatchPayload])
+def list_policy_watches(db: Session = Depends(get_db)):
+    """List all policy watches."""
+    watches = db.query(PolicyWatch).order_by(PolicyWatch.created_at.desc()).all()
+    return [
+        PolicyWatchPayload(
+            id=watch.id,
+            url=watch.url,
+            user_id=watch.user_id,
+            check_frequency=watch.check_frequency,
+            last_check=watch.last_check,
+            enabled=watch.enabled,
+            created_at=watch.created_at,
+        )
+        for watch in watches
+    ]
+
+
+@app.delete("/policy-watch/{watch_id}", response_model=dict)
+def delete_policy_watch(watch_id: str, db: Session = Depends(get_db)):
+    """Delete a policy watch configuration."""
+    watch = db.query(PolicyWatch).filter(PolicyWatch.id == watch_id).first()
+    if not watch:
+        raise HTTPException(status_code=404, detail="Policy watch not found")
+    
+    db.delete(watch)
+    db.commit()
+    return {"status": "deleted", "id": watch_id}
+
+
+@app.post("/policy-watch/{watch_id}/snapshot", response_model=PolicySnapshotPayload)
+async def capture_watch_snapshot(watch_id: str, db: Session = Depends(get_db)):
+    """Capture a new snapshot for a watched policy."""
+    watch = db.query(PolicyWatch).filter(PolicyWatch.id == watch_id).first()
+    if not watch:
+        raise HTTPException(status_code=404, detail="Policy watch not found")
+    
+    try:
+        text = await fetch_url_text(watch.url)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch URL: {str(e)}")
+    
+    if not text:
+        raise HTTPException(status_code=400, detail="URL content is empty")
+    
+    # Check if this content already exists
+    content_hash_val = content_hash(text)
+    existing = (
+        db.query(PolicySnapshot)
+        .filter(PolicySnapshot.url == watch.url, PolicySnapshot.content_hash == content_hash_val)
+        .first()
+    )
+    
+    if existing:
+        # Update last_check time
+        watch.last_check = datetime.now(timezone.utc)
+        db.commit()
+        return PolicySnapshotPayload(
+            id=existing.id,
+            url=existing.url,
+            content_hash=existing.content_hash,
+            captured_at=existing.captured_at,
+            raw_text=None,
+        )
+    
+    # Create new snapshot
+    snapshot = PolicySnapshot(
+        id=str(uuid4()),
+        url=watch.url,
+        content_hash=content_hash_val,
+        captured_at=datetime.now(timezone.utc),
+        raw_text=text,
+    )
+    db.add(snapshot)
+    watch.last_check = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(snapshot)
+    
+    return PolicySnapshotPayload(
+        id=snapshot.id,
+        url=snapshot.url,
+        content_hash=snapshot.content_hash,
+        captured_at=snapshot.captured_at,
+        raw_text=snapshot.raw_text,
     )

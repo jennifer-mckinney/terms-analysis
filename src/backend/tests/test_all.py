@@ -108,13 +108,14 @@ def test_analyze_file_accepts_small_valid_upload(
 ):
     captured = {}
 
-    async def fake_analyze(text, jurisdictions, name=None, doc_type=None, source_url=None):
+    async def fake_analyze(text, jurisdictions, name=None, doc_type=None, industry=None, source_url=None):
         captured.update(
             {
                 "text": text,
                 "jurisdictions": jurisdictions,
                 "name": name,
                 "doc_type": doc_type,
+                "industry": industry,
                 "source_url": source_url,
             }
         )
@@ -130,7 +131,7 @@ def test_analyze_file_accepts_small_valid_upload(
     response = app_client.post(
         "/analyze/file",
         files={"file": ("policy.txt", sample_privacy_policy_text.encode(), "text/plain")},
-        data={"jurisdictions": "US-CA,GDPR", "doc_type": "privacy-policy"},
+        data={"jurisdictions": "US-CA,GDPR", "doc_type": "Privacy Policy"},
     )
 
     assert response.status_code == 200
@@ -139,7 +140,7 @@ def test_analyze_file_accepts_small_valid_upload(
     assert captured["text"] == sample_privacy_policy_text
     assert captured["jurisdictions"] == ["US-CA", "GDPR"]
     assert captured["name"] == "policy.txt"
-    assert captured["doc_type"] == "privacy-policy"
+    assert captured["doc_type"] == "Privacy Policy"
 
 
 def test_health_endpoint_exposes_expected_keys_only(app_client):
@@ -834,3 +835,138 @@ def test_all_30_jurisdiction_codes_have_at_least_one_rule():
     covered = {j for r in PATTERNS for j in r.jurisdictions}
     orphans = all_codes - covered
     assert not orphans, f"Jurisdiction codes with no rules (add a RulePattern): {sorted(orphans)}"
+
+
+# ── Phase 3: DocType Weighting (F2.2) ──────────────────────────────────────
+
+from app.services.analyzer import _apply_doctype_weighting, _apply_industry_emphasis
+from app.schemas import DocType, IndustryProfile
+
+
+def _make_finding(category: str, severity: str) -> "Finding":
+    from app.schemas import Evidence, Finding
+    return Finding(
+        category=category,
+        severity=severity,
+        confidence=0.9,
+        excerpt="test excerpt",
+        explanation="test explanation",
+        jurisdictions=["US-CA"],
+        evidence=Evidence(line_start=1, line_end=1, legal_basis=["Test basis"]),
+    )
+
+
+def test_doctype_privacy_policy_boosts_sale_share():
+    f = _make_finding("Data Sale / Sharing", "Medium")
+    result = _apply_doctype_weighting([f], "Privacy Policy")
+    assert result[0].severity == "High", "Privacy Policy should bump Sale/Sharing Medium→High"
+
+
+def test_doctype_tos_boosts_liability():
+    f = _make_finding("Liability Limitation", "Medium")
+    result = _apply_doctype_weighting([f], "Terms of Service")
+    assert result[0].severity == "High"
+
+
+def test_doctype_cookie_boosts_tracking():
+    f = _make_finding("Tracking / Profiling", "Low")
+    result = _apply_doctype_weighting([f], "Cookie Policy")
+    assert result[0].severity == "Medium"
+
+
+def test_doctype_none_no_change():
+    f = _make_finding("Data Sale / Sharing", "Medium")
+    result = _apply_doctype_weighting([f], None)
+    assert result[0].severity == "Medium", "None doc_type must not alter severity"
+
+
+def test_doctype_critical_not_promoted():
+    f = _make_finding("Data Sale / Sharing", "Critical")
+    result = _apply_doctype_weighting([f], "Privacy Policy")
+    assert result[0].severity == "Critical", "Critical should not exceed Critical"
+
+
+# ── Phase 3: Industry Emphasis (F2.3) ──────────────────────────────────────
+
+
+def test_industry_healthcare_boosts_health_data():
+    f = _make_finding("Health Data", "Medium")
+    result = _apply_industry_emphasis([f], "Healthcare")
+    assert result[0].severity == "High"
+
+
+def test_industry_finance_boosts_financial_data():
+    f = _make_finding("Financial Data", "Low")
+    result = _apply_industry_emphasis([f], "Finance")
+    assert result[0].severity == "Medium"
+
+
+def test_industry_education_boosts_childrens_privacy():
+    f = _make_finding("Children's Privacy", "Medium")
+    result = _apply_industry_emphasis([f], "Education")
+    assert result[0].severity == "High"
+
+
+def test_industry_ai_tech_boosts_adm():
+    f = _make_finding("Automated Decision-Making", "Medium")
+    result = _apply_industry_emphasis([f], "AI / Tech Platform")
+    assert result[0].severity == "High"
+
+
+def test_industry_general_no_boost():
+    f = _make_finding("Health Data", "Low")
+    result = _apply_industry_emphasis([f], "General")
+    assert result[0].severity == "Low"
+
+
+def test_industry_none_no_change():
+    f = _make_finding("Tracking / Profiling", "Medium")
+    result = _apply_industry_emphasis([f], None)
+    assert result[0].severity == "Medium"
+
+
+# ── Phase 3: API schema validates DocType and IndustryProfile ────────────────
+
+
+def test_analyze_request_accepts_valid_doc_type():
+    from app.schemas import AnalyzeRequest
+    req = AnalyzeRequest(
+        text="Some policy text",
+        doc_type="Privacy Policy",
+        industry="Healthcare",
+        jurisdictions=["US-CA"],
+    )
+    assert req.doc_type == "Privacy Policy"
+    assert req.industry == "Healthcare"
+
+
+def test_analyze_request_rejects_invalid_doc_type():
+    from app.schemas import AnalyzeRequest
+    with pytest.raises(ValidationError):
+        AnalyzeRequest(text="x", doc_type="not-a-valid-type", jurisdictions=["US-CA"])
+
+
+def test_analyze_request_rejects_invalid_industry():
+    from app.schemas import AnalyzeRequest
+    with pytest.raises(ValidationError):
+        AnalyzeRequest(text="x", industry="Unknown Sector", jurisdictions=["US-CA"])
+
+
+def test_doc_type_literal_covers_expected_values():
+    import typing
+    valid = set(typing.get_args(DocType))
+    expected = {
+        "Privacy Policy", "Terms of Service", "Cookie Policy",
+        "Data Processing Agreement", "Combined",
+    }
+    assert expected.issubset(valid)
+
+
+def test_industry_profile_literal_covers_expected_values():
+    import typing
+    valid = set(typing.get_args(IndustryProfile))
+    expected = {
+        "General", "Healthcare", "Finance", "Education",
+        "Social Media", "AI / Tech Platform", "Gaming", "Retail",
+    }
+    assert expected.issubset(valid)

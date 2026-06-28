@@ -28,9 +28,9 @@
 ## Testing and Evaluation
 - [x] Build gold dataset for US-CA + GDPR and run F1/Kappa.
 - [x] Add unit tests for ingestion and rule detectors.
-- [x] Add integration tests for LM Studio failures and timeouts.
+- [x] Add integration tests for LocalAI failures and timeouts.
 
 ## Ops and Docs
 - [x] Extend `run.sh` to start backend + frontend together.
-- [x] Add `.env.example` with LM Studio and DB settings.
+- [x] Add `.env.example` with LocalAI, model paths, and DB settings.
 - [x] Document local-only data handling and backup guidance.

@@ -6,8 +6,10 @@
 - Cached artifacts: OCR and extracted text live in memory only; raw document text is persisted in SQLite.
 
 ## Local-Only Model Usage
-- The application calls LM Studio on the LAN (`LM_STUDIO_BASE_URL`).
-- No cloud APIs are used by default. Keep the LM Studio host accessible only on your trusted network.
+- The application uses **LocalAI** (`LOCALAI_BASE_URL`, default `http://localhost:8080/v1`) with local GGUF models.
+- Primary model: **Apertus 8B Instruct** (Swiss AI Initiative — EPFL/ETH Zurich/CSCS), 1,000+ languages.
+- EU legal specialist: **EuroLLM 22B Instruct** (EU Horizon/EuroHPC consortium), 35 languages.
+- No cloud APIs are used. All inference runs on-device; no data leaves the machine.
 
 ## Backup Guidance
 - **Quick backup**: copy the SQLite database file.

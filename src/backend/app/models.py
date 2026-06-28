@@ -59,3 +59,27 @@ class WatchlistItem(Base):
     last_document_hash = Column(String, nullable=True)
     last_risk_score = Column(Float, nullable=True)
     last_analysis_id = Column(String, nullable=True)
+
+
+class PolicySnapshot(Base):
+    """Historical snapshots of policies tracked in the watchlist."""
+    __tablename__ = "policy_snapshots"
+
+    id = Column(String, primary_key=True, index=True)
+    url = Column(String, nullable=False, index=True)
+    content_hash = Column(String, nullable=False, index=True)
+    captured_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    raw_text = Column(Text, nullable=False)
+
+
+class PolicyWatch(Base):
+    """Configuration for watching policies, tracking check frequency and user preferences."""
+    __tablename__ = "policy_watches"
+
+    id = Column(String, primary_key=True, index=True)
+    url = Column(String, nullable=False, index=True, unique=True)
+    user_id = Column(String, nullable=True)
+    check_frequency = Column(Integer, nullable=False, default=86400)  # seconds (default 24 hours)
+    last_check = Column(DateTime, nullable=True)
+    enabled = Column(String, nullable=False, default="true")
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)

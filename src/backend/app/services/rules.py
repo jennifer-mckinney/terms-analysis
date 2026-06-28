@@ -758,6 +758,140 @@ PATTERNS: List[RulePattern] = [
             r"\b(?:private\s+information|SHIELD\s+Act|New\s+York\s+(?:data\s+)?(?:security|breach|privacy)|reasonable\s+(?:administrative|technical|physical)\s+safeguards)\b"
         ],
     ),
+    # ── Industry-Specific: HIPAA (Healthcare) ────────────────────
+    RulePattern(
+        name="HIPAA Business Associate Agreement",
+        category="HIPAA Compliance",
+        severity="High",
+        jurisdictions=["US-FED"],
+        explanation="HIPAA requires Business Associate Agreements (BAAs) between covered entities and third parties that process Protected Health Information (PHI).",
+        legal_basis=["HIPAA 45 CFR § 164.502(e)", "HIPAA Business Associate Agreement requirements"],
+        patterns=[
+            r"\b(?:Business Associate Agreement|BAA|covered entity|third.?party.*processing.*PHI)\b",
+            r"\b(?:PHI.*third.?party|third.?party.*access.*health\s+(?:data|information))\b",
+        ],
+    ),
+    RulePattern(
+        name="HIPAA Minimum Necessary",
+        category="HIPAA Compliance",
+        severity="High",
+        jurisdictions=["US-FED"],
+        explanation="HIPAA minimum necessary standard requires organizations to limit access to and use of PHI to the minimum amount needed to accomplish the intended purpose.",
+        legal_basis=["HIPAA 45 CFR § 164.502(b)", "HIPAA Minimum Necessary Standard"],
+        patterns=[
+            r"\b(?:minimum\s+necessary|limited\s+access.*PHI|restricted\s+access.*health\s+data)\b",
+            r"\b(?:need.?to.?know.*PHI|access\s+limited.*health\s+information)\b",
+        ],
+    ),
+    RulePattern(
+        name="HIPAA PHI Handling",
+        category="HIPAA Compliance",
+        severity="High",
+        jurisdictions=["US-FED"],
+        explanation="Policies must explicitly describe how Protected Health Information (PHI) is collected, used, disclosed, and safeguarded.",
+        legal_basis=["HIPAA 45 CFR § 164.500–164.534"],
+        patterns=[
+            r"protected\s+health\s+information",
+            r"\bPHI\b",
+            r"patient\s+health",
+            r"health\s+data",
+            r"healthcare\s+data",
+            r"patient.*data",
+        ],
+    ),
+    # ── Industry-Specific: PCI DSS (Fintech) ──────────────────────
+    RulePattern(
+        name="PCI DSS Payment Data",
+        category="PCI DSS Compliance",
+        severity="High",
+        jurisdictions=["US-FED"],
+        explanation="PCI DSS requires secure handling of payment card data including cardholder data and sensitive authentication data.",
+        legal_basis=["PCI DSS 3.2.1", "PCI DSS Payment Card Industry Data Security Standard"],
+        patterns=[
+            r"\b(?:cardholder\s+data|payment\s+card|PCI\s+DSS|card\s+(?:number|data)|credit\s+card\s+(?:information|data))\b",
+            r"\b(?:sensitive\s+authentication\s+data|CVV|CVC|expiration\s+date.*card)\b",
+        ],
+    ),
+    RulePattern(
+        name="PCI DSS Tokenization",
+        category="PCI DSS Compliance",
+        severity="Medium",
+        jurisdictions=["US-FED"],
+        explanation="PCI DSS tokenization replaces sensitive payment data with non-sensitive tokens to reduce data security scope.",
+        legal_basis=["PCI DSS 3.2.1", "PCI DSS Tokenization guidelines"],
+        patterns=[
+            r"\b(?:tokenization|tokenized|token.*payment|payment\s+token)\b",
+            r"\b(?:reduce.*scope.*PCI|PCI.*out.?of.?scope)\b",
+        ],
+    ),
+    RulePattern(
+        name="PCI DSS Payment Processing",
+        category="PCI DSS Compliance",
+        severity="High",
+        jurisdictions=["US-FED"],
+        explanation="Organizations processing payment transactions must comply with PCI DSS for secure payment data handling.",
+        legal_basis=["PCI DSS Standard 1.0", "Payment Card Industry guidelines"],
+        patterns=[
+            r"\b(?:payment\s+(?:processing|processor|gateway)|payment\s+data.*secure|transact(?:ion)?.*(?:security|encryption))\b",
+            r"\b(?:merchant.*PCI|payment.*compliance|card.*processing)\b",
+        ],
+    ),
+    # ── Industry-Specific: FERPA/COPPA (Education) ─────────────────
+    RulePattern(
+        name="FERPA Student Records",
+        category="FERPA Compliance",
+        severity="High",
+        jurisdictions=["US-FED"],
+        explanation="FERPA protects student education records and requires parental/student consent for disclosure.",
+        legal_basis=["FERPA 20 U.S.C. § 1232g", "FERPA Student Privacy Protection"],
+        patterns=[
+            r"\b(?:FERPA|Family Educational Rights and Privacy Act|student\s+(?:record|data|information).*access)\b",
+            r"\b(?:education\s+record.*(?:access|disclosure|parent))\b",
+            r"\b(?:student.*privacy.*(?:parent|guardian))\b",
+        ],
+    ),
+    RulePattern(
+        name="FERPA Parental Consent",
+        category="FERPA Compliance",
+        severity="High",
+        jurisdictions=["US-FED"],
+        explanation="FERPA requires schools to obtain parental/student consent before disclosing education records to third parties.",
+        legal_basis=["FERPA 20 U.S.C. § 1232g(b)", "FERPA Disclosure Requirements"],
+        patterns=[
+            r"parental\s+(?:consent|notification|access)",
+            r"prior\s+written\s+consent",
+            r"parent.*student\s+record",
+            r"parent.*education.*record",
+            r"disclose.*student.*record",
+            r"third.?party.*access.*student",
+        ],
+    ),
+    RulePattern(
+        name="COPPA Children Under 13",
+        category="COPPA Compliance",
+        severity="Critical",
+        jurisdictions=["US-FED"],
+        explanation="COPPA (Children's Online Privacy Protection Act) requires verifiable parental consent before collecting any personal information from children under 13.",
+        legal_basis=["COPPA 15 U.S.C. § 6501", "COPPA 16 CFR Part 312"],
+        patterns=[
+            r"\b(?:COPPA|children\s+under\s+13|verifiable\s+parental\s+consent|child.*privacy.*(?:parental|consent))\b",
+            r"\b(?:under\s+13\s+years?\b|children.*information.*parental)\b",
+            r"\b(?:parental\s+consent.*child|child.*personal\s+information)\b",
+        ],
+    ),
+    RulePattern(
+        name="COPPA/FERPA Children's Data",
+        category="Children's Privacy",
+        severity="High",
+        jurisdictions=["US-FED", "US-CA"],
+        explanation="Special protections required for children's personal information under COPPA (under 13) and FERPA (education records).",
+        legal_basis=["COPPA 15 U.S.C. § 6501", "FERPA 20 U.S.C. § 1232g", "COPPA Parental Notification Rule"],
+        patterns=[
+            r"\b(?:child(?:ren)?|minor).*(?:information|data|privacy)\b",
+            r"\b(?:parental.*(?:consent|notification)|verifiable.*consent.*child)\b",
+            r"\b(?:children.*privacy.*protection|protected.*children.*data)\b",
+        ],
+    ),
 ]
 
 
@@ -777,6 +911,56 @@ def _excerpt(text: str, match_start: int, match_end: int, window: int = 140) -> 
     start = max(0, match_start - window)
     end = min(len(text), match_end + window)
     return text[start:end].strip()
+
+
+def _extract_sentences(text: str, start_pos: int, end_pos: int, num_sentences: int = 2) -> tuple[str, str]:
+    """Extract num_sentences before and after the match position.
+    
+    Args:
+        text: The full text
+        start_pos: Start position of the match
+        end_pos: End position of the match
+        num_sentences: Number of sentences to extract on each side
+    
+    Returns:
+        Tuple of (context_before, context_after)
+    """
+    import re as regex_module
+    
+    # Split text into sentences (approximate)
+    sentence_pattern = r'[.!?]\s+'
+    
+    # Find sentences before the match
+    before_text = text[:start_pos]
+    before_sentences = regex_module.split(sentence_pattern, before_text)
+    context_before = ' '.join(before_sentences[-num_sentences:]).strip() if before_sentences else ""
+    
+    # Find sentences after the match
+    after_text = text[end_pos:]
+    after_sentences = regex_module.split(sentence_pattern, after_text)
+    context_after = ' '.join(after_sentences[:num_sentences]).strip() if after_sentences else ""
+    
+    return context_before, context_after
+
+
+def _confidence_rules_based(
+    severity: Severity,
+    pattern_hits: int,
+    match_count: int,
+    pattern_total: int,
+) -> float:
+    """Calculate confidence for rules-based matches (90-95% range).
+    
+    Rules-based matches are inherently high confidence since they're pattern-matched.
+    """
+    base = SEVERITY_BASE.get(severity, 0.6)
+    hit_ratio = pattern_hits / pattern_total if pattern_total else 0.0
+    # For rules-based: return 0.90-0.95 range based on hit quality
+    if pattern_hits >= pattern_total * 0.5:  # Multiple patterns hit
+        confidence = 0.93 + (0.02 * min(1.0, hit_ratio))  # 0.93-0.95
+    else:
+        confidence = 0.90 + (0.03 * hit_ratio)  # 0.90-0.93
+    return max(0.90, min(0.95, confidence))
 
 
 def _match_stats(patterns: Iterable[str], text: str) -> tuple[Optional[re.Match], int, int]:
@@ -817,16 +1001,26 @@ def detect_findings(text: str, jurisdictions: List[Jurisdiction]) -> List[Findin
         line_start = _line_number(text, match.start())
         line_end = _line_number(text, match.end())
         excerpt = _excerpt(text, match.start(), match.end())
+        
+        # Extract context before and after the match
+        context_before, context_after = _extract_sentences(text, match.start(), match.end(), num_sentences=2)
+        
+        # Calculate rules-based confidence (90-95% range)
+        confidence = _confidence_rules_based(
+            rule.severity,
+            pattern_hits=pattern_hits,
+            match_count=match_count,
+            pattern_total=len(rule.patterns),
+        )
+        
+        # Flag for review if confidence < 0.6
+        needs_review = confidence < 0.6
+        
         findings.append(
             Finding(
                 category=rule.category,
                 severity=rule.severity,
-                confidence=_confidence(
-                    rule.severity,
-                    pattern_hits=pattern_hits,
-                    match_count=match_count,
-                    pattern_total=len(rule.patterns),
-                ),
+                confidence=confidence,
                 excerpt=excerpt,
                 explanation=rule.explanation,
                 jurisdictions=rule.jurisdictions,
@@ -834,7 +1028,12 @@ def detect_findings(text: str, jurisdictions: List[Jurisdiction]) -> List[Findin
                     line_start=line_start,
                     line_end=line_end,
                     legal_basis=rule.legal_basis,
+                    start_offset=match.start(),
+                    end_offset=match.end(),
+                    context_before=context_before,
+                    context_after=context_after,
                 ),
+                needs_review=needs_review,
             )
         )
     return findings
