@@ -21,15 +21,18 @@ See @.claude/library/LIB-LEGAL.md for LLM/embedding/inference tool approvals.
 | reportlab | BSD | A+ | PDF export generation |
 | pytesseract | Apache-2.0 | A+ | OCR fallback for scanned PDFs |
 | pillow | HPND | A+ | Image processing for OCR |
+| python-dotenv | BSD-3 | A+ | .env config loading |
+| python-multipart | Apache-2.0 | A | File upload parsing — **pin >= 0.0.18** (CVE-2024-24762, CVE-2024-53981 patched) |
+| langdetect | Apache-2.0 | A | Language detection for LLM routing — unmaintained since 2021; graceful fallback exists |
+| rank_bm25 | Apache-2.0 | A+ | BM25 sparse retrieval for embedding ensemble |
 
 ## Python Dependencies (Planned — RAG Pipeline)
 
 | Package | License | IRP Grade | Purpose |
 |---------|---------|-----------|---------|
-| sentence-transformers | Apache 2.0 | A+ | Legal embedding model loading |
-| faiss-cpu | MIT | A+ | Vector similarity search |
-| torch | BSD-3 | A+ | Model inference runtime |
-| rank-bm25 | Apache 2.0 | A+ | Hybrid retrieval (BM25 + dense) |
+| sentence-transformers[onnx] | Apache 2.0 | A+ | Embedding model loading (ONNX backend, no PyTorch needed) |
+| onnxruntime | MIT | A+ | Model inference runtime (Microsoft; replaces torch/PyTorch) |
+| sqlite-vec | MIT | A+ | Exact vector search via SQLite extension (use when corpus > 100K chunks) |
 
 ## Test Dependencies
 
@@ -44,10 +47,11 @@ See @.claude/library/LIB-LEGAL.md for LLM/embedding/inference tool approvals.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `LLM_BASE_URL` | `http://localhost:11434/v1` | Ollama endpoint |
-| `LLM_MODEL` | `saullm-7b-instruct` | Legal LLM model name |
-| `EMBEDDING_MODEL` | `freelawproject/modernbert-embed-base_finetune_8192` | Legal embedding model |
-| `FAISS_INDEX_PATH` | `data/legal_kb.faiss` | Vector index location |
+| `LLM_BASE_URL` | `http://localhost:8080/v1` | LocalAI endpoint (EuroLLM-9B + Apertus) |
+| `LLM_MODEL_EU` | `eurollm-9b-instruct` | EU/legal text model (EuroLLM-9B, Apache 2.0) |
+| `LLM_MODEL_WORLD` | `apertus` | World/multilingual model (Apertus, Apache 2.0, 1,811 languages) |
+| `EMBEDDING_MODEL` | `intfloat/multilingual-e5-large-instruct` | Primary multilingual embedding model (MIT, 100+ languages) |
+| `VECTOR_INDEX_PATH` | `data/legal_kb.npy` | Numpy exhaustive vector index (exact search, no FAISS) |
 | `DATABASE_URL` | `sqlite:///data/terms_analysis.db` | SQLite path |
 | `REVIEW_THRESHOLD` | `0.80` | Confidence threshold for HITL review |
 | `LLM_REQUEST_TIMEOUT_S` | `60` | LLM request timeout |
@@ -69,6 +73,8 @@ See @.claude/library/LIB-LEGAL.md for LLM/embedding/inference tool approvals.
 
 | Package/Tool | Reason |
 |-------------|--------|
+| faiss-cpu | Facebook/Meta origin — see LIB-LEGAL.md |
+| torch / PyTorch | Meta origin — use onnxruntime instead |
 | LM Studio | Proprietary closed source |
 | Stability AI models | Investor lawsuits |
 | Ollama GUI/Turbo | Unclear license / proprietary |
