@@ -204,19 +204,32 @@ async def fetch_url_text(url: str) -> str:
         """Validate each URL before every request, including redirects."""
         _validate_url(str(request.url))
 
+    _BLOCKED_STATUSES = {401, 403, 407, 429, 503}
     async with httpx.AsyncClient(
         timeout=timeout,
         follow_redirects=True,
         headers=_FETCH_HEADERS,
         event_hooks={"request": [_on_request]},
     ) as client:
-        response = await client.get(url)
-        if response.status_code in (403, 429):
+        try:
+            response = await client.get(url)
+        except httpx.RequestError as exc:
+            raise ValueError(
+                "Could not connect to this website. "
+                "Check the URL or paste the policy text instead."
+            ) from exc
+        if response.status_code in _BLOCKED_STATUSES:
             raise ValueError(
                 "This website blocks automated access. "
                 "Copy and paste the policy text instead."
             )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise ValueError(
+                f"Website returned an error ({exc.response.status_code}). "
+                "Try pasting the policy text instead."
+            ) from exc
 
         # Reject oversized responses before buffering the full body.
         raw_length = response.headers.get("content-length")

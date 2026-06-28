@@ -706,6 +706,54 @@ class TestFetchUrlText:
                 with pytest.raises(ValueError, match="exceeds"):
                     asyncio.run(fetch_url_text("https://example.com/policy"))
 
+    def test_ingest_fetch_url_text_blocked_status_raises_helpful_message(self):
+        """403/429/503 responses raise ValueError with a plain-English hint."""
+        from app.services.ingest import fetch_url_text
+        for status in (401, 403, 407, 429, 503):
+            with patch("app.services.ingest._validate_url"):
+                with patch("httpx.AsyncClient") as mock_cls:
+                    mock_response = MagicMock()
+                    mock_response.status_code = status
+                    mock_response.headers = {}
+                    mock_client = AsyncMock()
+                    mock_client.__aenter__.return_value = mock_client
+                    mock_client.get.return_value = mock_response
+                    mock_cls.return_value = mock_client
+                    with pytest.raises(ValueError, match="blocks automated access"):
+                        asyncio.run(fetch_url_text("https://example.com/policy"))
+
+    def test_ingest_fetch_url_text_request_error_raises_helpful_message(self):
+        """Network errors (RequestError) raise ValueError instead of propagating."""
+        from app.services.ingest import fetch_url_text
+        import httpx
+        with patch("app.services.ingest._validate_url"):
+            with patch("httpx.AsyncClient") as mock_cls:
+                mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
+                mock_client.get.side_effect = httpx.ConnectError("connection refused")
+                mock_cls.return_value = mock_client
+                with pytest.raises(ValueError, match="Could not connect"):
+                    asyncio.run(fetch_url_text("https://example.com/policy"))
+
+    def test_ingest_fetch_url_text_http_status_error_raises_helpful_message(self):
+        """Non-blocked HTTP errors (e.g. 404) raise ValueError with status code."""
+        from app.services.ingest import fetch_url_text
+        import httpx
+        with patch("app.services.ingest._validate_url"):
+            with patch("httpx.AsyncClient") as mock_cls:
+                mock_response = MagicMock()
+                mock_response.status_code = 404
+                mock_response.headers = {}
+                mock_client = AsyncMock()
+                mock_client.__aenter__.return_value = mock_client
+                mock_client.get.return_value = mock_response
+                exc = httpx.HTTPStatusError("404", request=MagicMock(), response=MagicMock())
+                exc.response.status_code = 404
+                mock_response.raise_for_status.side_effect = exc
+                mock_cls.return_value = mock_client
+                with pytest.raises(ValueError, match="404"):
+                    asyncio.run(fetch_url_text("https://example.com/policy"))
+
     def test_ingest_fetch_url_text_request_hook_validates_per_request_url(self):
         """ingest.py line 194: _on_request hook fires _validate_url for every request."""
         from app.services.ingest import fetch_url_text
