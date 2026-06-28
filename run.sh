@@ -18,8 +18,15 @@ fi
 PORT="${PORT:-8000}"
 BACKEND_PORT="${BACKEND_PORT:-9000}"
 BACKEND_HOST="${BACKEND_HOST:-0.0.0.0}"
-LM_STUDIO_BASE_URL="${LM_STUDIO_BASE_URL:-http://127.0.0.1:1234/v1}"
-LM_STUDIO_MODEL="${LM_STUDIO_MODEL:-qwen3-vl-4b-instruct-mlx}"
+# LocalAI (Apache 2.0, zero VC) — https://localai.io
+# Default port: 8080. Override with LOCALAI_BASE_URL env var.
+LOCALAI_BASE_URL="${LOCALAI_BASE_URL:-http://localhost:8080/v1}"
+# Apertus 8B Instruct — Swiss AI Initiative (EPFL/ETH/CSCS), Apache 2.0, 1000+ languages
+# https://huggingface.co/swiss-ai/Apertus-8B-Instruct-2509-GGUF
+MODEL_WORLD="${MODEL_WORLD:-apertus-8b-instruct}"
+# EuroLLM 22B Instruct — EU Horizon Europe / EuroHPC, Apache 2.0, 35 EU languages
+# https://huggingface.co/utter-project/EuroLLM-22B-Instruct-GGUF
+MODEL_EU="${MODEL_EU:-eurollm-22b-instruct}"
 ALLOWED_ORIGINS="${ALLOWED_ORIGINS:-http://localhost:${PORT},http://127.0.0.1:${PORT}}"
 
 if [[ ! -d "$APP_DIR" ]]; then
@@ -37,16 +44,19 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-export LM_STUDIO_BASE_URL
-export LM_STUDIO_MODEL
+export LOCALAI_BASE_URL
+export MODEL_WORLD
+export MODEL_EU
 export ALLOWED_ORIGINS
 
 echo "Starting Terms & Policies Reviewer..."
-echo "App dir: $APP_DIR"
-echo "App URL: http://localhost:$PORT"
+echo "App dir:     $APP_DIR"
+echo "App URL:     http://localhost:$PORT"
 echo "Backend dir: $BACKEND_DIR"
 echo "Backend URL: http://localhost:$BACKEND_PORT"
-echo "LM Studio: $LM_STUDIO_BASE_URL ($LM_STUDIO_MODEL)"
+echo "LocalAI:     $LOCALAI_BASE_URL"
+echo "  world model: $MODEL_WORLD (Apertus — Swiss AI Initiative)"
+echo "  EU model:    $MODEL_EU (EuroLLM — EU Horizon Europe)"
 echo "Press Ctrl+C to stop."
 
 if [[ ! -d "$VENV_PATH" ]]; then
