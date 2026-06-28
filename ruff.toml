@@ -11,4 +11,3 @@ ignore = [
 
 [lint.isort]
 known-first-party = ["app"]
-force-sort-within-sections = true

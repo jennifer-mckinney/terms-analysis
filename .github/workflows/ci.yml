@@ -55,8 +55,10 @@ jobs:
           python -m pytest \
             --cov=app \
             --cov-report=term-missing \
-            --cov-fail-under=85 \
+            --cov-fail-under=98 \
             -v
+        # Floor: 98%. Current coverage is ~62% — CI will stay red on this
+        # check until the /write-tests work is complete.
 
   audit:
     name: Dependency audit (pip-audit)
