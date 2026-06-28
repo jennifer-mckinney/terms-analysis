@@ -216,12 +216,16 @@ async def fetch_url_text(url: str) -> str:
         except httpx.RequestError as exc:
             raise ValueError(
                 "Could not connect to this website. "
-                "Check the URL or paste the policy text instead."
+                "This may be a typo in the URL, a site that requires login, or a temporary outage. "
+                "Try copying the policy text and using the Paste Text tab instead."
             ) from exc
         if response.status_code in _BLOCKED_STATUSES:
             raise ValueError(
                 "This website blocks automated access. "
-                "Copy and paste the policy text instead."
+                "Try these instead: for Google/Gmail use policies.google.com/privacy, "
+                "for Apple use apple.com/legal/privacy, "
+                "for Meta/Facebook use facebook.com/privacy/policy "
+                "— or paste the policy text directly."
             )
         try:
             response.raise_for_status()

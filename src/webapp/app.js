@@ -44,6 +44,19 @@ const CATEGORY_INFO = {
     }
 };
 
+const CONCERN_MAP = {
+    'Selling My Data':           ['sale', 'share', 'sell', 'third'],
+    'Health & Medical Info':     ['health', 'medical', 'biometric'],
+    'How Long They Keep My Data':['retention', 'retain', 'store', 'indefinit'],
+    "Children's Safety":         ['child', 'minor', 'coppa', 'under 13'],
+    'Tracking & Profiling':      ['track', 'profil', 'monitor'],
+    'Automated Decisions (AI)':  ['automat', 'ai training', 'decision'],
+    'Arbitration & Legal Rights':['arbitrat', 'class action', 'waive', 'dispute'],
+    'Financial Information':     ['financ', 'payment', 'credit'],
+    'Right to Delete':           ['delet', 'remov', 'erasure', 'right to'],
+    'Security Practices':        ['secur', 'breach', 'encrypt'],
+};
+
 const GRADE_NARRATIVE = {
     'A':  { emoji: '✅', headline: 'Looks Safe',         detail: 'This policy scored well. We didn\'t find major red flags.' },
     'B':  { emoji: '🟡', headline: 'Minor Concerns',     detail: 'A few things to be aware of, but nothing alarming. Worth a quick look.' },
@@ -483,6 +496,8 @@ function populateDashboard() {
     populateDashboardStats();
     populateRecentAnalysis();
     populateWatchlistAlerts();
+    populateGradeDistribution();
+    populateTopRiskCategories();
 }
 
 function populateDashboardStats() {
@@ -525,8 +540,11 @@ function populateRecentAnalysis() {
         const reviewBadge = doc.status === 'needs_review'
             ? '<span class="status status--warning">Needs expert review</span>'
             : '';
+        const safeDocId = String(doc.id || '').replace(/'/g, "\\'");
         return `
-            <div class="analysis-item">
+            <div class="analysis-item analysis-item--clickable" style="cursor:pointer"
+                 onclick="navigateToDashboardAnalysis('${safeDocId}')"
+                 title="View full analysis">
                 <div class="analysis-meta">
                     <div class="analysis-name">${name}</div>
                     <div class="analysis-date">Checked ${date} ${reviewBadge}</div>
@@ -565,11 +583,139 @@ function populateWatchlistAlerts() {
     container.innerHTML = html || '<p class="text-secondary">No recent alerts</p>';
 }
 
+function populateGradeDistribution() {
+    const container = document.getElementById('gradeDistribution');
+    if (!container) return;
+
+    if (!state.analyses.length) {
+        container.innerHTML = '<p class="text-secondary" style="font-size:0.85rem">No policies checked yet.</p>';
+        return;
+    }
+
+    const GRADE_ORDER = ['A', 'B', 'C+', 'C', 'D+', 'D'];
+    const counts = {};
+    GRADE_ORDER.forEach(g => { counts[g] = 0; });
+    state.analyses.forEach(a => {
+        const g = a.grade;
+        if (g in counts) counts[g]++;
+        else counts['C'] = (counts['C'] || 0) + 1;
+    });
+
+    const GRADE_COLORS = { 'A': '#059669', 'B': '#65a30d', 'C+': '#d97706', 'C': '#f59e0b', 'D+': '#dc2626', 'D': '#991b1b' };
+
+    const bars = GRADE_ORDER.map(g => {
+        const count = counts[g];
+        if (!count) return '';
+        const color = GRADE_COLORS[g] || 'var(--color-primary)';
+        return `
+            <div class="grade-bar-item">
+                <div class="grade-bar-label" style="color:${color}">${g}</div>
+                <div class="grade-bar-track">
+                    <div class="grade-bar-fill" style="background:${color};width:${Math.round((count / state.analyses.length) * 100)}%"></div>
+                </div>
+                <div class="grade-bar-count">${count}</div>
+            </div>
+        `;
+    }).join('');
+
+    container.innerHTML = bars || '<p class="text-secondary" style="font-size:0.85rem">No graded policies yet.</p>';
+}
+
+function populateTopRiskCategories() {
+    const container = document.getElementById('topRiskCategories');
+    if (!container) return;
+
+    if (!state.analyses.length) {
+        container.innerHTML = '';
+        return;
+    }
+
+    const categoryCounts = {};
+    state.analyses.forEach(a => {
+        (a.findings || []).forEach(f => {
+            if (f.category) {
+                categoryCounts[f.category] = (categoryCounts[f.category] || 0) + 1;
+            }
+        });
+    });
+
+    const top3 = Object.entries(categoryCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3);
+
+    if (!top3.length) {
+        container.innerHTML = '';
+        return;
+    }
+
+    const items = top3.map(([cat, count]) => {
+        const info = CATEGORY_INFO[cat] || { label: cat };
+        return `<div class="top-risk-item"><span class="top-risk-name">${info.label}</span><span class="top-risk-count">${count} finding${count !== 1 ? 's' : ''}</span></div>`;
+    }).join('');
+
+    container.innerHTML = `<div style="margin-top:12px"><div style="font-size:0.8rem;font-weight:600;color:var(--color-text-secondary);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Top Issues Found</div>${items}</div>`;
+}
+
+function navigateToDashboardAnalysis(docId) {
+    const doc = state.analyses.find(a => String(a.id) === String(docId));
+    if (!doc) {
+        showToast('Analysis not found', 'warning');
+        return;
+    }
+    navigateToPage('review');
+    currentAnalysis = doc;
+    displayAnalysisResults(doc, 'full');
+}
+
 // Document Review Functions
 function setupDocumentReview() {
     setupInputTabs();
     setupFileUpload();
     setupAnalyzeButton();
+    setupJurisdictionToggle();
+    setupConcernChips();
+}
+
+function setupJurisdictionToggle() {
+    const toggleBtn = document.getElementById('jurisdictionToggleBtn');
+    const panel = document.getElementById('jurisdictionPanel');
+    const summary = document.getElementById('jurisdictionSummary');
+    if (!toggleBtn || !panel) return;
+
+    toggleBtn.addEventListener('click', () => {
+        const isOpen = !panel.classList.contains('hidden');
+        panel.classList.toggle('hidden', isOpen);
+        toggleBtn.setAttribute('aria-expanded', String(!isOpen));
+        toggleBtn.innerHTML = isOpen
+            ? 'Show all <i class="fas fa-chevron-down"></i>'
+            : 'Hide <i class="fas fa-chevron-up"></i>';
+    });
+
+    // Update summary line whenever a checkbox changes
+    panel.addEventListener('change', () => {
+        updateJurisdictionSummary();
+    });
+}
+
+function updateJurisdictionSummary() {
+    const summary = document.getElementById('jurisdictionSummary');
+    const toggleBtn = document.getElementById('jurisdictionToggleBtn');
+    if (!summary || !toggleBtn) return;
+    const checked = Array.from(document.querySelectorAll('input[name="jurisdiction"]:checked'))
+        .map(i => i.value);
+    const label = checked.length ? `Selected: ${checked.join(', ')}` : 'None selected';
+    // Preserve the button
+    summary.childNodes[0].textContent = label + ' ';
+}
+
+function setupConcernChips() {
+    const container = document.getElementById('concernChips');
+    if (!container) return;
+    container.addEventListener('click', (e) => {
+        const chip = e.target.closest('.concern-chip');
+        if (!chip) return;
+        chip.classList.toggle('selected');
+    });
 }
 
 function setupInputTabs() {
@@ -682,6 +828,7 @@ async function startAnalysis() {
         await refreshRubricScores();
         populateRubricScores();
         displayAnalysisResults(result, analysisMode);
+        applyUserConcernFilter();
         showToast('Policy check complete', 'success');
     } catch (error) {
         const msg = error.message || 'Analysis failed';
@@ -822,6 +969,30 @@ function displayAnalysisResults(doc, mode) {
                 <i class="fas fa-list"></i> Show Source Text
             </button>
         </div>
+
+        <div class="rubric-mini-card mt-16">
+            <div class="rubric-mini-header">
+                <i class="fas fa-info-circle"></i> How We Scored This
+            </div>
+            <div class="rubric-mini-body">
+                <div class="rubric-mini-grade">
+                    <span style="font-weight:700;font-size:1.1rem">Grade ${grade}</span>
+                    &mdash; ${gradeInfo.headline}
+                </div>
+                <div class="rubric-mini-thresholds">
+                    <span class="rubric-threshold" title="Score 0–3">A: few/no issues</span>
+                    <span class="rubric-threshold" title="Score 3–5">B: minor concerns</span>
+                    <span class="rubric-threshold" title="Score 5–8">C: watch out</span>
+                    <span class="rubric-threshold" title="Score 8–10">D: serious problems</span>
+                </div>
+                <div style="margin-top:8px;font-size:0.82rem;color:var(--color-text-secondary)">
+                    Score = 0.5&times;(Impact/5) + 0.4&times;(Likelihood/5) &minus; 0.3&times;(Safeguards/5)
+                </div>
+            </div>
+            <div class="rubric-mini-footer">
+                <a href="#" onclick="navigateToPage('reports');return false">See full rubric &rarr;</a>
+            </div>
+        </div>
     `;
 
     resultsSection.innerHTML = html;
@@ -832,6 +1003,37 @@ function setResultsPlaceholder(message) {
     const resultsSection = document.getElementById('resultsSection');
     if (!resultsSection) return;
     resultsSection.innerHTML = `<p class="text-secondary">${message}</p>`;
+}
+
+function applyUserConcernFilter() {
+    const selectedChips = Array.from(document.querySelectorAll('.concern-chip.selected'));
+    if (!selectedChips.length) return;
+
+    const selectedConcerns = selectedChips.map(c => c.getAttribute('data-concern'));
+    const keywords = selectedConcerns.flatMap(concern => CONCERN_MAP[concern] || []);
+    if (!keywords.length) return;
+
+    const findingsList = document.querySelector('.findings-list');
+    if (!findingsList) return;
+    const items = Array.from(findingsList.querySelectorAll('.finding-item'));
+    if (!items.length) return;
+
+    const matched = [];
+    const unmatched = [];
+    items.forEach(item => {
+        const text = item.textContent.toLowerCase();
+        const hits = keywords.some(kw => text.includes(kw.toLowerCase()));
+        if (hits) {
+            matched.push(item);
+            item.classList.add('concern-highlight');
+        } else {
+            unmatched.push(item);
+            item.classList.remove('concern-highlight');
+        }
+    });
+
+    // Re-order: matched first, then unmatched
+    [...matched, ...unmatched].forEach(el => findingsList.appendChild(el));
 }
 
 function createFindingHTML(finding) {
@@ -1484,3 +1686,5 @@ window.refreshWatchlistItem = refreshWatchlistItem;
 window.updateReview = updateReview;
 window.exportReports = exportReports;
 window.closeModal = closeModal;
+window.navigateToDashboardAnalysis = navigateToDashboardAnalysis;
+window.navigateToPage = navigateToPage;
