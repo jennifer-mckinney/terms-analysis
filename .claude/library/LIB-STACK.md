@@ -47,17 +47,22 @@ See @.claude/library/LIB-LEGAL.md for LLM/embedding/inference tool approvals.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `LLM_BASE_URL` | `http://localhost:8080/v1` | LocalAI endpoint (EuroLLM-9B + Apertus) |
-| `LLM_MODEL_EU` | `eurollm-9b-instruct` | EU/legal text model (EuroLLM-9B, Apache 2.0) |
-| `LLM_MODEL_WORLD` | `apertus` | World/multilingual model (Apertus, Apache 2.0, 1,811 languages) |
-| `EMBEDDING_MODEL` | `intfloat/multilingual-e5-large-instruct` | Primary multilingual embedding model (MIT, 100+ languages) |
-| `VECTOR_INDEX_PATH` | `data/legal_kb.npy` | Numpy exhaustive vector index (exact search, no FAISS) |
+| `LOCALAI_BASE_URL` | `http://localhost:8080/v1` | LocalAI endpoint (zero VC, Apache 2.0) |
+| `MODEL_EU` | `eurollm-22b-instruct` | EU language model — EuroLLM 22B Instruct (EU Horizon/EuroHPC, Apache 2.0) |
+| `MODEL_WORLD` | `apertus-8b-instruct` | World/multilingual model — Apertus 8B Instruct (Swiss AI Initiative, Apache 2.0) |
+| `EU_LANGUAGE_CODES` | `bg,cs,da,de,el,en,…` | ISO 639-1 codes that route to EuroLLM; all others → Apertus |
+| `LANGUAGE_DETECTION_ENABLED` | `true` | Enable language-based model routing |
+| `RRF_K` | `60` | Reciprocal Rank Fusion constant for embedding ensemble |
 | `DATABASE_URL` | `sqlite:///data/terms_analysis.db` | SQLite path |
 | `REVIEW_THRESHOLD` | `0.80` | Confidence threshold for HITL review |
-| `LLM_REQUEST_TIMEOUT_S` | `60` | LLM request timeout |
-| `MAX_INPUT_CHARS` | `20000` | Max document text length |
-| `ALLOWED_ORIGINS` | `http://localhost:8000,...` | CORS origins |
+| `LM_REQUEST_TIMEOUT_S` | `60` | LocalAI request timeout (seconds) |
+| `MAX_INPUT_CHARS` | `20000` | Max document text length before truncation |
+| `MAX_UPLOAD_BYTES` | `10485760` | Max HTTP response / upload size (10 MB) |
+| `MAX_PDF_PAGES` | `100` | Max pages processed per PDF (OCR path) |
+| `ALLOWED_ORIGINS` | `http://localhost:8000,...` | CORS allowed origins |
 | `WATCHLIST_REFRESH_SECONDS` | `0` | Background refresh interval (0 = off) |
+| `API_KEY` | *(empty)* | Endpoint auth key — empty disables auth (local dev) |
+| `TERMS_ANALYSIS_DATA_DIR` | `<repo>/data` | Override data directory for SQLite + exports |
 
 ## Frontend Stack
 

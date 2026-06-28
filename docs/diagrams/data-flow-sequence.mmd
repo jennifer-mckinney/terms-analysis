@@ -8,7 +8,7 @@ sequenceDiagram
     participant API as FastAPI<br/>(localhost:9000)
     participant ING as Ingest<br/>Service
     participant RUL as Rules<br/>Engine
-    participant LLM as LM Studio<br/>(localhost:1234)
+    participant LLM as LocalAI<br/>(localhost:8080)
     participant DB as SQLite<br/>Database
 
     %% Document Analysis Flow
@@ -27,7 +27,7 @@ sequenceDiagram
         RUL-->>API: Rule-based findings
 
         API->>LLM: POST /v1/chat/completions
-        Note over LLM: Analyze ambiguous<br/>clauses with local model
+        Note over LLM: Apertus 8B or EuroLLM 22B<br/>selected by language detection
         LLM-->>API: LLM-enhanced findings
 
         API->>API: Merge findings<br/>Calculate IRP scores

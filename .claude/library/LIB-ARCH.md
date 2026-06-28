@@ -7,9 +7,9 @@
 | Web UI | HTML/CSS/JS | `src/webapp/` | Static SPA, communicates via fetch to backend |
 | API Server | FastAPI + Uvicorn | `src/backend/app/main.py` | 16 REST endpoints, async |
 | Rule Engine | Python regex | `services/rules.py` | Baseline signal detection for 9 categories |
-| LLM Client | httpx async | `services/lm_studio.py` | Chat completions to Ollama + SaulLM-7B (local legal LLM) |
-| Embeddings | sentence-transformers | `services/embeddings.py` (planned) | Legal text embeddings via modernbert-legal |
-| Legal KB | FAISS + chunked corpus | `services/legal_kb.py` (planned) | RAG retrieval of jurisdiction-specific legal requirements |
+| LLM Client | httpx async | `services/localai.py` | Chat completions via LocalAI — routes to Apertus 8B (world) or EuroLLM 22B (EU langs) |
+| Embeddings | BM25 + dense (planned) | `services/embedding.py` | BM25 sparse + dense RRF ensemble; dense backend planned via LocalAI /embeddings |
+| Legal KB | chunked corpus (planned) | `services/legal_kb.py` (planned) | RAG retrieval of jurisdiction-specific legal requirements |
 | Analyzer | Python async | `services/analyzer.py` | Orchestrates rules + RAG + LLM + validation + scoring |
 | Validator | Python | `services/validation.py` | Hallucination guard, citation checker |
 | Ingestion | Python | `services/ingest.py` | Multi-format text extraction (HTML/PDF/DOCX/RTF/TXT/OCR) |
@@ -21,9 +21,10 @@
 ## Data Flow (Current)
 
 ```
-User Input → Ingestion (normalize text)
+User Input → Ingestion (normalize text — HTML/PDF/DOCX/RTF/TXT/OCR)
            → Rule Engine (9-category regex detection)
-           → LLM (analysis with line-numbered context via Ollama)
+           → LocalAI (language detect → Apertus 8B or EuroLLM 22B)
+               LLM failure → rule-only findings, confidence *= 0.8
            → Merge (deduplicate rule + LLM findings by category+excerpt)
            → Validation (citation check, hallucination guard, confidence scoring)
            → Scoring (risk_score 0-10, letter grade, review_required flag)
@@ -36,15 +37,14 @@ User Input → Ingestion (normalize text)
 ```
 Legal Corpus (GDPR, CCPA/CPRA, PIPEDA, state laws)
     → Chunk by article/section
-        → Embed (modernbert-legal-8192)
-            → FAISS vector index (local)
+        → BM25 index + dense embed (LocalAI /embeddings)
+            → RRF fusion index (local SQLite-vec)
 
 User Input → Ingestion (normalize text)
            → Rule Engine (9-category regex detection)
-           → Embed policy text (same model)
-               → Retrieve top-k matching legal requirements from FAISS
-                   → Augment LLM prompt with retrieved legal context
-                       → SaulLM-7B-Instruct (via Ollama) — legal reasoning
+           → BM25 + dense embed → RRF → top-k legal requirements
+               → Augment LocalAI prompt with retrieved legal context
+                   → Apertus 8B (world) or EuroLLM 22B (EU langs)
            → Merge (deduplicate rule + LLM findings)
            → Validation (citation check, hallucination guard)
            → Scoring (risk_score 0-10, grade, review_required)
@@ -56,7 +56,7 @@ User Input → Ingestion (normalize text)
 
 | Failure | Behavior |
 |---------|----------|
-| LLM unreachable (Ollama down) | Fall back to rule-only; confidence *= 0.8; may trigger review |
+| LLM unreachable (LocalAI down) | Fall back to rule-only; confidence *= 0.8; may trigger review |
 | LLM returns invalid JSON | Fall back to rule-only; confidence *= 0.8 |
 | LLM returns empty findings | Keep rule findings; confidence *= 0.85 |
 | LLM findings missing legal_basis | Drop those findings; apply additional penalty |
