@@ -170,6 +170,7 @@ class TestRubricEndpoint:
         expected_keys = {
             "productIntegrity",
             "legalSignalQuality",
+            "aiLawSignalQuality",
             "privacySecurity",
             "accessibilityUsability",
             "visualIxd",
@@ -971,6 +972,22 @@ class TestComputeRubricScores:
         # With zero risk and full confidence, product integrity should be 10.0
         assert scores.productIntegrity == 10.0
         assert scores.legalSignalQuality == 10.0
+        # aiLawSignalQuality should also be high with full confidence and no reviews
+        assert scores.aiLawSignalQuality > 8.0
+
+    def test_main_compute_rubric_scores_has_ai_law_signal_quality(self, db_session):
+        from app.main import _compute_rubric_scores
+        rows = [_insert_analysis(db_session, risk_score=3.0, confidence=0.85, grade="B")]
+        scores = _compute_rubric_scores(rows)
+        assert hasattr(scores, "aiLawSignalQuality")
+        assert 0.0 <= scores.aiLawSignalQuality <= 10.0
+
+    def test_main_compute_rubric_scores_overall_uses_weights(self, db_session):
+        from app.main import _compute_rubric_scores
+        rows = [_insert_analysis(db_session, risk_score=0.0, confidence=1.0, grade="A")]
+        scores = _compute_rubric_scores(rows)
+        # With ideal inputs all component scores are 10.0 → weighted overall = 10.0
+        assert scores.overall == 10.0
 
     def test_main_compute_rubric_scores_high_review_rate_lowers_governance(self, db_session):
         from app.main import _compute_rubric_scores
@@ -981,6 +998,13 @@ class TestComputeRubricScores:
         scores = _compute_rubric_scores(rows)
         # All records are needs_review, so review_rate = 1.0 → review_score = 0.0
         assert scores.governanceReadiness == 0.0
+
+    def test_main_compute_rubric_scores_low_confidence_lowers_ai_law(self, db_session):
+        from app.main import _compute_rubric_scores
+        rows = [_insert_analysis(db_session, risk_score=5.0, confidence=0.0, grade="C")]
+        scores = _compute_rubric_scores(rows)
+        # ai_law = 8.5 * 0.0 + 1.5 * (1 - review_rate) → depends on review_rate
+        assert scores.aiLawSignalQuality < 5.0
 
 
 # ===========================================================================

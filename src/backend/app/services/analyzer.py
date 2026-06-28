@@ -52,6 +52,42 @@ def _line_offsets(text: str) -> List[int]:
     return offsets
 
 
+# Expected policy sections for completeness scoring (pattern, label)
+_COMPLETENESS_CHECKS: List[tuple[str, str]] = [
+    (r"\bright\s+to\s+(access|delete|erasure|request)\b", "user_rights"),
+    (r"\bretain(?:tion)?\b|as long as necessary\b", "retention"),
+    (r"\bchildren?\b|\bminor\b|\bunder\s+13\b", "minors"),
+    (r"\bcontact\b|\bemail\b|\b@[a-z]", "contact"),
+    (r"\bopt.?out\b|\bdo not sell\b|\bGPC\b|\bglobal privacy control\b", "opt_out"),
+    (r"\bautomated\s+decision\b|\bprofil", "adm"),
+    (r"\bsecurit\b|\bencrypt\b|\bprotect\b", "security"),
+    (r"\bthird.party\b|\bservice\s+provider\b|\bpartner\b", "third_party"),
+]
+
+
+def _compute_completeness(text: str) -> float:
+    found = sum(
+        1 for pattern, _ in _COMPLETENESS_CHECKS
+        if re.search(pattern, text, re.IGNORECASE)
+    )
+    return round(found / len(_COMPLETENESS_CHECKS), 2)
+
+
+def _compute_action_readiness(risk_score: float, confidence: float, completeness: float) -> str:
+    """Return Go/Review/Stop based on risk, confidence, and section completeness.
+
+    Mirrors the demo's CRS-based logic:
+      CRS < 0.40 (risk_score < 4) and completeness >= 0.625 → Go
+      CRS >= 0.70 (risk_score >= 7) or completeness < 0.375  → Stop
+      everything else                                          → Review
+    """
+    if risk_score >= 7.0 or completeness < 0.375:
+        return "Stop"
+    if risk_score < 4.0 and confidence >= 0.65 and completeness >= 0.625:
+        return "Go"
+    return "Review"
+
+
 # Category groups boosted/suppressed per document type
 _DOCTYPE_BOOSTS: dict[str, dict[str, float]] = {
     "Privacy Policy": {
@@ -286,7 +322,9 @@ async def analyze_text(
     grade = _grade(risk_score)
     review_required = confidence < settings.review_threshold
     status = "needs_review" if review_required else "completed"
-    
+    completeness = _compute_completeness(cleaned)
+    action_readiness = _compute_action_readiness(risk_score, confidence, completeness)
+
     elapsed_time = time.time() - start_time
 
     payload = AnalysisPayload(
@@ -307,6 +345,8 @@ async def analyze_text(
         summary=summary,
         analysis_mode=mode,
         estimated_time=round(elapsed_time, 2),
+        action_readiness=action_readiness,
+        completeness=completeness,
     )
     return AnalysisResult(payload=payload, issues=validation.issues)
 

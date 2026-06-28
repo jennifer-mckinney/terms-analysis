@@ -118,6 +118,16 @@ class AnalysisPayload(BaseModel):
     summary: Optional[str] = None
     analysis_mode: str = Field(default="full", description="Mode used for this analysis")
     estimated_time: float = Field(default=0.0, description="Estimated execution time in seconds")
+    action_readiness: Literal["Go", "Review", "Stop"] = Field(
+        default="Review",
+        description="High-level recommendation: Go (low risk, high completeness), Stop (high risk), Review (all else)",
+    )
+    completeness: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of expected policy sections detected (rights, retention, contact, opt-out, ADM, security, third-party, minors)",
+    )
 
 
 class ReviewItemPayload(BaseModel):
@@ -137,6 +147,7 @@ class ReviewUpdate(BaseModel):
 class RubricScores(BaseModel):
     productIntegrity: float = Field(..., ge=0.0, le=10.0)
     legalSignalQuality: float = Field(..., ge=0.0, le=10.0)
+    aiLawSignalQuality: float = Field(..., ge=0.0, le=10.0)
     privacySecurity: float = Field(..., ge=0.0, le=10.0)
     accessibilityUsability: float = Field(..., ge=0.0, le=10.0)
     visualIxd: float = Field(..., ge=0.0, le=10.0)

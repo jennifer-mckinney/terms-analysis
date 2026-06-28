@@ -1342,3 +1342,88 @@ class TestDetectHighSeverityRegexException:
             )
         assert isinstance(findings, list)
         assert call_count[0] >= 1
+
+
+# ===========================================================================
+# _compute_completeness + _compute_action_readiness
+# ===========================================================================
+
+class TestComputeCompleteness:
+    def test_analyzer_compute_completeness_full_policy(self):
+        from app.services.analyzer import _compute_completeness
+        text = (
+            "You have the right to access and delete your data. "
+            "We retain data for 30 days. "
+            "For children under 13 we require parental consent. "
+            "Contact us at privacy@example.com. "
+            "You can opt-out via our Do Not Sell page. "
+            "Some decisions are made by automated profiling systems. "
+            "We use security and encryption to protect your data. "
+            "We share data with third-party service providers."
+        )
+        score = _compute_completeness(text)
+        assert score == 1.0
+
+    def test_analyzer_compute_completeness_empty_text_returns_zero(self):
+        from app.services.analyzer import _compute_completeness
+        assert _compute_completeness("") == 0.0
+
+    def test_analyzer_compute_completeness_partial_policy(self):
+        from app.services.analyzer import _compute_completeness
+        text = "We retain data indefinitely. Contact us at support@example.com."
+        score = _compute_completeness(text)
+        assert 0.0 < score < 1.0
+
+    def test_analyzer_compute_completeness_returns_float_in_range(self):
+        from app.services.analyzer import _compute_completeness
+        score = _compute_completeness("some policy text")
+        assert 0.0 <= score <= 1.0
+
+
+class TestComputeActionReadiness:
+    def test_analyzer_compute_action_readiness_go(self):
+        from app.services.analyzer import _compute_action_readiness
+        # low risk, high confidence, high completeness → Go
+        assert _compute_action_readiness(2.0, 0.90, 0.75) == "Go"
+
+    def test_analyzer_compute_action_readiness_stop_high_risk(self):
+        from app.services.analyzer import _compute_action_readiness
+        # risk_score >= 7 → Stop regardless of completeness
+        assert _compute_action_readiness(8.0, 0.85, 0.80) == "Stop"
+
+    def test_analyzer_compute_action_readiness_stop_low_completeness(self):
+        from app.services.analyzer import _compute_action_readiness
+        # completeness < 0.375 → Stop
+        assert _compute_action_readiness(2.0, 0.90, 0.25) == "Stop"
+
+    def test_analyzer_compute_action_readiness_review_medium_risk(self):
+        from app.services.analyzer import _compute_action_readiness
+        # medium risk → Review
+        assert _compute_action_readiness(5.0, 0.80, 0.625) == "Review"
+
+    def test_analyzer_compute_action_readiness_review_low_confidence(self):
+        from app.services.analyzer import _compute_action_readiness
+        # low confidence → stays Review even with low risk
+        assert _compute_action_readiness(2.0, 0.50, 0.75) == "Review"
+
+    def test_analyzer_analyze_text_includes_action_readiness_and_completeness(self):
+        import asyncio
+        from unittest.mock import patch, AsyncMock
+        from app.services.analyzer import analyze_text
+        text = (
+            "You have the right to delete your data. "
+            "We retain data for 30 days. "
+            "Contact us at privacy@example.com. "
+            "You can opt-out via our Do Not Sell page. "
+            "We use security safeguards. "
+            "We share with third-party partners."
+        )
+        with patch("app.services.analyzer.LocalAIClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.analyze.return_value = None
+            MockClient.return_value = mock_client
+            result = asyncio.run(analyze_text(text, ["US-CA"]))
+        assert hasattr(result.payload, "action_readiness")
+        assert result.payload.action_readiness in ("Go", "Review", "Stop")
+        assert hasattr(result.payload, "completeness")
+        assert 0.0 <= result.payload.completeness <= 1.0

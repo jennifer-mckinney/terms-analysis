@@ -921,6 +921,19 @@ function displayAnalysisResults(doc, mode) {
         ? (doc.findings).map(finding => createFindingHTML(finding)).join('')
         : '<p class="text-secondary">No issues found in this section.</p>';
 
+    // Action Readiness
+    const readiness = doc.action_readiness || 'Review';
+    const readinessConfig = {
+        Go:     { color: 'var(--color-success,#3ecf8e)', bg: 'rgba(62,207,142,0.12)', icon: '✓', note: 'Low risk — safe to proceed. Keep a copy of this policy and monitor for changes.' },
+        Review: { color: 'var(--color-warning,#ffcc66)', bg: 'rgba(255,204,102,0.12)', icon: '⚠', note: 'Some concerns found — read the flagged items before relying on this policy.' },
+        Stop:   { color: 'var(--color-danger,#ff6b6b)',  bg: 'rgba(255,107,107,0.12)', icon: '✕', note: 'Serious issues detected — do not proceed without legal review or an alternative.' },
+    };
+    const rc = readinessConfig[readiness] || readinessConfig.Review;
+
+    // Completeness meter
+    const completenessPct = Math.round((doc.completeness || 0) * 100);
+    const completenessLabel = completenessPct >= 75 ? 'Well-covered' : completenessPct >= 50 ? 'Partially covered' : 'Incomplete';
+
     const html = `
         <div class="results-header">
             <div style="flex:1">
@@ -931,6 +944,22 @@ function displayAnalysisResults(doc, mode) {
                 <div class="risk-score-value">${riskScore}</div>
                 <div class="risk-grade">Grade ${grade}</div>
                 <div style="font-size:0.72rem;color:var(--color-text-secondary);text-align:center;margin-top:2px">${scoreContext}</div>
+            </div>
+        </div>
+
+        <div style="display:flex;gap:12px;margin-bottom:14px;flex-wrap:wrap">
+            <div style="flex:1;min-width:160px;background:${rc.bg};border:1px solid ${rc.color};border-radius:12px;padding:12px 16px">
+                <div style="font-size:0.75rem;color:var(--color-text-secondary);margin-bottom:2px;text-transform:uppercase;letter-spacing:.05em">Action Readiness</div>
+                <div style="font-size:1.5rem;font-weight:700;color:${rc.color}">${rc.icon} ${readiness}</div>
+                <div style="font-size:0.8rem;margin-top:4px;color:var(--color-text-secondary)">${rc.note}</div>
+            </div>
+            <div style="min-width:160px;background:var(--color-surface-alt,rgba(0,0,0,0.04));border:1px solid var(--color-border);border-radius:12px;padding:12px 16px">
+                <div style="font-size:0.75rem;color:var(--color-text-secondary);margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em">Policy Completeness</div>
+                <div style="height:8px;background:var(--color-border);border-radius:999px;overflow:hidden;margin-bottom:6px">
+                    <div style="height:100%;width:${completenessPct}%;background:${rc.color};border-radius:999px;transition:width .5s ease"></div>
+                </div>
+                <div style="font-size:0.85rem;font-weight:600">${completenessPct}% <span style="font-weight:400;color:var(--color-text-secondary)">${completenessLabel}</span></div>
+                <div style="font-size:0.75rem;color:var(--color-text-secondary);margin-top:2px">sections of a complete policy found</div>
             </div>
         </div>
 
@@ -985,8 +1014,12 @@ function displayAnalysisResults(doc, mode) {
                     <span class="rubric-threshold" title="Score 5–8">C: watch out</span>
                     <span class="rubric-threshold" title="Score 8–10">D: serious problems</span>
                 </div>
-                <div style="margin-top:8px;font-size:0.82rem;color:var(--color-text-secondary)">
-                    Score = 0.5&times;(Impact/5) + 0.4&times;(Likelihood/5) &minus; 0.3&times;(Safeguards/5)
+                <div style="margin-top:10px;font-size:0.8rem;color:var(--color-text-secondary)">
+                    <strong>IRP Score</strong> = 0.5&times;(Impact/5) + 0.4&times;(Likelihood/5) &minus; 0.3&times;(Safeguards/5)<br>
+                    <strong>Rubric categories</strong> (tool quality, not this document):
+                    Product Integrity (20%) &bull; Legal Signal (20%) &bull; AI Law Signal (10%) &bull;
+                    Privacy &amp; Security (10%) &bull; Accessibility (15%) &bull;
+                    Visual/IXD (10%) &bull; Performance (10%) &bull; Governance (5%)
                 </div>
             </div>
             <div class="rubric-mini-footer">
@@ -1477,14 +1510,15 @@ function populateRubricScores() {
     }
 
     const RUBRIC_META = {
-        overall:               { label: 'Overall Score',            desc: 'Weighted average across all dimensions below.' },
-        productIntegrity:      { label: 'Policy Risk Level',        desc: 'How risky the checked policies are on average. Higher = lower average risk score.' },
-        legalSignalQuality:    { label: 'AI Detection Confidence',  desc: 'How confident the AI is in its findings. Low when the AI model is offline (pattern-only mode).' },
-        privacySecurity:       { label: 'Privacy & Security',       desc: 'Blend of risk level and AI confidence — reflects overall data-safety picture.' },
-        accessibilityUsability:{ label: 'Review Workload',          desc: 'How often analyses need human review. Higher = fewer items flagged for manual check.' },
-        visualIxd:             { label: 'Clarity of Results',       desc: 'Combines human-review rate with avg risk — proxy for how clear and actionable the outputs are.' },
-        performanceReliability:{ label: 'Reliability',              desc: 'How often the tool can complete an analysis without needing manual intervention.' },
-        governanceReadiness:   { label: 'Governance Readiness',     desc: 'How close to fully-automated the tool is. Drops when many analyses need human review.' },
+        overall:               { label: 'Overall Score',            weight: null,  desc: 'Weighted average across all 8 rubric dimensions.' },
+        productIntegrity:      { label: 'Product Integrity (20%)',  weight: '20%', desc: 'How risky the checked policies are on average. Higher = lower average risk score.' },
+        legalSignalQuality:    { label: 'Legal Signal Quality (20%)',weight:'20%', desc: 'How confident the AI is in its findings. Low when the AI model is offline (pattern-only mode).' },
+        aiLawSignalQuality:    { label: 'AI Law Signal (10%)',      weight: '10%', desc: 'Coverage and confidence across EU AI Act, BIPA, Colorado AI Act SB 205, OECD-AI, and related rules.' },
+        privacySecurity:       { label: 'Privacy & Security (10%)', weight: '10%', desc: 'Blend of risk level and AI confidence — reflects overall data-safety picture.' },
+        accessibilityUsability:{ label: 'Accessibility (15%)',      weight: '15%', desc: 'How often analyses need human review. Higher = fewer items flagged for manual check.' },
+        visualIxd:             { label: 'Visual / IXD (10%)',       weight: '10%', desc: 'Combines human-review rate with avg risk — proxy for how clear and actionable the outputs are.' },
+        performanceReliability:{ label: 'Performance (10%)',        weight: '10%', desc: 'How often the tool can complete an analysis without needing manual intervention.' },
+        governanceReadiness:   { label: 'Governance (5%)',          weight:  '5%', desc: 'How close to fully-automated the tool is. Drops when many analyses need human review.' },
     };
 
     function scoreColor(s) {
@@ -1498,9 +1532,9 @@ function populateRubricScores() {
         return 'Needs work';
     }
 
-    // Show overall first, then the rest
-    const ordered = ['overall', 'productIntegrity', 'legalSignalQuality', 'privacySecurity',
-                     'accessibilityUsability', 'visualIxd', 'performanceReliability', 'governanceReadiness'];
+    // Show overall first, then categories in rubric order
+    const ordered = ['overall', 'productIntegrity', 'legalSignalQuality', 'aiLawSignalQuality',
+                     'privacySecurity', 'accessibilityUsability', 'visualIxd', 'performanceReliability', 'governanceReadiness'];
 
     const rows = ordered.map(key => {
         const score = state.rubricScores[key];

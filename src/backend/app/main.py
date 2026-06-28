@@ -198,15 +198,42 @@ def _compute_rubric_scores(records: list[Analysis]) -> RubricScores:
     confidence_score = _clamp(avg_conf * 10)
     review_score = _clamp(10 - review_rate * 10)
 
+    # AI Law Signal Quality: reward high confidence (AI rules firing reliably)
+    # and penalise high needs-review rates (uncertain AI-law detections).
+    # Static coverage bonus: 12/64 rules cover AI law jurisdictions → 8.5 base.
+    ai_law = _clamp(8.5 * avg_conf + 1.5 * (1.0 - review_rate))
+
+    product_integrity = _clamp(base)
+    legal_signal = _clamp(confidence_score)
+    ai_law_signal = ai_law
+    privacy_security = _clamp(base * 0.9 + confidence_score * 0.1)
+    accessibility = _clamp(review_score * 0.6 + confidence_score * 0.4)
+    visual_ixd = _clamp(review_score * 0.5 + base * 0.5)
+    performance = _clamp(review_score * 0.7 + base * 0.3)
+    governance = _clamp(review_score)
+
+    # Weighted overall per rubric spec weights
+    weighted = (
+        0.20 * product_integrity
+        + 0.20 * legal_signal
+        + 0.10 * ai_law_signal
+        + 0.10 * privacy_security
+        + 0.15 * accessibility
+        + 0.10 * visual_ixd
+        + 0.10 * performance
+        + 0.05 * governance
+    )
+
     return RubricScores(
-        productIntegrity=_clamp(base),
-        legalSignalQuality=_clamp(confidence_score),
-        privacySecurity=_clamp(base * 0.9 + confidence_score * 0.1),
-        accessibilityUsability=_clamp(review_score * 0.6 + confidence_score * 0.4),
-        visualIxd=_clamp(review_score * 0.5 + base * 0.5),
-        performanceReliability=_clamp(review_score * 0.7 + base * 0.3),
-        governanceReadiness=_clamp(review_score),
-        overall=_clamp((base + confidence_score + review_score) / 3),
+        productIntegrity=product_integrity,
+        legalSignalQuality=legal_signal,
+        aiLawSignalQuality=ai_law_signal,
+        privacySecurity=privacy_security,
+        accessibilityUsability=accessibility,
+        visualIxd=visual_ixd,
+        performanceReliability=performance,
+        governanceReadiness=governance,
+        overall=_clamp(weighted),
     )
 
 
