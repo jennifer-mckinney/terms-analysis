@@ -510,7 +510,7 @@ def export_analysis_pdf(analysis_id: str, db: Session = Depends(get_db)):
             TableStyle,
         )
     except ImportError:
-        raise HTTPException(status_code=500, detail="PDF export dependency missing")
+        raise HTTPException(status_code=503, detail="PDF export is not available — reportlab package not installed")
 
     record = db.query(Analysis).filter(Analysis.id == analysis_id).first()
     if not record:

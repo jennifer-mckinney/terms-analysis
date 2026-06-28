@@ -232,8 +232,8 @@ class TestExportAnalysisPdf:
         assert exc_info.value.status_code == 404
         assert exc_info.value.detail == "Analysis not found"
 
-    def test_main_export_pdf_500_when_reportlab_missing(self, db_session, monkeypatch):
-        """PDF export raises 500 when reportlab cannot be imported."""
+    def test_main_export_pdf_503_when_reportlab_missing(self, db_session, monkeypatch):
+        """PDF export raises 503 when reportlab cannot be imported."""
         row = _insert_analysis(db_session)
 
         import builtins
@@ -251,8 +251,8 @@ class TestExportAnalysisPdf:
 
         with pytest.raises(HTTPException) as exc_info:
             export_analysis_pdf(analysis_id=row.id, db=db_session)
-        assert exc_info.value.status_code == 500
-        assert "PDF export dependency missing" in exc_info.value.detail
+        assert exc_info.value.status_code == 503
+        assert "reportlab" in exc_info.value.detail.lower()
 
 
 # ===========================================================================
