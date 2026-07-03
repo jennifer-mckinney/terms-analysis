@@ -161,7 +161,7 @@ The diff algorithm provides token-level comparison:
 ### Creating a Policy Watch
 
 ```bash
-curl -X POST http://localhost:8000/policy-watch \
+curl -X POST http://localhost:9000/policy-watch \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://example.com/privacy-policy",
@@ -173,31 +173,31 @@ curl -X POST http://localhost:8000/policy-watch \
 ### Capturing a Snapshot
 
 ```bash
-curl -X POST "http://localhost:8000/snapshots?url=https://example.com/privacy-policy"
+curl -X POST "http://localhost:9000/snapshots?url=https://example.com/privacy-policy"
 ```
 
 ### Comparing Two Versions
 
 ```bash
 # Get snapshots for a URL
-curl http://localhost:8000/snapshots?url=https://example.com/privacy-policy
+curl http://localhost:9000/snapshots?url=https://example.com/privacy-policy
 
 # Compare two snapshots
-curl http://localhost:8000/diff/snapshot-id-1/snapshot-id-2
+curl http://localhost:9000/diff/snapshot-id-1/snapshot-id-2
 ```
 
 ### Using Automatic Snapshots
 
 ```bash
 # Create watch
-watch_resp=$(curl -X POST http://localhost:8000/policy-watch \
+watch_resp=$(curl -X POST http://localhost:9000/policy-watch \
   -H "Content-Type: application/json" \
   -d '{"url": "https://example.com/tos"}')
 
 watch_id=$(echo $watch_resp | jq -r '.id')
 
 # Capture snapshot
-curl -X POST "http://localhost:8000/policy-watch/$watch_id/snapshot"
+curl -X POST "http://localhost:9000/policy-watch/$watch_id/snapshot"
 ```
 
 ## Test Coverage

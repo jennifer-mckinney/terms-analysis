@@ -171,7 +171,7 @@ CREATE TABLE policy_watches (
 
 ### Create Snapshot
 ```bash
-curl -X POST "http://localhost:8000/snapshots?url=https://example.com/privacy"
+curl -X POST "http://localhost:9000/snapshots?url=https://example.com/privacy"
 ```
 
 **Response** (201/200):
@@ -187,7 +187,7 @@ curl -X POST "http://localhost:8000/snapshots?url=https://example.com/privacy"
 
 ### Compare Snapshots
 ```bash
-curl "http://localhost:8000/diff/snap-123/snap-456"
+curl "http://localhost:9000/diff/snap-123/snap-456"
 ```
 
 **Response**:

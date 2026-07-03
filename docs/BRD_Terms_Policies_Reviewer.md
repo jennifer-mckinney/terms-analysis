@@ -1,11 +1,18 @@
 # Business Requirements Document: AI Terms & Policies Reviewer
 
-**Version:** 1.0  
-**Date:** February 13, 2026  
-**Status:** Draft for Approval  
-**Document Owner:** Product Management  
-**Project Location:** `/Users/jennifermckinney/Documents/_AUTOMATION/Claude_Projects/terms-analysis`  
+**Version:** 1.1
+**Date:** 2026-07-03
+**Status:** Draft for Approval
+**Document Owner:** Product Management
 **Stakeholders:** Executive Leadership, Legal, Engineering, Product, Privacy Advocates
+**Related Documents:** PRD_Terms_Policies_Reviewer.md, PRODUCT.md, `.claude/library/LIB-PRINCIPLES.md`, `.claude/library/LIB-CONTEXT.md`, `.claude/library/LIB-VOICE.md`
+
+## Change History
+
+| Version | Date | Summary |
+|---------|------|---------|
+| 1.1 | 2026-07-03 | Tech-spec audit remediation Phase 3 (Option A — accept shipped behavior; rewrite BRD; no code change). Codified the **global-tool contract**: `jurisdictions=[]` means "no filter" across rules, LLM post-filter, and Streamlit resolution — no silent US-CA + GDPR default anywhere (new BRD-CONSTRAINT-01, referenced across §Executive Summary, §Product Architecture, §Appendix A). Reconciled IRP scoring language from "planned enhancement" to shipped (per PR #34 and PRD v2.1+ §F3.1). Added BRD-CONSTRAINT-02 codifying hardware permissions (camera / mic / contacts / location) as scope caveats only, never a chip or domain group with findings, per LIB-PRINCIPLES Principle 4. Personal path removed from header. |
+| 1.0 | 2026-02-13 | Initial draft for approval — problem statement, market analysis, business model, financial projections, product architecture, jurisdiction coverage (30 codes), industry profiles. |
 
 ---
 
@@ -17,11 +24,11 @@ The AI Terms & Policies Reviewer is a privacy-focused web application that analy
 
 **Current State:** Working prototype with:
 - Multi-format document ingestion (URLs, PDFs, DOCX, RTF, HTML, text)
-- Severity-weighted risk scoring (Impact/Likelihood/Safeguards "IRP" formula is a planned, not-yet-implemented enhancement)
-- Multi-jurisdiction compliance mapping (30 jurisdiction codes spanning US federal/state, EU/UK, Canada, Latin America, Africa, Asia-Pacific, and AI-law frameworks)
+- Impact / Likelihood / Safeguards ("IRP") composite risk scoring per finding, shipped in PR #34 (formula `0.5*(impact/5) + 0.4*(likelihood/5) − 0.3*(safeguard/5)`, aggregated to a 0-10 document score and a 7-band letter grade). Severity-weighted averaging remains as a fallback for legacy findings without IRP fields.
+- Multi-jurisdiction compliance mapping (30 jurisdiction codes spanning US federal/state, EU/UK, Canada, Latin America, Africa, Asia-Pacific, and AI-law frameworks) — filter is **user-selected**; an empty selection is treated as "no filter" per BRD-CONSTRAINT-01 (see Product Architecture)
 - Industry-specific analysis profiles
 - FastAPI backend with SQLite storage
-- Streamlit primary UI + vanilla JS SPA fallback
+- Streamlit UI (`app_streamlit_v2.py`, sole UI; `app_streamlit_legacy.py` is the v1 rollback path)
 - Legal-knowledge-base RAG retrieval (numpy-exhaustive + BM25/RRF), shipped with placeholder corpus text pending real statute ingestion
 
 ### Strategic Goals
@@ -111,9 +118,9 @@ The AI Terms & Policies Reviewer addresses this gap through:
 - User maintains complete data control
 
 **2. Comprehensive Risk Analysis**
-- Severity-weighted risk scoring (Impact/Likelihood/Safeguards "IRP" formula is a planned enhancement, not yet implemented — see Risk Scoring Methodology below)
+- IRP (Impact / Likelihood / Safeguards) composite risk scoring per finding (shipped in PR #34 — see Risk Scoring Methodology below). Severity-weighted averaging remains as a fallback for legacy findings without IRP fields.
 - 9 core risk categories (data sharing, automated decisions, dark patterns, retention, user rights, minors, sensitive data, unilateral changes, liability), expanded in practice to ~50 categories across 64 rule patterns
-- Multi-jurisdiction compliance mapping (30 jurisdiction codes)
+- Multi-jurisdiction compliance mapping (30 jurisdiction codes) — filter is user-selected; empty selection means "no filter" (BRD-CONSTRAINT-01)
 - Industry-specific analysis profiles
 
 **3. Accessible & Transparent**
@@ -339,11 +346,11 @@ The AI Terms & Policies Reviewer addresses this gap through:
 
 **Technology Stack:**
 
-**Frontend — two UIs, Streamlit designated primary:**
-- **Streamlit** (`src/webapp/app_streamlit.py`) — primary UI by product decision, launched by `run.sh` on port 8501
-- **Vanilla JS SPA** (`src/webapp/index.html` / `app.js` / `style.css`) — fallback UI, launched by `run.sh` on port 8000, no build step or bundler
-- 4-space indentation (HTML/JS), 2-space (CSS)
-- **Known gap:** an independent UI/UX validation pass (live Playwright run, 2026-07-03) found the JS SPA fallback currently has more complete feature coverage than the "primary" Streamlit UI — notably, Streamlit displays no grade/risk score anywhere and has no Verify View, both of which the JS SPA implements. Tracked in issue #17; "primary" reflects the intended product direction, not current feature parity.
+**Frontend — Streamlit only:**
+- **Streamlit v2** (`src/webapp/app_streamlit_v2.py`) — sole UI, launched by `run.sh` on port 8501 (issue #19 plain-language redesign)
+- **Streamlit v1 legacy** (`src/webapp/app_streamlit_legacy.py`) — v1 rollback path, selected via `STREAMLIT_UI=v1`
+- Streamlit theming via `.streamlit/config.toml` (primary color, background, font-family)
+- **Note:** The pre-redesign vanilla-JS SPA (`index.html` / `app.js` / `style.css`) was retired in Phase 4 of the issue #19 remediation. Streamlit v2 is now the sole path.
 
 **Backend:**
 - FastAPI (Python 3.11+)
@@ -383,32 +390,62 @@ The AI Terms & Policies Reviewer addresses this gap through:
 
 ### Risk Scoring Methodology
 
-**Current implementation — severity-weighted average** (`analyzer.py::calculate_risk_score`):
+**Shipped in PR #34 — IRP (Impact / Likelihood / Safeguards) composite** (`analyzer.py::_compute_irp`):
 
 \[
-\text{score} = 10 \times \frac{\sum_{f \in \text{findings}} \text{weight}(f.\text{severity})}{|\text{findings}|}, \quad \text{weight} = \{\text{Low}: 0.2,\ \text{Medium}: 0.5,\ \text{High}: 0.8,\ \text{Critical}: 1.0\}
+\text{irp\_score}(f) = 0.5 \times \frac{f.\text{impact}}{5} + 0.4 \times \frac{f.\text{likelihood}}{5} - 0.3 \times \frac{f.\text{safeguard\_score}}{5}, \quad \text{clamped to } [0, 1]
 \]
 
-**Grade Mapping** (0–10 scale, higher = worse):
+`Finding` schema fields for `impact`, `likelihood`, `safeguard_score`, and `irp_score` are live. `rules.py::_seed_irp` seeds rule-generated findings from `_CATEGORY_IRP_DEFAULTS` (38 categories mapped). LLM prompts request the same three fields per finding. The hybrid merge takes `impact` and `likelihood` from rules as the baseline and takes `safeguard_score = max(rule, llm)`. Sort is **tier-first**: `(weight, irp_score, severity_rank)` all descending — context chip weight leads, IRP score breaks ties within tier.
+
+**Legacy fallback (kept for findings without IRP fields):** severity-weighted average — `score = 10 * (sum(weight(f.severity)) / |findings|)` with `weight = {Low: 0.2, Medium: 0.5, High: 0.8, Critical: 1.0}`.
+
+**Grade Mapping** (0-10 scale, higher = worse; source `analyzer.py::_grade`):
 - **A:** score < 3.5
-- **A-:** 3.5 ≤ score < 4.5
-- **B:** 4.5 ≤ score < 5.5
-- **B-:** 5.5 ≤ score < 6.5
-- **C+:** 6.5 ≤ score < 7.5
-- **C:** 7.5 ≤ score < 8.5
-- **D+:** score ≥ 8.5
+- **A-:** 3.5 <= score < 4.5
+- **B:** 4.5 <= score < 5.5
+- **B-:** 5.5 <= score < 6.5
+- **C+:** 6.5 <= score < 7.5
+- **C:** 7.5 <= score < 8.5
+- **D+:** score >= 8.5
 
-**Planned enhancement (not yet built):** an Impact/Likelihood/Safeguards ("IRP") formula — `0.5×(Impact/5) + 0.4×(Likelihood/5) − 0.3×(Safeguards/5)` — is specified as a future improvement (tracked alongside the legal-KB work); `Finding` schema fields for impact/likelihood/safeguards do not yet exist in code.
-
-**Risk Categories:** the original design specified 9 conceptual categories (Data Sharing, Automated Decisions, Dark Patterns, Retention, User Rights, Minors, Sensitive Data, Unilateral Changes, Liability). Actual rule coverage has grown well beyond this baseline — `rules.py` implements ~50 category labels across 64 `RulePattern` entries, adding AI Act sub-categories (High-Risk AI, Prohibited AI, Automated Decision-Making, AI Training, GPAI, etc.) and industry-specific blocks (HIPAA, FERPA, PCI DSS, COPPA) layered on top of the 9-category framework.
+**Risk Categories:** the original design specified 9 conceptual categories (Data Sharing, Automated Decisions, Dark Patterns, Retention, User Rights, Minors, Sensitive Data, Unilateral Changes, Liability). Actual rule coverage has grown well beyond this baseline — `rules.py` implements ~50 category labels across 64 `RulePattern` entries, adding AI Act sub-categories (High-Risk AI, Prohibited AI, Automated Decision-Making, AI Training, GPAI, etc.) and industry-specific blocks (HIPAA, FERPA, PCI DSS, COPPA) layered on top of the 9-category framework. The canonical shipped label set is `src/backend/app/schemas.py::CATEGORIES` (see PRD §F3.2 for the full list).
 
 ### Jurisdiction Support
 
-**Current Coverage — 30 jurisdiction codes, all with rule coverage** (`schemas.py`):
+**Current Coverage — 30 jurisdiction codes, all with rule coverage** (`schemas.py`). The user selects zero or more of these at analysis time; the tool applies the filter across rules, LLM post-filter, and Streamlit resolution. Selection semantics are governed by BRD-CONSTRAINT-01 (see below).
+
 - US: `US-FED`, `US-CA`, `US-NY`, `US-TX`, `US-VA`, `US-CO`, `US-CT`, `US-IL`, `US-NJ`, `US-MN`, `US-OR`
 - International privacy: `GDPR`, `UK-GDPR`, `LGPD` (Brazil), `PIPEDA` (Canada), `CA-QC` (Quebec Law 25), `POPIA` (South Africa), `PDPA-KE` (Kenya), `DPDP` (India), `APPI` (Japan), `PIPA` (South Korea), `APP` (Australia), `PDPA-TH` (Thailand), `NDPR` (Nigeria)
 - International frameworks: `ICCPR-17`, `COE-108`
 - AI law: `EU-AI-ACT`, `COE-AI-225`, `OECD-AI`, `UNESCO-AI`
+
+### BRD Constraints (global tool contract)
+
+The two constraints below are non-negotiable operating requirements for the tool, derived from the session outcomes documented in `.claude/CLAUDE.md` §Session outcomes (2026-07-03) and formalized in `.claude/library/LIB-PRINCIPLES.md`. They apply across rules, LLM post-filter, Streamlit UI, all API endpoints, and any downstream automation (watchlist refresh, background loops, batch analysis).
+
+#### BRD-CONSTRAINT-01 — `jurisdictions=[]` means "no filter"
+
+**Rule:** An empty jurisdictions list (`jurisdictions=[]` in API requests, or an empty multi-select in the UI) is treated as "no filter" — the tool applies rules for all 30 supported jurisdictions and does not silently substitute any default subset. There is no US-CA + GDPR fallback, no per-endpoint default, and no per-user-locale inference.
+
+**Scope of enforcement (all paths must honor this):**
+- `POST /analyze`, `POST /analyze/url`, `POST /analyze/file`, `POST /analyze/batch`
+- Watchlist refresh (`POST /watchlist/{id}/refresh`) and background loop (`_watchlist_loop_async`, `_refresh_all_watchlist_items`)
+- Policy-watch snapshot endpoints
+- LLM post-filter (`analyzer._filter_by_jurisdiction`)
+- Streamlit v2 jurisdiction resolution (dropdowns default to blank; `index=None`)
+
+**Why:** Silent defaults produce results that a nervous non-expert reader cannot reconcile with the input they gave the tool. Surfacing the empty-filter case as "no filter" preserves the tool's honesty contract (LIB-VOICE §Scope-honesty gap) and lets the user opt in to jurisdictional narrowing when they know which ones apply. US-CA and GDPR remain first-class supported jurisdictions (see §Jurisdiction Support) — they are simply not applied silently when the caller did not ask for them.
+
+**References:** `.claude/CLAUDE.md` §Session outcomes (2026-07-03), `.claude/library/LIB-PRINCIPLES.md` Principle 3 (surface drift, do not silently execute), audit findings LE-001 / LE-002 (regression tests in `src/backend/tests/test_audit_phase1_fixes.py`).
+
+#### BRD-CONSTRAINT-02 — Hardware permissions are scope caveats only
+
+**Rule:** The tool analyzes document text only. Hardware permissions (camera, microphone, contacts, location) are surfaced verbatim in the scope box as a limit of the tool — they are never a context chip, never a domain group with findings, and never a category in `schemas.CATEGORIES`. Text-level mentions of camera / mic / contacts / location that appear in a policy are analyzed under their existing content categories (for example, precise geolocation under `Sensitive Data`), not under a hardware-permission bucket.
+
+**Why:** The tool reads policy text, not runtime permission manifests. Any UI or API surface that implied hardware analysis would over-claim capability and violate the scope-honesty gap. Real-world practice divergence — what the app actually requests versus what the policy says — is likewise out of scope and surfaced in the scope box.
+
+**References:** `.claude/library/LIB-PRINCIPLES.md` Principle 4 (hard scope limits are non-negotiable), `.claude/library/LIB-VOICE.md` §Scope-honesty gap, `terms_analysis_scope_limits.md` (auto-memory).
 
 ### Industry Profiles
 
@@ -1146,11 +1183,9 @@ The AI Terms & Policies Reviewer addresses this gap through:
 ```
 terms-analysis/
 ├── src/
-│   ├── webapp/                   # Frontend — two UIs
-│   │   ├── app_streamlit.py      # Streamlit UI (primary, :8501)
-│   │   ├── index.html            # Vanilla JS SPA (fallback, :8000)
-│   │   ├── app.js
-│   │   └── style.css
+│   ├── webapp/                       # Frontend — Streamlit only
+│   │   ├── app_streamlit_v2.py       # Streamlit v2 (sole UI, :8501, default)
+│   │   └── app_streamlit_legacy.py   # v1 rollback (STREAMLIT_UI=v1)
 │   ├── backend/                  # FastAPI backend
 │   │   ├── app/
 │   │   │   ├── main.py           # API routes (24 endpoints + /health)
@@ -1176,7 +1211,7 @@ terms-analysis/
 │   ├── terms_analysis.db    # SQLite database (gitignored)
 │   └── legal_corpus/        # Legal-KB source text (tracked; index/metadata gitignored)
 ├── .env                     # Environment config
-└── run.sh                   # Launch script (backend + Streamlit + JS SPA)
+└── run.sh                   # Launch script (backend + Streamlit)
 ```
 
 **Environment Variables:**
@@ -1188,8 +1223,8 @@ terms-analysis/
 
 **Development Workflow:**
 1. Start a LocalAI server with Apertus-8B-Instruct (world model) and EuroLLM-22B-Instruct (EU specialist) loaded
-2. Run `./run.sh` — launches the backend (port 9000), Streamlit primary UI (port 8501), and vanilla JS SPA fallback (port 8000) together
-3. Primary UI at `http://localhost:8501`; fallback UI at `http://localhost:8000`
+2. Run `./run.sh` — launches the backend (port 9000) and Streamlit UI (port 8501) together
+3. UI at `http://localhost:8501`
 4. API docs available at `http://localhost:9000/docs`
 
 ### Appendix B: Risk Rubric Details
@@ -1206,7 +1241,7 @@ terms-analysis/
 8. **Unilateral Changes**: Policy modifications without notice/consent
 9. **Liability**: Excessive disclaimers, forced arbitration, class action waivers
 
-**Scoring Parameters (planned — Impact/Likelihood/Safeguards axes are not yet implemented; current scoring uses severity-weighted averaging, see Risk Scoring Methodology):**
+**Scoring Parameters (shipped in PR #34 — Impact / Likelihood / Safeguards axes are live on the `Finding` schema; see Risk Scoring Methodology for the composite formula and grade thresholds):**
 - **Impact** (1-5): Severity of potential harm to users
 - **Likelihood** (1-5): Probability clause will be exercised
 - **Safeguards** (1-5): Protections/limitations in place
@@ -1226,7 +1261,7 @@ terms-analysis/
 | Automated Analysis | Yes (AI) | No | Partial | Yes | Yes |
 | Privacy-First | Yes (local) | Yes | No | No | No |
 | Multi-Format Input | 6 types | Text | Text | Limited | Limited |
-| Risk Scoring | Severity-weighted (IRP planned) | Letter grade | Simple | Proprietary | Proprietary |
+| Risk Scoring | IRP composite (shipped) + severity-weighted fallback | Letter grade | Simple | Proprietary | Proprietary |
 | Jurisdiction Mapping | 30 jurisdictions + AI law | No | No | Limited | Yes |
 | Vendor Comparison | Yes | No | No | No | No |
 | Watchlist/Monitoring | Yes | No | No | No | Yes |
@@ -1339,9 +1374,9 @@ This project proceeds to execution if:
 
 ## Document Approval
 
-**Prepared By:** Product Management  
-**Date:** February 13, 2026  
-**Version:** 1.0
+**Prepared By:** Product Management
+**Date:** 2026-07-03
+**Version:** 1.1
 
 **Recommended For Approval:**
 
