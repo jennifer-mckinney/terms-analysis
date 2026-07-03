@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hmac
 import json
 import logging
 import typing
@@ -57,7 +58,7 @@ def _verify_api_key(x_api_key: str | None = Header(default=None)) -> None:
     required = settings.api_key
     if not required:
         return
-    if x_api_key != required:
+    if x_api_key is None or not hmac.compare_digest(x_api_key, required):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
