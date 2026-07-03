@@ -675,7 +675,7 @@ function displayAnalysisResults(doc, mode) {
         
         <div class="action-buttons mt-16">
             <button class="btn btn--primary" data-action="export-results">
-                <i class="fas fa-download"></i> Export Report
+                <i class="fas fa-download"></i> Export JSON
             </button>
             <button class="btn btn--secondary" data-action="add-watchlist">
                 <i class="fas fa-eye"></i> Add to Watchlist

@@ -195,96 +195,108 @@
   }
 }
 
-/* Data attribute for manual theme switching */
+/* Data attribute for manual theme switching.
+ *
+ * These blocks previously referenced design tokens (--color-charcoal-700,
+ * --color-teal-300, --color-cream-50, --color-slate-900, etc.) that were
+ * never defined anywhere in this file — leftover from a different
+ * template's variable scheme than the "Clean Energy" palette actually
+ * defined in :root above. That meant selecting "Dark" OR "Light" from the
+ * Settings page broke theming entirely (only the unset/"Auto" state
+ * happened to render correctly, since it left :root's own values active).
+ * Rewritten below to derive from the real palette. */
 [data-color-scheme="dark"] {
-  /* RGB versions for opacity control (dark mode) */
-  --color-gray-400-rgb: 119, 124, 124;
-  --color-teal-300-rgb: 50, 184, 198;
-  --color-gray-300-rgb: 167, 169, 169;
-  --color-gray-200-rgb: 245, 245, 245;
+  --color-background: #001417;
+  --color-surface: #0a2a2d;
+  --color-input-bg: #0a2a2d;
+  --color-highlight: #133a3e;
 
-  /* Colorful background palette - Dark Mode */
-  --color-bg-1: rgba(29, 78, 216, 0.15); /* Dark blue */
-  --color-bg-2: rgba(180, 83, 9, 0.15); /* Dark yellow */
-  --color-bg-3: rgba(21, 128, 61, 0.15); /* Dark green */
-  --color-bg-4: rgba(185, 28, 28, 0.15); /* Dark red */
-  --color-bg-5: rgba(107, 33, 168, 0.15); /* Dark purple */
-  --color-bg-6: rgba(194, 65, 12, 0.15); /* Dark orange */
-  --color-bg-7: rgba(190, 24, 93, 0.15); /* Dark pink */
-  --color-bg-8: rgba(8, 145, 178, 0.15); /* Dark cyan */
-  
-  /* Semantic Color Tokens (Dark Mode) */
-  --color-background: var(--color-charcoal-700);
-  --color-surface: var(--color-charcoal-800);
-  --color-text: var(--color-gray-200);
-  --color-text-secondary: rgba(var(--color-gray-300-rgb), 0.7);
-  --color-primary: var(--color-teal-300);
-  --color-primary-hover: var(--color-teal-400);
-  --color-primary-active: var(--color-teal-800);
-  --color-secondary: rgba(var(--color-gray-400-rgb), 0.15);
-  --color-secondary-hover: rgba(var(--color-gray-400-rgb), 0.25);
-  --color-secondary-active: rgba(var(--color-gray-400-rgb), 0.3);
-  --color-border: rgba(var(--color-gray-400-rgb), 0.3);
-  --color-error: var(--color-red-400);
-  --color-success: var(--color-teal-300);
-  --color-warning: var(--color-orange-400);
-  --color-info: var(--color-gray-300);
-  --color-focus-ring: rgba(var(--color-teal-300-rgb), 0.4);
-  --color-btn-primary-text: var(--color-slate-900);
-  --color-card-border: rgba(var(--color-gray-400-rgb), 0.15);
-  --color-card-border-inner: rgba(var(--color-gray-400-rgb), 0.15);
-  --shadow-inset-sm: inset 0 1px 0 rgba(255, 255, 255, 0.1),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.15);
-  --color-border-secondary: rgba(var(--color-gray-400-rgb), 0.2);
-  --color-select-caret: rgba(var(--color-gray-200-rgb), 0.8);
+  --color-text: #d7eef0;
+  --color-text-secondary: #9fc9ce;
+  --color-text-hint: #6b9ea5;
 
-  /* Common style patterns - updated for dark mode */
-  --focus-ring: 0 0 0 3px var(--color-focus-ring);
-  --focus-outline: 2px solid var(--color-primary);
-  --status-bg-opacity: 0.15;
-  --status-border-opacity: 0.25;
-  --select-caret-light: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23134252' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
-  --select-caret-dark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23f5f5f5' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  --color-primary: #2fc3ce;
+  --color-primary-hover: #4fd4de;
+  --color-primary-active: #1fa8b3;
+  --color-primary-bg: #0f3a3e;
 
-  /* RGB versions for dark mode */
-  --color-success-rgb: var(--color-teal-300-rgb);
-  --color-error-rgb: var(--color-red-400-rgb);
-  --color-warning-rgb: var(--color-orange-400-rgb);
-  --color-info-rgb: var(--color-gray-300-rgb);
+  --color-accent: #e08b6f;
+  --color-accent-hover: #f0a488;
+  --color-accent-bg: #3a2420;
+
+  --color-critical: #e07a6f;
+  --color-high: #e8a878;
+  --color-medium: #f0d090;
+  --color-low: #7ecac4;
+  --color-success: #6fcdb8;
+  --color-error: #e07a6f;
+  --color-warning: #e8a878;
+  --color-info: #9fc9ce;
+
+  --color-border-subtle: #163438;
+  --color-border: #2a4d52;
+  --color-border-focus: #2fc3ce;
+  --color-card-border: #2a4d52;
+  --color-card-border-inner: #163438;
+
+  --color-btn-primary-text: #001417;
+  --color-secondary: #163438;
+  --color-secondary-hover: #1c4145;
+  --color-secondary-active: #234e52;
+  --color-focus-ring: rgba(47, 195, 206, 0.3);
+  --color-select-caret: rgba(215, 238, 240, 0.8);
+
+  --color-success-rgb: 111, 205, 184;
+  --color-error-rgb: 224, 122, 111;
+  --color-warning-rgb: 232, 168, 120;
+  --color-info-rgb: 159, 201, 206;
 }
 
 [data-color-scheme="light"] {
-  /* RGB versions for opacity control (light mode) */
-  --color-brown-600-rgb: 94, 82, 64;
-  --color-teal-500-rgb: 33, 128, 141;
-  --color-slate-900-rgb: 19, 52, 59;
-  
-  /* Semantic Color Tokens (Light Mode) */
-  --color-background: var(--color-cream-50);
-  --color-surface: var(--color-cream-100);
-  --color-text: var(--color-slate-900);
-  --color-text-secondary: var(--color-slate-500);
-  --color-primary: var(--color-teal-500);
-  --color-primary-hover: var(--color-teal-600);
-  --color-primary-active: var(--color-teal-700);
-  --color-secondary: rgba(var(--color-brown-600-rgb), 0.12);
-  --color-secondary-hover: rgba(var(--color-brown-600-rgb), 0.2);
-  --color-secondary-active: rgba(var(--color-brown-600-rgb), 0.25);
-  --color-border: rgba(var(--color-brown-600-rgb), 0.2);
-  --color-btn-primary-text: var(--color-cream-50);
-  --color-card-border: rgba(var(--color-brown-600-rgb), 0.12);
-  --color-card-border-inner: rgba(var(--color-brown-600-rgb), 0.12);
-  --color-error: var(--color-red-500);
-  --color-success: var(--color-teal-500);
-  --color-warning: var(--color-orange-500);
-  --color-info: var(--color-slate-500);
-  --color-focus-ring: rgba(var(--color-teal-500-rgb), 0.4);
+  --color-background: #afdde5;
+  --color-surface: #ffffff;
+  --color-input-bg: #ffffff;
+  --color-highlight: #e5f4f6;
 
-  /* RGB versions for light mode */
-  --color-success-rgb: var(--color-teal-500-rgb);
-  --color-error-rgb: var(--color-red-500-rgb);
-  --color-warning-rgb: var(--color-orange-500-rgb);
-  --color-info-rgb: var(--color-slate-500-rgb);
+  --color-text: #003135;
+  --color-text-secondary: #024950;
+  --color-text-hint: #6b9ea5;
+
+  --color-primary: #0fa4af;
+  --color-primary-hover: #0d8a94;
+  --color-primary-active: #0b767f;
+  --color-primary-bg: #c5eef2;
+
+  --color-accent: #964734;
+  --color-accent-hover: #7d3a2b;
+  --color-accent-bg: #f2ddd8;
+
+  --color-critical: #c75f54;
+  --color-high: #d98b5f;
+  --color-medium: #e8c068;
+  --color-low: #7ecac4;
+  --color-success: #5cb3a7;
+  --color-error: #c75f54;
+  --color-warning: #d98b5f;
+  --color-info: #024950;
+
+  --color-border-subtle: #d4e9ec;
+  --color-border: #a8ced4;
+  --color-border-focus: #0fa4af;
+  --color-card-border: #d4e9ec;
+  --color-card-border-inner: #e5f4f6;
+
+  --color-btn-primary-text: #ffffff;
+  --color-secondary: #e5f4f6;
+  --color-secondary-hover: #d4e9ec;
+  --color-secondary-active: #c5eef2;
+  --color-focus-ring: rgba(15, 164, 175, 0.2);
+  --color-select-caret: rgba(0, 49, 53, 0.8);
+
+  --color-success-rgb: 33, 128, 141;
+  --color-error-rgb: 192, 21, 47;
+  --color-warning-rgb: 168, 75, 47;
+  --color-info-rgb: 98, 108, 113;
 }
 
 /* Base styles */
