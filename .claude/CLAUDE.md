@@ -76,12 +76,12 @@ rule: risk scores (0-10, higher=worse) map to grades: A (<3.5), A- (3.5-4.5), B 
 rule: use `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `style:`
 
 ### G2: active-branch
-rule: active development branch is `claude/terms-analysis-setup-fpvabq` (open PR #5); prior branches `claude/analyze-project-1Q21W` and `claude/improve-test-coverage-DGT1c` already merged
+rule: active development branch is `claude/issue-19-arch-docs-followup`; prior branches merged: `claude/analyze-project-1Q21W`, `claude/improve-test-coverage-DGT1c`, `claude/terms-analysis-setup-fpvabq` (PR #5), `claude/issue-19-plain-language-redesign` (PR #34)
 
 ## session-outcomes-2026-07-03
 
 ### SO1: PR34-shipped
-rule: PR #34 (`claude/issue-19-plain-language-redesign`) landed across 4 commits — `e4fd706` -> `2626e2b` -> `671d3e5` -> `b5ea947`; 702 tests passing, 98.06% coverage
+rule: PR #34 (`claude/issue-19-plain-language-redesign`) landed across 4 commits — `e4fd706` -> `2626e2b` -> `671d3e5` -> `b5ea947`; 873 tests passing, 98.06% coverage
 
 ### SO2: IRP-scoring-shipped
 rule: `impact`, `likelihood`, `safeguard_score`, `irp_score` fields live on `Finding`; was "planned" in prior LIB-ARCH text
@@ -115,6 +115,15 @@ detail: v2 is ~972 lines, teal palette, two-view state, tabbed input (link/text/
 ### SO8: infer-endpoint
 rule: new `POST /infer` — accepts URL and/or text; returns TLD-based jurisdiction + doc_type + industry signals
 impl: `@lru_cache` on hot paths; pre-compiled regexes; observability logging
+
+### SO10: shell-native-test-scripts
+rule: two shell scripts mirror Python test counterparts and kept side-by-side for comparison
+files: `scripts/testing/simplification-check.sh` (14 assertions, live app_streamlit_v2.py source, streamlit stubbed headless) + `scripts/testing/smoke-test.sh` (9 live HTTP tests via curl+jq)
+verify_scopes: `verify.sh simplification` + `verify.sh smoke-live` (both exec directly, bypass pytest/summarizer)
+key_diff: .py counterparts test copied/mocked function; .sh scripts test live source — run both to catch divergence
+p9_findings_fixed: F1-F5 security + G1-G5 grumpy (all fixed before push 2026-07-03)
+coverage_matrix: `docs/research/test-coverage-matrix.md` — 20 journeys mapped, 2 CRITICAL gaps (rule categories, HITL threshold)
+xref: [[.claude/rules/testing.md]] [[LIB-PRINCIPLES#P9]]
 
 ### SO9: regressions-file
 rule: `test_regressions_pr34.py` — 30 tests covering cross-endpoint consistency via `typing.get_args()` runtime iteration, schema-Literal allowlist parity, XSS defense-in-depth (blocks `javascript:`, `data:`, `vbscript:` schemes), malformed inputs, ReDoS canary on `inference.py`, domain-grouping edges, sort stability
