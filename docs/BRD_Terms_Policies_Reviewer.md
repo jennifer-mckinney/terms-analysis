@@ -368,7 +368,7 @@ The AI Terms & Policies Reviewer addresses this gap through:
 
 ### API Endpoints
 
-23 business endpoints plus `/health`, grouped as follows (see `src/backend/app/main.py`):
+24 business endpoints plus `/health` (25 routes total), grouped as follows (see `src/backend/app/main.py`):
 
 | Group | Endpoints | Purpose |
 |-------|-----------|----------|

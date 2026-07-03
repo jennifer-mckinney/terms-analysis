@@ -20,7 +20,7 @@ graph TB
     subgraph LOCAL ["Local Machine — all data stays here"]
         FE1["Streamlit UI — primary\n:8501"]:::frontend
         FE2["Vanilla JS SPA — fallback\n:8000"]:::frontend
-        BE["FastAPI Backend\n:9000\n23 endpoints + /health"]:::backend
+        BE["FastAPI Backend\n:9000\n24 endpoints + /health"]:::backend
 
         subgraph AI ["AI / ML Layer"]
             LLM["LocalAI\nApertus-8B-Instruct · EuroLLM-22B-Instruct"]:::ai
@@ -91,7 +91,7 @@ graph TB
             EP9["GET /exports/analyses.csv"]:::endpoint
             EP10["GET /exports/analysis/{id}"]:::endpoint
         end
-        subgraph WATCH_EP ["Watchlist / Snapshot / Policy-watch (10 endpoints)"]
+        subgraph WATCH_EP ["Watchlist / Snapshot / Policy-watch (12 endpoints)"]
             EP11["POST/GET /watchlist\nDELETE /watchlist/{id}\nPOST /watchlist/{id}/refresh"]:::endpoint
             EP13["GET/POST /snapshots\nGET /snapshots/detail/{id}"]:::endpoint
             EP14["GET /diff/{id1}/{id2}"]:::endpoint
