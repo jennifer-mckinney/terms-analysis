@@ -32,9 +32,9 @@ RAG pipeline is implemented (`services/legal_kb.py`, `services/embedding.py`) us
 | Package | License | Purpose |
 |---------|---------|---------|
 | pytest | MIT | Test runner |
-| pytest-asyncio | Apache-2.0 | Async test support |
 | pytest-cov | MIT | Coverage reporting |
-| respx | BSD-3 | httpx mock (for LLM + URL fetch tests) |
+
+**Not installed** (despite being conventional choices): `pytest-asyncio`, `respx`. Async tests use plain `asyncio.run(...)` inside a regular (non-`async def`) test function instead of `@pytest.mark.asyncio`; `httpx` mocking uses `httpx.MockTransport` patched into `httpx.AsyncClient.__init__` via `monkeypatch` instead of `respx`. See `.claude/library/LIB-TEST.md` and `test_ingest.py`'s `_patch_transport()` helper for the pattern — adding the `@pytest.mark.asyncio` marker without installing the plugin silently skips the test with a `PytestUnknownMarkWarning` rather than failing loudly.
 
 ## Configuration (env vars)
 

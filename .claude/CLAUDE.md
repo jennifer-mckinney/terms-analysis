@@ -8,7 +8,7 @@
 | Stack | FastAPI backend, Streamlit UI (primary) + vanilla JS SPA (fallback), SQLite, LocalAI (Apertus-8B/EuroLLM-22B), numpy exhaustive search (legal-KB embeddings — not FAISS, see Hard Requirements) |
 | Jurisdictions | 30 codes including US-CA (CCPA/CPRA), GDPR, PIPEDA, US-CO, US-CT, US-NY (full list in `schemas.py`) |
 | Risk Method | Severity-weighted average (see `analyzer.py::calculate_risk_score`); an Impact/Likelihood/Safeguards "IRP" formula is a planned, not-yet-implemented enhancement |
-| Status | Beta — backend on `claude/analyze-project-1Q21W`, tests on `claude/improve-test-coverage-DGT1c` |
+| Status | Beta — active development on `claude/terms-analysis-setup-fpvabq` (open PR #5); prior branches `claude/analyze-project-1Q21W` and `claude/improve-test-coverage-DGT1c` are merged into it |
 
 ## Hard Requirements
 
@@ -49,8 +49,8 @@
 ## Git Conventions
 
 - Prefixes: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `style:`
-- Backend branch: `claude/analyze-project-1Q21W`
-- Test coverage branch: `claude/improve-test-coverage-DGT1c`
+- Active development branch: `claude/terms-analysis-setup-fpvabq` (open PR #5)
+- Prior branches `claude/analyze-project-1Q21W` and `claude/improve-test-coverage-DGT1c` are already merged into the active branch — not separate lines of work
 
 ## Reference Library
 
@@ -63,7 +63,7 @@ Access via `@.claude/library/<file>` when deeper context is needed.
 | **LIB-LEGAL** | `@.claude/library/LIB-LEGAL.md` | Legal LLM/embedding models, RAG architecture, legal corpora |
 | **LIB-TEST** | `@.claude/library/LIB-TEST.md` | Test coverage gaps, implementation plan |
 | **LIB-API** | `@.claude/library/LIB-API.md` | API endpoints, request/response contracts |
-| **LIB-RULES** | `@.claude/library/LIB-RULES.md` | Rule engine patterns, 9 risk categories, IRP scoring |
+| **LIB-RULES** | `@.claude/library/LIB-RULES.md` | Rule engine patterns (~50 categories/64 patterns), confidence/risk-score formulas |
 | **LIB-EVAL** | `@.claude/library/LIB-EVAL.md` | Quality rubric, F1/Kappa metrics, grading thresholds |
 
 ## Plans & Analysis Documents
