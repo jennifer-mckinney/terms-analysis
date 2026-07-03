@@ -135,7 +135,32 @@ Access via `@.claude/library/<file>` when deeper context is needed.
 | **LIB-EVAL** | `@.claude/library/LIB-EVAL.md` | Rubric, F1/Kappa, grading thresholds |
 | **LIB-CONTEXT** | `@.claude/library/LIB-CONTEXT.md` | Context chip taxonomy, weight tiers, sort semantics, verdict copy |
 | **LIB-VOICE** | `@.claude/library/LIB-VOICE.md` | Two-voice copy, no-em-dash, scope-honesty gap |
-| **LIB-PRINCIPLES** | `@.claude/library/LIB-PRINCIPLES.md` | Governance principles P1-P8 |
+| **LIB-PRINCIPLES** | `@.claude/library/LIB-PRINCIPLES.md` | Governance principles P1-P9 (P8 agent-separation, P9 pre-push review) |
+
+## governance-monitoring
+
+### G1: injection-consistency
+script: `~/.claude/scripts/verify-injection.sh`
+reads: `~/.claude/session-start.log`
+gate: confirms LIB-PRINCIPLES + PEAS + global CLAUDE.md + project CLAUDE.md appeared in most recent session-start injection
+exit_codes: 0=ok, 1=drift-missing-file, 2=no-matching-entry, 3=no-log, 4=no-jq
+run_from: project root
+because: guards against silent hook failure or misconfiguration
+xref: [[LIB-PRINCIPLES#P8]] [[$HOME/.claude/CLAUDE.md#session-start-governance-chain]]
+
+### G2: content-consistency
+manifest: `.claude/_governance-manifest.json`
+tracks: SHA256 of `.claude/CLAUDE.md`, `.claude/library/LIB-PRINCIPLES.md`, `$HOME/.claude/CLAUDE.md`, `$HOME/.claude/library/PEAS.md`
+verify: `scripts/governance/verify-hashes.sh` — exit 0 ok, 1 drift, 2 manifest-missing, 3 tracked-file-missing
+regen: `scripts/governance/regen-manifest.sh` — requires explicit intent (`y/N` prompt or `--yes` flag)
+regen_policy: only after intentional governance-file change reviewed via PR
+because: catches silent governance drift between sessions
+xref: [[LIB-PRINCIPLES#P8]]
+
+### G3: pre-push-independent-review
+rule: enforce LIB-PRINCIPLES P9 — dispatch security-engineer + grumpy-developer before any push
+gate: CRITICAL or HIGH finding from either agent blocks push until resolved or user-overridden
+xref: [[LIB-PRINCIPLES#P9]]
 
 ## plans-and-analysis
 
