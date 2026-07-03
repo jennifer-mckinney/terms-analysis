@@ -19,8 +19,14 @@ PORT="${PORT:-8000}"
 STREAMLIT_PORT="${STREAMLIT_PORT:-8501}"
 BACKEND_PORT="${BACKEND_PORT:-9000}"
 BACKEND_HOST="${BACKEND_HOST:-0.0.0.0}"
+# LocalAI (Apache 2.0, zero VC) — https://localai.io
+# Default port: 8080. Override with LOCALAI_BASE_URL env var.
 LOCALAI_BASE_URL="${LOCALAI_BASE_URL:-http://localhost:8080/v1}"
+# Apertus 8B Instruct — Swiss AI Initiative (EPFL/ETH/CSCS), Apache 2.0, 1000+ languages
+# https://huggingface.co/swiss-ai/Apertus-8B-Instruct-2509-GGUF
 MODEL_WORLD="${MODEL_WORLD:-apertus-8b-instruct}"
+# EuroLLM 22B Instruct — EU Horizon Europe / EuroHPC, Apache 2.0, 35 EU languages
+# https://huggingface.co/utter-project/EuroLLM-22B-Instruct-GGUF
 MODEL_EU="${MODEL_EU:-eurollm-22b-instruct}"
 ALLOWED_ORIGINS="${ALLOWED_ORIGINS:-http://localhost:${PORT},http://127.0.0.1:${PORT},http://localhost:${STREAMLIT_PORT},http://127.0.0.1:${STREAMLIT_PORT}}"
 API_BASE_URL="${API_BASE_URL:-http://localhost:${BACKEND_PORT}}"
@@ -51,7 +57,9 @@ echo "Primary UI (Streamlit): http://localhost:$STREAMLIT_PORT"
 echo "Fallback UI (vanilla JS SPA): http://localhost:$PORT"
 echo "Backend dir: $BACKEND_DIR"
 echo "Backend URL: http://localhost:$BACKEND_PORT"
-echo "LocalAI: $LOCALAI_BASE_URL (world=$MODEL_WORLD, eu=$MODEL_EU)"
+echo "LocalAI:     $LOCALAI_BASE_URL"
+echo "  world model: $MODEL_WORLD (Apertus — Swiss AI Initiative)"
+echo "  EU model:    $MODEL_EU (EuroLLM — EU Horizon Europe)"
 echo "Press Ctrl+C to stop."
 
 if [[ ! -d "$VENV_PATH" ]]; then

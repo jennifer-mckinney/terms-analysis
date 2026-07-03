@@ -43,16 +43,14 @@ def validate_findings(findings: List[Finding], document_text: Optional[str]) -> 
         if not finding.evidence.legal_basis:
             issues.append(f"Finding {idx} missing legal basis.")
             missing_citations += 1
-        if document_text and finding.excerpt and 1 <= line_start <= line_end <= total_lines:
-            span_text = "\n".join(lines[line_start - 1:line_end])
-            if _normalize_snippet(finding.excerpt) in _normalize_snippet(span_text):
+        if document_text and finding.excerpt:
+            # Excerpts include a context window (±140 chars) around the match, so they
+            # span more text than the cited lines alone. Check against the full document.
+            if _normalize_snippet(finding.excerpt) in _normalize_snippet(document_text):
                 coverage_hits += 1
             else:
-                issues.append(f"Finding {idx} excerpt not found in cited lines.")
+                issues.append(f"Finding {idx} excerpt not found in document.")
                 hallucination_flags += 1
-        elif document_text and finding.excerpt and finding.excerpt not in document_text:
-            issues.append(f"Finding {idx} excerpt not found in document.")
-            hallucination_flags += 1
 
     avg_confidence = sum(f.confidence for f in findings) / len(findings)
     coverage_ratio = coverage_hits / len(findings)

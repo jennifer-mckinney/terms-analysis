@@ -8,7 +8,7 @@
 | Stack | FastAPI backend, Streamlit UI (primary) + vanilla JS SPA (fallback), SQLite, LocalAI (Apertus-8B/EuroLLM-22B), numpy exhaustive search (legal-KB embeddings — not FAISS, see Hard Requirements) |
 | Jurisdictions | 30 codes including US-CA (CCPA/CPRA), GDPR, PIPEDA, US-CO, US-CT, US-NY (full list in `schemas.py`) |
 | Risk Method | Severity-weighted average (see `analyzer.py::calculate_risk_score`); an Impact/Likelihood/Safeguards "IRP" formula is a planned, not-yet-implemented enhancement |
-| Status | Beta — active development on `claude/terms-analysis-setup-fpvabq` (open PR #5); prior branches `claude/analyze-project-1Q21W` and `claude/improve-test-coverage-DGT1c` are merged into it |
+| Status | Beta — PR #4 (rubric expansion, API-key auth, PDF-export escaping, CI) and PR #5 (docs reconciliation, legal-KB RAG, XSS/SSRF fixes) merged into `main`; no open PRs/branches |
 
 ## Hard Requirements
 
@@ -17,7 +17,7 @@
 - **IMPORTANT:** All dependencies must score IRP Grade A or higher.
 - **IMPORTANT:** All data stays local. No external API calls.
 - **IMPORTANT:** LLM failures must always fall back to rule-only findings with reduced confidence.
-- **IMPORTANT:** No OpenAI dependency. LLM inference is local-only via LocalAI (Apertus-8B/EuroLLM-22B).
+- **IMPORTANT:** No OpenAI dependency. LLM inference is local-only via LocalAI (EuroLLM-22B for EU/legal text, Apertus-8B for multilingual/world coverage).
 - Confidence < 0.80 triggers human-in-the-loop review.
 - Rule confidence (active path, `_confidence_rules_based`) is clamped to [0.90, 0.95].
 - Risk scores (0-10 scale, higher = worse) map to grades: A (<3.5), A- (3.5-4.5), B (4.5-5.5), B- (5.5-6.5), C+ (6.5-7.5), C (7.5-8.5), D+ (>=8.5).

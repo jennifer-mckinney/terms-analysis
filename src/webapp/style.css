@@ -1,35 +1,36 @@
 :root {
   /* === CLEAN ENERGY PALETTE (Light Mode Default) === */
-  
+
   /* Exact colors from reference image */
   --ocean-deep: #003135;        /* Deep ocean teal (darkest) */
   --ocean-mid: #024950;         /* Mid teal */
   --earth: #964734;             /* Terracotta earth */
   --turquoise: #0FA4AF;         /* Bright turquoise */
   --mint: #AFDDE5;              /* Pale mint */
-  
+
   /* Backgrounds */
   --color-background: #AFDDE5;  /* Pale mint - main page background */
   --color-surface: #FFFFFF;     /* Pure white - cards/panels */
+  --color-surface-alt: rgba(0, 49, 53, 0.06); /* Subtle tinted surface for inline card accents */
   --color-input-bg: #FFFFFF;    /* Pure white - form inputs */
   --color-highlight: #E5F4F6;   /* Very light teal - highlights */
-  
+
   /* Text */
   --color-text: #003135;        /* Deep ocean teal - main text */
   --color-text-secondary: #024950; /* Mid teal - secondary text */
   --color-text-hint: #3D6D74;   /* Teal-gray - hints/captions (darkened from #6B9EA5, which was 2.02:1 on the page background, below the 3:1 WCAG floor) */
-  
+
   /* Primary Actions (Bright Turquoise) */
   --color-primary: #0FA4AF;     /* Bright turquoise - buttons/links */
   --color-primary-hover: #0D8A94; /* Darker turquoise */
   --color-primary-active: #0B767F; /* Even darker */
   --color-primary-bg: #C5EEF2;  /* Light turquoise - backgrounds */
-  
+
   /* Earth Accent (Terracotta) */
   --color-accent: #964734;      /* Terracotta - warm emphasis */
   --color-accent-hover: #7D3A2B; /* Darker terracotta */
   --color-accent-bg: #F2DDD8;   /* Light peachy beige */
-  
+
   /* Status Colors */
   --color-critical: #C75F54;    /* Warm coral */
   --color-high: #D98B5F;        /* Peachy orange */
@@ -38,15 +39,16 @@
   --color-success: #5CB3A7;     /* Teal-green */
   --color-error: #C75F54;       /* Same as critical */
   --color-warning: #D98B5F;     /* Same as high */
+  --color-danger: #C75F54;      /* Alias for --color-error, used by inline Action Readiness styles */
   --color-info: #024950;        /* Mid teal */
-  
+
   /* Borders */
   --color-border-subtle: #D4E9EC; /* Very soft teal */
   --color-border: #A8CED4;      /* Visible teal-gray */
   --color-border-focus: #0FA4AF; /* Bright turquoise (focus ring) */
   --color-card-border: #D4E9EC;
   --color-card-border-inner: #E5F4F6;
-  
+
   /* Semantic aliases for compatibility */
   --color-btn-primary-text: #003135; /* was #FFFFFF — only 3.02:1 on --color-primary, below 4.5:1 AA */
   --color-secondary: #E5F4F6;
@@ -76,7 +78,7 @@
   --color-low-rgb: 126, 202, 196;
 
   /* Typography */
-  --font-family-base: "FKGroteskNeue", "Geist", "Inter", -apple-system,
+  --font-family-base: "Geist", "Inter", -apple-system,
     BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --font-family-mono: "Berkeley Mono", ui-monospace, SFMono-Regular, Menlo,
     Monaco, Consolas, monospace;
@@ -152,6 +154,7 @@
   :root {
     --color-background: #001417;
     --color-surface: #0a2a2d;
+    --color-surface-alt: rgba(215, 238, 240, 0.06);
     --color-input-bg: #0a2a2d;
     --color-highlight: #133a3e;
 
@@ -175,6 +178,7 @@
     --color-success: #6fcdb8;
     --color-error: #e07a6f;
     --color-warning: #e8a878;
+    --color-danger: #e07a6f;
     --color-info: #9fc9ce;
 
     --color-border-subtle: #163438;
@@ -214,6 +218,7 @@
 [data-color-scheme="dark"] {
   --color-background: #001417;
   --color-surface: #0a2a2d;
+  --color-surface-alt: rgba(215, 238, 240, 0.06);
   --color-input-bg: #0a2a2d;
   --color-highlight: #133a3e;
 
@@ -237,6 +242,7 @@
   --color-success: #6fcdb8;
   --color-error: #e07a6f;
   --color-warning: #e8a878;
+  --color-danger: #e07a6f;
   --color-info: #9fc9ce;
 
   --color-border-subtle: #163438;
@@ -265,6 +271,7 @@
 [data-color-scheme="light"] {
   --color-background: #afdde5;
   --color-surface: #ffffff;
+  --color-surface-alt: rgba(0, 49, 53, 0.06);
   --color-input-bg: #ffffff;
   --color-highlight: #e5f4f6;
 
@@ -288,6 +295,7 @@
   --color-success: #5cb3a7;
   --color-error: #c75f54;
   --color-warning: #d98b5f;
+  --color-danger: #c75f54;
   --color-info: #024950;
 
   --color-border-subtle: #d4e9ec;
@@ -731,13 +739,7 @@ select.form-control {
   border: 1px solid var(--color-border-secondary);
 }
 
-@font-face {
-  font-family: 'FKGroteskNeue';
-  src: url('https://r2cdn.perplexity.ai/fonts/FKGroteskNeue.woff2')
-    format('woff2');
-}
-
-/* END PERPLEXITY DESIGN SYSTEM */
+/* END DESIGN SYSTEM */
 /* Application-specific styles for Terms & Policies Reviewer */
 
 /* Layout and Navigation */
@@ -1808,4 +1810,283 @@ select.form-control {
 
 .border-bottom {
   border-bottom: 1px solid var(--color-card-border-inner);
+}
+
+/* ===== Jurisdiction Selector ===== */
+.jurisdiction-selector {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-base);
+  overflow: hidden;
+}
+
+.jurisdiction-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-8) var(--space-12);
+  background: var(--color-secondary);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  flex-wrap: wrap;
+  gap: var(--space-8);
+}
+
+.jurisdiction-toggle-btn {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 3px var(--space-8);
+  font-size: var(--font-size-xs);
+  color: var(--color-primary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  white-space: nowrap;
+}
+
+.jurisdiction-toggle-btn:hover {
+  background: var(--color-secondary-hover);
+}
+
+.jurisdiction-panel {
+  padding: var(--space-12);
+  background: var(--color-surface);
+  border-top: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+}
+
+.jurisdiction-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.jurisdiction-group-label {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-secondary);
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--color-card-border-inner);
+}
+
+.jurisdiction-group-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4) var(--space-8);
+}
+
+.jurisdiction-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  cursor: pointer;
+  padding: 3px var(--space-8) 3px var(--space-4);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  border: 1px solid transparent;
+  transition: all var(--duration-fast) var(--ease-standard);
+}
+
+.jurisdiction-item:hover {
+  background: var(--color-secondary);
+  border-color: var(--color-border);
+}
+
+.jurisdiction-item input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--color-primary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.jx-code {
+  font-weight: var(--font-weight-medium);
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-primary);
+}
+
+.jx-name {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+/* ===== Concern Chips ===== */
+.concern-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-6);
+  margin-top: var(--space-8);
+}
+
+.concern-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--space-4) var(--space-10);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-standard);
+  white-space: nowrap;
+}
+
+.concern-chip:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  background: rgba(var(--color-ocean-500-rgb, 6, 75, 115), 0.06);
+}
+
+.concern-chip.selected {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: var(--color-btn-primary-text);
+  font-weight: var(--font-weight-medium);
+}
+
+.finding-item.concern-highlight {
+  border-color: var(--color-primary);
+  background: rgba(var(--color-ocean-500-rgb, 6, 75, 115), 0.05);
+}
+
+/* ===== Dashboard Risk Breakdown ===== */
+.dashboard-risk-breakdown {
+  background: var(--color-surface);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-24);
+}
+
+.dashboard-risk-breakdown h3 {
+  margin-bottom: var(--space-16);
+  font-size: var(--font-size-lg);
+}
+
+.grade-bar-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  margin-bottom: var(--space-6);
+}
+
+.grade-bar-label {
+  min-width: 28px;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-bold);
+  text-align: right;
+}
+
+.grade-bar-track {
+  flex: 1;
+  height: 8px;
+  background: var(--color-secondary);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+
+.grade-bar-fill {
+  height: 100%;
+  border-radius: var(--radius-full);
+  min-width: 4px;
+  transition: width 0.4s var(--ease-standard);
+}
+
+.grade-bar-count {
+  min-width: 20px;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  text-align: right;
+}
+
+.top-risk-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-6) 0;
+  border-bottom: 1px solid var(--color-card-border-inner);
+  font-size: var(--font-size-sm);
+}
+
+.top-risk-item:last-child {
+  border-bottom: none;
+}
+
+.top-risk-name {
+  color: var(--color-text);
+  font-weight: var(--font-weight-medium);
+}
+
+.top-risk-count {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+}
+
+.analysis-item--clickable:hover .analysis-name {
+  color: var(--color-primary);
+}
+
+.analysis-item--clickable:hover {
+  background: var(--color-secondary);
+  border-radius: var(--radius-sm);
+  margin-left: calc(-1 * var(--space-8));
+  margin-right: calc(-1 * var(--space-8));
+  padding-left: var(--space-8);
+  padding-right: var(--space-8);
+}
+
+/* ===== Rubric Mini-Card ===== */
+.rubric-mini-card {
+  border: 1px solid var(--color-card-border-inner);
+  border-radius: var(--radius-base);
+  overflow: hidden;
+  font-size: var(--font-size-sm);
+}
+
+.rubric-mini-header {
+  background: var(--color-secondary);
+  padding: var(--space-8) var(--space-12);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.rubric-mini-body {
+  padding: var(--space-12);
+}
+
+.rubric-mini-grade {
+  margin-bottom: var(--space-8);
+  color: var(--color-text);
+}
+
+.rubric-mini-thresholds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4) var(--space-8);
+}
+
+.rubric-threshold {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  background: var(--color-secondary);
+  padding: 2px var(--space-6);
+  border-radius: var(--radius-full);
+  cursor: default;
+}
+
+.rubric-mini-footer {
+  padding: var(--space-8) var(--space-12);
+  border-top: 1px solid var(--color-card-border-inner);
+  background: var(--color-surface);
+  font-size: var(--font-size-xs);
 }

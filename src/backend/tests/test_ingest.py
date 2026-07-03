@@ -66,10 +66,14 @@ def test_fetch_url_text_follows_redirect_to_allowed_address(monkeypatch):
 
 
 def test_fetch_url_text_caps_redirect_chain_length(monkeypatch):
+    """An infinite redirect loop must not hang forever — httpx's built-in
+    max_redirects raises httpx.TooManyRedirects, which fetch_url_text
+    converts to a user-facing ValueError like any other connection failure."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(302, headers={"location": "http://93.184.216.34/loop"})
 
     _patch_transport(monkeypatch, handler)
 
-    with pytest.raises(ValueError, match="Too many redirects"):
+    with pytest.raises(ValueError, match="Could not connect"):
         asyncio.run(fetch_url_text("http://93.184.216.34/loop"))

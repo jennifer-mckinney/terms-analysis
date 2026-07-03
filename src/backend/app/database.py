@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine, event as sa_event
+from sqlalchemy import create_engine
+from sqlalchemy import event as sa_event
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from .config import settings
-
 
 Base = declarative_base()
 

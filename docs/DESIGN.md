@@ -1,25 +1,27 @@
 # Design Overview
 
 ## Goals and Scope
-- Local-only analysis with LocalAI on the LAN.
-- Jurisdictions: 30 codes including US-CA (CCPA/CPRA) and GDPR (see `schemas.py`).
+- Local-only analysis. No data leaves the machine.
+- Jurisdictions: 30 codes including US-CA (CCPA/CPRA), EU (GDPR), Canada (PIPEDA), US-CO, US-CT, US-NY (see `schemas.py`).
 - Human-in-the-loop review for confidence < 0.80.
 
 ## Architecture
-- `src/webapp/`: Streamlit UI (primary) + static vanilla JS SPA (fallback), both served locally.
-- `src/backend/`: FastAPI backend for ingestion, analysis, legal-KB retrieval, and storage.
-- LocalAI: Local LLM inference server at `LOCALAI_BASE_URL` (default `http://localhost:8080/v1`), routing between Apertus-8B-Instruct and EuroLLM-22B-Instruct.
+- `src/webapp/`: Streamlit UI (primary, port 8501) + static vanilla JS SPA (fallback, port 8000), both served locally.
+- `src/backend/`: FastAPI backend on port 9000 for ingestion, analysis, legal-KB retrieval, and storage.
+- LocalAI (Apache 2.0, zero VC): local LLM inference at `LOCALAI_BASE_URL` (default `http://localhost:8080/v1`).
+  - **Apertus 8B Instruct** (Swiss AI Initiative — EPFL/ETH Zurich/CSCS): world model, 1,000+ languages.
+  - **EuroLLM 22B Instruct** (EU Horizon Europe / EuroHPC): EU legal specialist, 35 EU languages.
+  - Language routing: EU ISO 639-1 codes → EuroLLM; all others → Apertus.
 - Local data: SQLite at `data/terms_analysis.db` (gitignored); legal corpus source text at `data/legal_corpus/` (tracked).
 
 ## Data Flow
 1. User submits URL, file, or pasted text in the UI.
-2. FastAPI ingests and normalizes the document (HTML/PDF/DOCX/RTF/TXT).
-3. Rule-based detections run for baseline signals.
+2. FastAPI ingests and normalizes the document (HTML/PDF/DOCX/RTF/TXT/OCR).
+3. Rule-based detections run for baseline signals (~50 categories/64 patterns).
 4. Legal-KB retrieval fetches relevant statute passages for the selected jurisdictions.
 5. LLM analysis runs via LocalAI with line-numbered context plus legal-KB citations.
 6. Results are merged, validated, and scored for confidence.
-7. If confidence < 0.80, a review item is created.
-7. Analysis results are stored and surfaced in the UI.
+7. If confidence < 0.80, a review item is created for human-in-the-loop review.
 
 ## Storage
 - `analyses`: analysis payload, confidence, score, grade, metadata, raw document text, and line offsets.

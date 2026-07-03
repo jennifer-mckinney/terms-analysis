@@ -22,10 +22,11 @@
 ## Data Flow (Current)
 
 ```
-User Input → Ingestion (normalize text)
+User Input → Ingestion (normalize text — HTML/PDF/DOCX/RTF/TXT/OCR)
            → Rule Engine (regex detection, 64 patterns / 30 jurisdictions)
            → Legal KB retrieval (numpy exhaustive cosine + BM25/RRF over data/legal_corpus/)
            → LLM (analysis with line-numbered context + legal-KB citations, via LocalAI)
+               LLM failure → rule-only findings, confidence *= 0.8
            → Merge (match rule + LLM findings by category+excerpt; hybrid confidence 60% rule / 40% LLM on overlap — see LIB-RULES)
            → Validation (citation check, hallucination guard, confidence scoring)
            → Scoring (risk_score 0-10 severity-weighted average, letter grade, review_required flag)
@@ -33,7 +34,7 @@ User Input → Ingestion (normalize text)
            → UI (render results — Streamlit primary, JS SPA fallback)
 ```
 
-An Impact/Likelihood/Safeguards ("IRP") scoring formula remains a planned, not-yet-implemented enhancement; current scoring is the severity-weighted average shown above.
+An Impact/Likelihood/Safeguards ("IRP") scoring formula remains a planned, not-yet-implemented enhancement; current scoring is the severity-weighted average shown above. The RAG pipeline described here (BM25 + dense embed + RRF fusion, legal corpus chunking) is no longer "planned" — it shipped as `services/legal_kb.py` and is wired into `analyze_text()`; see the System Components table above.
 
 ## Failure Modes
 

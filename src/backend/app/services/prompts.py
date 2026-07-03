@@ -4,7 +4,6 @@ from typing import List
 
 from ..schemas import Jurisdiction
 
-
 SYSTEM_PROMPT = (
     "You are a legal-risk analyst for privacy policies and terms of service. "
     "Use only the provided document text. Do not invent facts. "

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
-
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -91,6 +90,11 @@ class Settings:
         )
     )
     watchlist_refresh_seconds: int = int(os.getenv("WATCHLIST_REFRESH_SECONDS", "0"))
+    # Optional API key for endpoint authentication.  Set API_KEY env var in
+    # production.  Empty string disables auth (default: disabled for local dev).
+    api_key: str = os.getenv("API_KEY", "")
+    # Maximum pages to process per PDF when OCR is involved.
+    max_pdf_pages: int = int(os.getenv("MAX_PDF_PAGES", "100"))
 
 
 settings = Settings()

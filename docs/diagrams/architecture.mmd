@@ -25,9 +25,9 @@ flowchart TB
         end
     end
 
-    subgraph External["External Services (Local)"]
-        LM["LM Studio Server<br/>localhost:1234"]
-        MODEL["Local LLM<br/>qwen3-vl-4b-instruct"]
+    subgraph External["LLM Inference (Local)"]
+        LM["LocalAI Server<br/>localhost:8080"]
+        MODEL["Apertus 8B / EuroLLM 22B<br/>(Apache 2.0 — zero VC)"]
     end
 
     subgraph DocumentSources["Document Sources"]
@@ -53,7 +53,7 @@ flowchart TB
     ANA --> DIF
 
     %% LLM connection
-    ANA -->|"LM Studio chat/completions"| LM
+    ANA -->|"LocalAI chat/completions"| LM
     LM --> MODEL
 
     %% Data connections
