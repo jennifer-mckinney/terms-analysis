@@ -29,11 +29,14 @@ import streamlit as st
 # See CRITICAL-1: ReDoS in Regex Patterns from P9 security review.
 _SIMPLIFY_PATTERNS = [
     # COPPA + FERPA
+    # NOTE: apostrophes match either literal `'` or html-escaped `&#x27;` because
+    # explanation is html.escape'd before pattern application (defense in depth
+    # for CRITICAL-3). Without this, escaped apostrophes silently defeat matching.
     re.compile(
-        r"(?i)Special protections required for children's personal information under COPPA \(under 13\) and FERPA"
+        r"(?i)Special protections required for children(?:'|&#x27;)s personal information under COPPA \(under 13\) and FERPA"
     ),
     re.compile(
-        r"(?i)Special protections required for children's personal information under COPPA"
+        r"(?i)Special protections required for children(?:'|&#x27;)s personal information under COPPA"
     ),
     # AI/ML training disclosure + opt-out
     re.compile(
@@ -41,7 +44,8 @@ _SIMPLIFY_PATTERNS = [
     ),
     re.compile(r"(?i)Using user data to train AI/ML models requires clear disclosure"),
     # Generic children's data
-    re.compile(r"(?i)Children's data requires special protections and disclosures"),
+    # Apostrophe alternation matches html-escaped input (see COPPA note above).
+    re.compile(r"(?i)Children(?:'|&#x27;)s data requires special protections and disclosures"),
     # Marketing/tracking purposes
     re.compile(
         r"(?i)(?:Using|Tracking|Collecting) (?:user|personal) data for (?:marketing|advertising|analytics) purposes"
