@@ -1,0 +1,62 @@
+name: enforce-gitignore-invariants
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  enforce-gitignore-invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Assert required .gitignore patterns are present
+        run: |
+          set -euo pipefail
+          REQUIRED=(
+            "ignore/" ".env" ".env.local" ".venv/" "venv/" "env/"
+            "__pycache__/" "*.pyc" ".pip-cache/" ".mypy_cache/"
+            ".pytest_cache/" ".ruff_cache/" "node_modules/" ".DS_Store"
+            "*.db-journal" "*.db"
+          )
+          for p in "${REQUIRED[@]}"; do
+            if ! grep -Fxq "${p}" .gitignore; then
+              echo "::error::.gitignore is missing required pattern: \`${p}\`"
+              exit 1
+            fi
+          done
+
+      - name: Assert no protected pattern was removed vs base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch origin "${BASE_REF}" --depth=1 || true
+          REMOVED="$(git diff "origin/${BASE_REF}" -- .gitignore | grep -E '^-[^-]' | sed 's/^-//' || true)"
+          PROTECTED=(
+            "ignore/" ".env" ".env.local" ".venv/" "venv/" "env/"
+            "__pycache__/" "*.pyc" ".pip-cache/" ".mypy_cache/"
+            ".pytest_cache/" ".ruff_cache/" "node_modules/" ".DS_Store"
+            "*.db-journal" "*.db"
+          )
+          for p in "${PROTECTED[@]}"; do
+            if echo "${REMOVED}" | grep -Fxq "${p}"; then
+              echo "::error::PR removes protected .gitignore pattern: \`${p}\`"
+              exit 1
+            fi
+          done
+
+      - name: Assert no graveyard files exist in tree
+        run: |
+          set -euo pipefail
+          OFFENDERS="$(find . \( -path './ignore/*' -o -path './.venv/*' -o -path './venv/*' -o -path './.pip-cache/*' \) -not -path './.git/*' -print)"
+          if [[ -n "${OFFENDERS}" ]]; then
+            echo "::error::Graveyard files present in tree:"
+            echo "${OFFENDERS}"
+            exit 1
+          fi

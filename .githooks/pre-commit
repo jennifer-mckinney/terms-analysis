@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Governance-tier pre-commit hook.
+#
+# Enforces two invariants:
+#   1. .gitignore contains every REQUIRED_GITIGNORE_PATTERNS entry.
+#   2. No staged file matches a graveyard path (ignore/, .venv/, venv/,
+#      .pip-cache/).
+#
+# Install with: scripts/install-hooks.sh
+# Governance policy: to change the required list, edit both this file AND
+# .github/workflows/gitignore-enforcement.yml in the same PR.
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+GITIGNORE="${REPO_ROOT}/.gitignore"
+
+# Patterns that must be present in .gitignore forever. Any drift = hard fail.
+REQUIRED_GITIGNORE_PATTERNS=(
+    "ignore/"
+    ".env"
+    ".env.local"
+    ".venv/"
+    "venv/"
+    "env/"
+    "__pycache__/"
+    "*.pyc"
+    ".pip-cache/"
+    ".mypy_cache/"
+    ".pytest_cache/"
+    ".ruff_cache/"
+    "node_modules/"
+    ".DS_Store"
+    "*.db-journal"
+    "*.db"
+)
+
+# Path prefixes / globs that must never be staged.
+GRAVEYARD_PATTERNS=(
+    "ignore/"
+    ".venv/"
+    "venv/"
+    ".pip-cache/"
+)
+
+fail() {
+    printf 'pre-commit: %s\n' "$1" >&2
+    exit 1
+}
+
+# --- Check 1: required .gitignore entries -----------------------------------
+if [[ ! -f "${GITIGNORE}" ]]; then
+    fail ".gitignore is missing from repo root. This file is required."
+fi
+
+for pattern in "${REQUIRED_GITIGNORE_PATTERNS[@]}"; do
+    # Exact-line match against .gitignore. Comments and inline whitespace on the
+    # pattern line are not accepted -- must be a clean line-for-line match.
+    if ! grep -Fxq "${pattern}" "${GITIGNORE}"; then
+        fail ".gitignore is missing required pattern: \`${pattern}\`. This entry is protected -- see .github/workflows/gitignore-enforcement.yml."
+    fi
+done
+
+# --- Check 2: no graveyard files in the staged tree -------------------------
+STAGED="$(git diff --cached --name-only --diff-filter=ACMR || true)"
+if [[ -n "${STAGED}" ]]; then
+    while IFS= read -r path; do
+        [[ -z "${path}" ]] && continue
+        for prefix in "${GRAVEYARD_PATTERNS[@]}"; do
+            if [[ "${path}" == "${prefix}"* ]]; then
+                fail "Refusing to stage graveyard file: ${path}. See .gitignore policy."
+            fi
+        done
+    done <<< "${STAGED}"
+fi
+
+exit 0
