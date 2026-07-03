@@ -443,6 +443,56 @@ def render_finding_detail(finding: Dict) -> None:
     with st.popover("Recommended actions", use_container_width=True):
         st.markdown(action_html, unsafe_allow_html=True)
 
+    # Verify view: full source document with this finding's excerpt highlighted.
+    source_text = st.session_state.get("source_text", "")
+    if source_text and excerpt:
+        with st.expander("View in full document"):
+            st.markdown(
+                f'<div class="excerpt" style="max-height:400px;overflow-y:auto;'
+                f'white-space:pre-wrap;">{highlight_excerpt(source_text, excerpt)}</div>',
+                unsafe_allow_html=True,
+            )
+
+
+_GRADE_COLORS = {
+    "A": "#16A34A", "A-": "#16A34A",
+    "B": "#65A30D", "B-": "#CA8A04",
+    "C+": "#D97706", "C": "#EA580C",
+    "D+": "#DC2626",
+}
+
+
+def render_grade_summary(result: Dict) -> None:
+    """Overall grade/risk-score/confidence card — mirrors the JS SPA's results header."""
+    grade = result.get("grade")
+    risk_score = result.get("risk_score")
+    confidence = result.get("confidence")
+    review_required = result.get("review_required")
+
+    if grade is None and risk_score is None:
+        return
+
+    color = _GRADE_COLORS.get(grade, "#6B7280")
+    with st.container(border=True):
+        c1, c2, c3 = st.columns([1, 2, 2])
+        with c1:
+            st.markdown(
+                f'<div style="font-size:2.5rem;font-weight:700;color:{color};line-height:1;">{grade or "—"}</div>'
+                f'<div style="color:#6B7280;font-size:0.85rem;">Overall grade</div>',
+                unsafe_allow_html=True,
+            )
+        with c2:
+            if risk_score is not None:
+                st.metric("Risk score", f"{risk_score:.1f} / 10")
+        with c3:
+            if confidence is not None:
+                st.metric("Confidence", f"{confidence * 100:.0f}%")
+        if review_required:
+            st.warning(
+                "This analysis has findings flagged for human review "
+                "(confidence below threshold)."
+            )
+
 
 def render_severity_counts(findings: List[Dict]) -> None:
     counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
@@ -584,6 +634,9 @@ def main() -> None:
         if not findings:
             st.info("No findings yet. Run an analysis on the Analyze tab first.")
         else:
+            # Overall grade / risk score / confidence
+            render_grade_summary(st.session_state.get("last_result", {}))
+            st.write("")
             # Summary metrics
             render_severity_counts(findings)
             st.divider()
