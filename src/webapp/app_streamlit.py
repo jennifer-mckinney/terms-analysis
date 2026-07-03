@@ -198,12 +198,14 @@ JURISDICTIONS = {
 }
 
 INDUSTRIES = {
-    "General":    "General commercial",
-    "Healthcare": "Healthcare — HIPAA",
-    "Financial":  "Financial services — GLBA",
-    "Education":  "Education — FERPA",
-    "Children":   "Children's services — COPPA",
-    "AI":         "AI / Machine learning",
+    "General":            "General commercial",
+    "Healthcare":         "Healthcare — HIPAA",
+    "Finance":            "Finance — GLBA",
+    "Education":          "Education — FERPA",
+    "Social Media":       "Social Media",
+    "AI / Tech Platform": "AI / Tech Platform",
+    "Gaming":             "Gaming",
+    "Retail":             "Retail",
 }
 
 # ── Session state ─────────────────────────────────────────────────────────────
@@ -350,7 +352,6 @@ def analyze_document(
                 f"{API_BASE}/analyze",
                 json={
                     "text": text,
-                    "doc_type": "privacy-policy",
                     "mode": mode,
                     "jurisdictions": [jurisdiction],
                     "industry": industry,
