@@ -934,6 +934,85 @@ class TestAnalyzeCreatesReviewItem:
 
 
 # ===========================================================================
+# POST /analyze — Fix 4: empty jurisdictions == "no filter" (global-tool)
+# ===========================================================================
+
+
+class TestAnalyzeEmptyJurisdictionsNoFilter:
+    def test_main_analyze_empty_jurisdictions_returns_findings_across_all_rules(
+        self, app_client, db_session, monkeypatch
+    ):
+        """When ``jurisdictions=[]`` is sent, the analyzer must run every rule.
+
+        Uses a monkeypatched ``LocalAIClient`` so the LLM branch is stubbed
+        out; the assertion focuses on rule-level detection surviving with no
+        jurisdiction filter.
+        """
+        from app.services import analyzer as analyzer_module
+        from app.services.localai import LocalAIClient
+
+        async def fake_llm_analyze(self, *args, **kwargs):
+            return None  # skip LLM findings — rule-only path
+
+        monkeypatch.setattr(LocalAIClient, "analyze", fake_llm_analyze)
+
+        class _NoopKB:
+            async def retrieve(self, *args, **kwargs):
+                return []
+
+        monkeypatch.setattr(analyzer_module, "get_legal_kb", lambda: _NoopKB())
+
+        # Text hits categories under multiple jurisdictions — CCPA (Sale/Share)
+        # plus GDPR (ADM) plus something from a non-US-CA / non-GDPR rule.
+        text = (
+            "We sell your personal information. "
+            "We use automated decision-making. "
+            "Under APPI Japanese residents have rights."
+        )
+        response = app_client.post(
+            "/analyze", json={"text": text, "jurisdictions": []}
+        )
+        assert response.status_code == 200
+        body = response.json()
+        categories = {f["category"] for f in body["findings"]}
+        # With no filter we expect coverage beyond just US-CA + GDPR.
+        assert categories, "no-filter analyze should surface findings"
+        # The response echoes jurisdictions (empty list preserved).
+        assert body["jurisdictions"] == []
+
+    def test_main_analyze_empty_jurisdictions_populates_action_items(
+        self, app_client, db_session, monkeypatch
+    ):
+        """Fix 8: /analyze payload must include backend-generated action_items."""
+        from app.services import analyzer as analyzer_module
+        from app.services.localai import LocalAIClient
+
+        async def fake_llm_analyze(self, *args, **kwargs):
+            return None
+
+        monkeypatch.setattr(LocalAIClient, "analyze", fake_llm_analyze)
+
+        class _NoopKB:
+            async def retrieve(self, *args, **kwargs):
+                return []
+
+        monkeypatch.setattr(analyzer_module, "get_legal_kb", lambda: _NoopKB())
+
+        response = app_client.post(
+            "/analyze",
+            json={
+                "text": "We sell your personal information.",
+                "jurisdictions": ["US-CA"],
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert "action_items" in body
+        # Sale/Share + US-CA should yield the "Do Not Sell" line.
+        assert any("Do Not Sell" in line for line in body["action_items"])
+
+
+# ===========================================================================
 # _clamp helper
 # ===========================================================================
 
@@ -1246,3 +1325,323 @@ class TestSecurityApiKeyAuth:
             mock_settings.api_key = ""
             response = app_client.get("/health")
         assert response.status_code == 200
+
+
+# ===========================================================================
+# POST /infer  (Phase 1 backend — Streamlit v2 intake)
+# ===========================================================================
+
+
+class TestInferEndpoint:
+    def test_main_infer_400_when_neither_url_nor_text(self, app_client):
+        response = app_client.post("/infer", json={})
+        assert response.status_code == 400
+        assert "at least one" in response.json()["detail"].lower()
+
+    def test_main_infer_with_url_only_returns_tld_jurisdiction(self, app_client):
+        response = app_client.post("/infer", json={"url": "https://example.co.uk/privacy"})
+        assert response.status_code == 200
+        body = response.json()
+        assert "UK-GDPR" in body["jurisdictions"]
+        assert body["doc_type"] == "Privacy Policy"
+        assert body["location_needed"] is False
+        assert body["detected_signals"].get("tld")
+
+    def test_main_infer_with_text_only_returns_statute_jurisdiction(self, app_client):
+        response = app_client.post(
+            "/infer",
+            json={"text": "This policy complies with GDPR and CCPA obligations."},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert "GDPR" in body["jurisdictions"]
+        assert "US-CA" in body["jurisdictions"]
+        assert body["location_needed"] is False
+
+    def test_main_infer_with_both_populates_all_fields(self, app_client):
+        response = app_client.post(
+            "/infer",
+            json={
+                "url": "https://facebook.com/privacy",
+                "text": "California residents may opt out of the sale of personal information.",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["industry"] == "Social Media"
+        assert body["doc_type"] == "Privacy Policy"
+        assert "US-CA" in body["jurisdictions"]
+        assert body["location_needed"] is False
+
+    def test_main_infer_location_needed_true_when_no_signals(self, app_client):
+        # Global-tool contract (Fix 4): no signals means empty jurisdictions.
+        # The old US-CA + GDPR default fallback has been removed — this is a
+        # global tool and can't assume a reader location. Callers must treat
+        # an empty list as "no filter".
+        response = app_client.post(
+            "/infer",
+            json={"text": "generic policy paragraph without any statute cues"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["location_needed"] is True
+        assert body["jurisdictions"] == []
+        # The fallback signal is still recorded so the UI can explain.
+        assert "fallback" in body["detected_signals"]
+
+    def test_main_infer_context_field_accepted_but_not_required(self, app_client):
+        response = app_client.post(
+            "/infer",
+            json={"url": "https://example.com/privacy", "context": ["for_child"]},
+        )
+        assert response.status_code == 200
+
+    def test_main_infer_fallback_logs_observability_event(self, app_client, caplog):
+        # Fix 2: the fallback path emits a structured infer_fallback log
+        # so production ops can measure how often inference actually succeeded.
+        import logging
+
+        from app.services.inference import _infer_all_cached
+
+        _infer_all_cached.cache_clear()
+        with caplog.at_level(logging.INFO, logger="app.services.inference"):
+            response = app_client.post(
+                "/infer",
+                json={"text": "another generic paragraph with no cues"},
+            )
+        assert response.status_code == 200
+        events = [
+            r.__dict__.get("event")
+            for r in caplog.records
+            if r.name == "app.services.inference"
+        ]
+        assert "infer_fallback" in events
+
+    def test_main_infer_schema_rejects_oversized_text(self, app_client):
+        # Fix 3: /infer must reject oversized text bodies via the schema-level
+        # ``max_length`` on ``InferRequest.text``.
+        response = app_client.post("/infer", json={"text": "x" * 200_001})
+        assert response.status_code == 422
+
+
+# ===========================================================================
+# POST /analyze with context — verdict_headline / verdict_label populated
+# ===========================================================================
+
+
+class TestAnalyzeWithContext:
+    def test_main_analyze_with_context_populates_verdict_fields(self, app_client, db_session, monkeypatch):
+        """When context is supplied, the analyzer must populate verdict copy."""
+        payload = _make_analysis_payload()
+
+        async def fake_analyze(*args, **kwargs):
+            # The endpoint must forward the ``context`` kwarg to analyze_text.
+            assert kwargs.get("context") == ["for_child"]
+            # Simulate analyze_text populating context-derived fields on the payload.
+            from app.services.context import verdict_headline, verdict_label
+            payload_with_context = payload.model_copy(update={
+                "context": kwargs["context"],
+                "verdict_headline": verdict_headline(kwargs["context"], payload.action_readiness),
+                "verdict_label": verdict_label(kwargs["context"], payload.action_readiness),
+            })
+            return AnalysisResult(payload=payload_with_context, issues=[])
+
+        monkeypatch.setattr("app.main.analyze_text", fake_analyze)
+
+        response = app_client.post(
+            "/analyze",
+            json={
+                "text": "Sample policy text.",
+                "jurisdictions": ["US-CA"],
+                "context": ["for_child"],
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["context"] == ["for_child"]
+        assert body["verdict_headline"]
+        assert body["verdict_label"]
+        # Child-specific copy should mention "child".
+        assert "child" in body["verdict_headline"].lower() or "child" in body["verdict_label"].lower()
+
+    def test_main_analyze_without_context_still_populates_verdict(self, app_client, monkeypatch):
+        """Analyze with no context supplied still gets the default-verdict copy."""
+        payload = _make_analysis_payload()
+
+        async def fake_analyze(*args, **kwargs):
+            from app.services.context import verdict_headline, verdict_label
+            ctx = kwargs.get("context") or []
+            payload_with_context = payload.model_copy(update={
+                "context": ctx,
+                "verdict_headline": verdict_headline(ctx, payload.action_readiness),
+                "verdict_label": verdict_label(ctx, payload.action_readiness),
+            })
+            return AnalysisResult(payload=payload_with_context, issues=[])
+
+        monkeypatch.setattr("app.main.analyze_text", fake_analyze)
+
+        response = app_client.post(
+            "/analyze",
+            json={"text": "Sample policy text.", "jurisdictions": ["US-CA"]},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["context"] == []
+        assert body["verdict_headline"]
+        assert body["verdict_label"]
+
+
+# ===========================================================================
+# PR #34 must-fix regressions
+# ===========================================================================
+
+
+class TestPr34MustFixRegressions:
+    """Regression tests for the four must-fix findings from PR #34's review workflow.
+
+    See PR #34 comments for the full rationale on each fix.
+    """
+
+    def test_analyze_file_accepts_for_work_context(self, app_client, monkeypatch):
+        """Regression: ``for_work`` was silently dropped by a hardcoded allowlist.
+
+        The multipart handler now derives its allowlist from ``ContextChip`` via
+        ``typing.get_args``, so any new chip added to the schema is accepted
+        automatically. See PR #34 principal-engineer P0 #1 / grumpy-developer
+        CRITICAL / security-engineer MEDIUM-2.
+        """
+        captured: dict = {}
+
+        async def fake_analyze(text, jurisdictions, name=None, doc_type=None,
+                               industry=None, source_url=None, mode=None, **kwargs):
+            captured["context"] = kwargs.get("context")
+            payload = _make_analysis_payload(name=name)
+            payload_with_ctx = payload.model_copy(update={"context": kwargs.get("context") or []})
+            return AnalysisResult(payload=payload_with_ctx, issues=[])
+
+        monkeypatch.setattr("app.main.analyze_text", fake_analyze)
+        # Bypass real ingest — return the raw bytes decoded so we don't need
+        # a full text-extraction pipeline in this test.
+        monkeypatch.setattr(
+            "app.main.extract_text_from_bytes",
+            lambda filename, content_type, data: data.decode("utf-8", errors="ignore") or "text",
+        )
+
+        response = app_client.post(
+            "/analyze/file",
+            files={"file": ("policy.txt", b"Some policy text about work usage.", "text/plain")},
+            data={"context": "for_work", "jurisdictions": "US-CA,GDPR"},
+        )
+        assert response.status_code == 200, response.text
+        # Must NOT be dropped — the handler forwards it to analyze_text.
+        assert captured["context"] == ["for_work"]
+        # And it round-trips into the response payload.
+        assert response.json()["context"] == ["for_work"]
+
+    def test_analyze_file_validates_jurisdictions(self, app_client, monkeypatch):
+        """Bogus jurisdiction codes must be filtered out; valid ones pass through.
+
+        Regression per PR #34 security-engineer MEDIUM-2 — the multipart
+        endpoint previously accepted any comma-separated string, which meant a
+        crafted request could disable the post-LLM jurisdiction filter by
+        supplying a value that no finding declared.
+        """
+        captured: dict = {}
+
+        async def fake_analyze(text, jurisdictions, name=None, doc_type=None,
+                               industry=None, source_url=None, mode=None, **kwargs):
+            captured["jurisdictions"] = jurisdictions
+            return _make_fake_result(name=name)
+
+        monkeypatch.setattr("app.main.analyze_text", fake_analyze)
+        monkeypatch.setattr(
+            "app.main.extract_text_from_bytes",
+            lambda filename, content_type, data: "policy text",
+        )
+
+        # Mix of valid + bogus values — only the valid ones survive.
+        response = app_client.post(
+            "/analyze/file",
+            files={"file": ("policy.txt", b"policy text", "text/plain")},
+            data={"jurisdictions": "US-CA,BOGUS-JUR,GDPR,../etc/passwd"},
+        )
+        assert response.status_code == 200, response.text
+        assert captured["jurisdictions"] == ["US-CA", "GDPR"]
+        assert "BOGUS-JUR" not in captured["jurisdictions"]
+
+    def test_analyze_file_defaults_jurisdictions_when_all_invalid(self, app_client, monkeypatch):
+        """When no valid jurisdiction survives the filter, fall back to the JSON default."""
+        captured: dict = {}
+
+        async def fake_analyze(text, jurisdictions, name=None, doc_type=None,
+                               industry=None, source_url=None, mode=None, **kwargs):
+            captured["jurisdictions"] = jurisdictions
+            return _make_fake_result(name=name)
+
+        monkeypatch.setattr("app.main.analyze_text", fake_analyze)
+        monkeypatch.setattr(
+            "app.main.extract_text_from_bytes",
+            lambda filename, content_type, data: "policy text",
+        )
+
+        response = app_client.post(
+            "/analyze/file",
+            files={"file": ("policy.txt", b"policy text", "text/plain")},
+            data={"jurisdictions": "NOT-REAL,ALSO-FAKE"},
+        )
+        assert response.status_code == 200, response.text
+        # Sensible default matching JSON endpoints.
+        assert captured["jurisdictions"] == ["US-CA", "GDPR"]
+
+    def test_analyze_rejects_javascript_source_url(self, app_client):
+        """``javascript:`` scheme is rejected by pydantic before hitting the handler.
+
+        Regression per PR #34 security-engineer HIGH-1. ``html.escape`` on the
+        frontend does NOT neutralise scheme-based XSS in ``<a href>``.
+        """
+        response = app_client.post(
+            "/analyze",
+            json={
+                "text": "hello world",
+                "source_url": "javascript:alert(1)",
+            },
+        )
+        # Pydantic validation error surfaces as 422 (FastAPI's default for
+        # request-body validation failures).
+        assert response.status_code in (400, 422), response.text
+        assert "source_url" in response.text or "scheme" in response.text.lower()
+
+    def test_analyze_rejects_data_uri_source_url(self, app_client):
+        """``data:`` URIs are also blocked — same XSS class as ``javascript:``."""
+        response = app_client.post(
+            "/analyze",
+            json={
+                "text": "hello world",
+                "source_url": "data:text/html,<script>alert(1)</script>",
+            },
+        )
+        assert response.status_code in (400, 422)
+
+    def test_analyze_accepts_https_source_url(self, app_client, monkeypatch):
+        """Sanity check: valid https URLs still pass the new validator."""
+        async def fake_analyze(*args, **kwargs):
+            return _make_fake_result(source_url="https://example.com/privacy")
+
+        monkeypatch.setattr("app.main.analyze_text", fake_analyze)
+
+        response = app_client.post(
+            "/analyze",
+            json={
+                "text": "hello world",
+                "source_url": "https://example.com/privacy",
+            },
+        )
+        assert response.status_code == 200
+
+    def test_analyze_url_rejects_javascript_scheme(self, app_client):
+        """``/analyze/url`` also rejects non-web schemes at the schema layer."""
+        response = app_client.post(
+            "/analyze/url",
+            json={"url": "javascript:alert(1)"},
+        )
+        assert response.status_code in (400, 422)

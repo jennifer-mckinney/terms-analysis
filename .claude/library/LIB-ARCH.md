@@ -4,7 +4,7 @@
 
 | Component | Tech | Location | Role |
 |-----------|------|----------|------|
-| Web UI (primary) | Streamlit | `src/webapp/app_streamlit.py` | Primary UI (:8501), communicates via `requests` to backend |
+| Web UI (primary) | Streamlit | `src/webapp/app_streamlit_v2.py` | Primary UI (:8501), communicates via `requests` to backend (issue #19 redesign — `app_streamlit_legacy.py` is the pre-redesign version, retained for reference) |
 | Web UI (fallback) | HTML/CSS/JS | `src/webapp/` | Static SPA (:8000), communicates via fetch to backend |
 | API Server | FastAPI + Uvicorn | `src/backend/app/main.py` | 24 REST endpoints + `/health`, async |
 | Rule Engine | Python regex | `services/rules.py` | 64 patterns / ~50 categories across 30 jurisdictions |

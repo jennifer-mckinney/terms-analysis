@@ -108,7 +108,7 @@ def test_analyze_file_accepts_small_valid_upload(
 ):
     captured = {}
 
-    async def fake_analyze(text, jurisdictions, name=None, doc_type=None, industry=None, source_url=None, mode=None):
+    async def fake_analyze(text, jurisdictions, name=None, doc_type=None, industry=None, source_url=None, mode=None, **kwargs):
         captured.update(
             {
                 "text": text,
@@ -291,8 +291,14 @@ def test_jurisdiction_literal_includes_expected_values():
 
 
 def test_default_jurisdiction_list_is_valid():
+    # Default is now an empty list ("no filter" mode) — the tool is global
+    # and cannot assume a US/EU reader. Callers that want the old behavior
+    # must send the codes explicitly.
     request = AnalyzeRequest(text="policy text")
-    assert request.jurisdictions == ["US-CA", "GDPR"]
+    assert request.jurisdictions == []
+
+    explicit = AnalyzeRequest(text="policy text", jurisdictions=["US-CA", "GDPR"])
+    assert explicit.jurisdictions == ["US-CA", "GDPR"]
 
 
 @pytest.mark.parametrize(

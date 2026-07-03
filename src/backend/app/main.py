@@ -9,6 +9,7 @@ import typing
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from io import BytesIO, StringIO
+from typing import get_args
 from uuid import uuid4
 from xml.sax.saxutils import escape as _xml_escape
 
@@ -27,10 +28,14 @@ from .schemas import (
     AnalyzeRequest,
     AnalyzeUrlRequest,
     BatchAnalysisResult,
+    ContextChip,
     DiffResult,
     DiffToken,
     DocType,
     IndustryProfile,
+    InferRequest,
+    InferResponse,
+    Jurisdiction,
     PolicySnapshotListItem,
     PolicySnapshotPayload,
     PolicyWatchCreateRequest,
@@ -47,10 +52,19 @@ from .services.analyzer import (
     calculate_risk_score,
 )
 from .services.diffing import content_hash, diff_summary, diff_tokens
+from .services.inference import infer_all
 from .services.ingest import extract_text_from_bytes, fetch_url_text
 from .services.rules import detect_findings
 
 logger = logging.getLogger("uvicorn.error")
+
+# Derive allowlists directly from the schema ``Literal`` definitions so that
+# any change to the source enums (e.g. adding a new context chip) is picked up
+# automatically. The hardcoded allowlist that used to live inside
+# ``/analyze/file`` silently dropped the ``for_work`` chip after it was added
+# to ``ContextChip`` — deriving from ``typing.get_args`` prevents that drift.
+_VALID_CHIPS: frozenset[str] = frozenset(get_args(ContextChip))
+_VALID_JURISDICTIONS: frozenset[str] = frozenset(get_args(Jurisdiction))
 
 
 def _verify_api_key(x_api_key: str | None = Header(default=None)) -> None:
@@ -238,6 +252,18 @@ def _compute_rubric_scores(records: list[Analysis]) -> RubricScores:
     )
 
 
+@app.post("/infer", response_model=InferResponse)
+async def infer(request: InferRequest) -> InferResponse:
+    """Infer jurisdictions, doc_type, and industry from URL and/or text.
+
+    Feeds the Streamlit v2 intake: the UI shows what was auto-detected and only
+    prompts the user for a location when ``location_needed`` is True.
+    """
+    if not request.url and not request.text:
+        raise HTTPException(status_code=400, detail="Provide at least one of url or text")
+    return infer_all(request.url, request.text)
+
+
 @app.post("/analyze", response_model=AnalysisPayload)
 async def analyze(request: AnalyzeRequest, db: Session = Depends(get_db)):
     logger.info(
@@ -255,6 +281,7 @@ async def analyze(request: AnalyzeRequest, db: Session = Depends(get_db)):
         industry=request.industry,
         source_url=request.source_url,
         mode=request.mode,
+        context=request.context,
     )
     payload = result.payload
     _persist_analysis(
@@ -296,6 +323,7 @@ async def analyze_url(request: AnalyzeUrlRequest, db: Session = Depends(get_db))
         industry=request.industry,
         source_url=request.url,
         mode=request.mode,
+        context=request.context,
     )
     payload = result.payload
     _persist_analysis(
@@ -317,6 +345,7 @@ async def analyze_file(
     industry: str | None = Form(default=None),
     jurisdictions: str | None = Form(default=None),
     mode: str | None = Form(default="full"),
+    context: str | None = Form(default=None),
     db: Session = Depends(get_db),
 ):
     logger.info(
@@ -353,10 +382,28 @@ async def analyze_file(
             detail=f"Invalid industry '{industry}'. Valid values: {sorted(_valid_industries)}",
         )
 
+    # ``jurisdictions`` arrives as a comma-separated list on multipart uploads.
+    # Only recognised codes from the schema Literal are kept; unknown values are
+    # dropped rather than propagated to the analyzer where they'd short-circuit
+    # the post-LLM jurisdiction filter. Falls back to the same default as the
+    # JSON endpoints when no valid values remain.
     selected_jurisdictions = (
-        [j.strip() for j in jurisdictions.split(",") if j.strip()]
+        [j.strip() for j in jurisdictions.split(",") if j.strip() in _VALID_JURISDICTIONS]
         if jurisdictions
-        else ["US-CA", "GDPR"]
+        else []
+    )
+    if not selected_jurisdictions:
+        selected_jurisdictions = ["US-CA", "GDPR"]
+
+    # ``context`` arrives as a comma-separated list on multipart uploads. Only
+    # valid ContextChip values are propagated; anything else is silently dropped
+    # so the form endpoint stays tolerant. Allowlist is derived from the schema
+    # Literal at module load — see ``_VALID_CHIPS`` — so it can't drift when
+    # new chips (e.g. ``for_work``) are added.
+    selected_context = (
+        [c.strip() for c in context.split(",") if c.strip() in _VALID_CHIPS]
+        if context
+        else []
     )
 
     resolved_name = name or file.filename
@@ -368,6 +415,7 @@ async def analyze_file(
         industry=industry,
         source_url=None,
         mode=mode,
+        context=selected_context,
     )
     payload = result.payload
     _persist_analysis(
@@ -406,13 +454,15 @@ async def analyze_batch(request: AnalyzeBatchRequest, db: Session = Depends(get_
     if not documents:
         raise HTTPException(status_code=400, detail="No valid documents to analyze")
     
-    # Analyze documents in batch
+    # Analyze documents in batch. ``context`` may be absent on legacy request
+    # shims (SimpleNamespace fixtures in older tests) — default to [].
     results, cross_refs = await analyze_batch_documents(
         documents,
         batch_req.industry,
         batch_req.jurisdictions,
         batch_req.mode,
         batch_req.detect_cross_references,
+        context=getattr(batch_req, "context", None) or [],
     )
     
     # Persist analyses

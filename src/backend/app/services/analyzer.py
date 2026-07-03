@@ -10,16 +10,19 @@ from uuid import uuid4
 
 from ..config import settings
 from ..schemas import (
+    CATEGORIES,
     AnalysisPayload,
+    ContextChip,
     DocType,
     Evidence,
     Finding,
     IndustryProfile,
     Jurisdiction,
 )
+from .context import apply_category_weights, verdict_headline, verdict_label
 from .legal_kb import get_legal_kb
 from .localai import LocalAIClient
-from .rules import detect_findings
+from .rules import _seed_irp, detect_findings
 from .validation import validate_findings
 
 
@@ -29,6 +32,111 @@ class AnalysisResult:
     issues: List[str]
 
 
+# Domain roll-up: category name → domain group. Used by ``_group_by_domain``
+# to bucket top findings for the four reader-facing domains.
+_DOMAIN_MAP = {
+    # Data (what's collected)
+    "Sensitive Data": "Data",
+    "Biometric Data": "Data",
+    "Health Data": "Data",
+    "Financial Data": "Data",
+    "Children's Privacy": "Data",
+    "Collection Notice": "Data",
+    "Minors": "Data",
+    "Sensitive Data / Opt-Out": "Data",
+    # Data use (how it's used)
+    "AI Training": "Data use",
+    "AI Training Opt-Out": "Data use",
+    "Sale/Share": "Data use",
+    "Data Sale / Sharing": "Data use",
+    "Tracking / Profiling": "Data use",
+    "Tracking & Consent": "Data use",
+    "Marketing Communications": "Data use",
+    "Purpose Limitation": "Data use",
+    "ADM": "Data use",
+    "Automated Decision-Making": "Data use",
+    "Consequential AI Decisions": "Data use",
+    "High-Risk AI": "Data use",
+    "Prohibited AI": "Data use",
+    "GPAI / Generative AI": "Data use",
+    "AI-Generated Content": "Data use",
+    "Algorithmic Accountability": "Data use",
+    "Human Oversight": "Data use",
+    "AI Non-Discrimination": "Data use",
+    # Terms of use (the agreement)
+    "Liability": "Terms of use",
+    "Unilateral Changes": "Terms of use",
+    "Dark Patterns": "Terms of use",
+    "Deceptive Practices": "Terms of use",
+    "Retention": "Terms of use",
+    "Breach Notification": "Terms of use",
+    "Data Security": "Terms of use",
+    # Privacy rights (opt-outs, deletion, portability)
+    "User Rights": "Privacy rights",
+    "Data Rights": "Privacy rights",
+    "Individual Rights": "Privacy rights",
+    "Privacy Rights": "Privacy rights",
+    "Cross-Border Transfer": "Privacy rights",
+    "COPPA Compliance": "Privacy rights",
+    "HIPAA Compliance": "Privacy rights",
+    "FERPA Compliance": "Privacy rights",
+    "PCI DSS Compliance": "Privacy rights",
+    "PIPEDA Consent": "Privacy rights",
+    "LGPD Rights": "Privacy rights",
+    "APPI Disclosure": "Privacy rights",
+    "DPDP Consent": "Privacy rights",
+    "POPIA Processing": "Privacy rights",
+    "PIPA Processing": "Privacy rights",
+    "APP Privacy": "Privacy rights",
+    "UK Data Rights": "Privacy rights",
+    "Privacy as Human Right": "Privacy rights",
+    "Serious Privacy Invasion": "Privacy rights",
+}
+
+_DOMAIN_ORDER = ["Data", "Data use", "Terms of use", "Privacy rights"]
+
+
+# Validate _DOMAIN_MAP keys against the canonical category set at import time
+# (Fix 5 — cross-file string-coupling guard). Drift here would silently
+# mis-bucket findings, so fail loudly instead.
+_unknown_domain_keys = {cat for cat in _DOMAIN_MAP.keys() if cat not in CATEGORIES}
+if _unknown_domain_keys:
+    raise RuntimeError(
+        f"_DOMAIN_MAP references unknown categories: "
+        f"{sorted(_unknown_domain_keys)}. Update schemas.CATEGORIES."
+    )
+
+
+def _group_by_domain(
+    findings: list[Finding], max_per_domain: int = 2, max_total: int = 8
+) -> dict[str, list[Finding]]:
+    """Group findings by domain, respecting per-domain and total caps.
+
+    Findings are assumed to already be sorted by context weight (via
+    ``apply_category_weights``), so the first eligible per domain is the
+    highest-weighted for that domain.
+
+    Returns an ordered dict keyed by ``_DOMAIN_ORDER``. Empty domains map to
+    empty lists so the frontend can render a consistent shape.
+    """
+    grouped: dict[str, list[Finding]] = {d: [] for d in _DOMAIN_ORDER}
+    total = 0
+    for f in findings:
+        if total >= max_total:
+            break
+        domain = _DOMAIN_MAP.get(f.category)
+        if domain is None:
+            continue
+        if len(grouped[domain]) < max_per_domain:
+            grouped[domain].append(f)
+            total += 1
+    return grouped
+
+
+def _compute_irp(impact: int, likelihood: int, safeguard_score: int) -> float:
+    """IRP = 0.5*(impact/5) + 0.4*(likelihood/5) - 0.3*(safeguard_score/5), clamped [0, 1]."""
+    raw = 0.5 * (impact / 5) + 0.4 * (likelihood / 5) - 0.3 * (safeguard_score / 5)
+    return max(0.0, min(1.0, round(raw, 4)))
 
 
 def _truncate_text(text: str) -> str:
@@ -161,13 +269,103 @@ _INDUSTRY_BOOSTS: dict[str, dict[str, float]] = {
 
 _SEV_ORDER = {"Low": 0, "Medium": 1, "High": 2, "Critical": 3}
 _SEV_LIST = ["Low", "Medium", "High", "Critical"]
+_KNOWN_SEVERITIES: frozenset[str] = frozenset(_SEV_LIST)
+
+
+def _derive_action_items(
+    findings: List[Finding], jurisdictions: List[Jurisdiction]
+) -> List[str]:
+    """Return context-relevant, generic action items derived from findings.
+
+    Ported from ``webapp/app_streamlit_v2.py::_derive_action_items`` so the
+    frontend no longer has to duplicate the derivation rules. Not service-
+    specific; no hardcoded URLs. Points readers to general levers (opt-out,
+    deletion, supervisory authorities) tied to categories the analysis
+    actually detected. Capped at 5 items.
+    """
+    categories = {f.category for f in findings}
+    jurisdiction_set = set(jurisdictions or [])
+    lines: List[str] = []
+
+    if any(c in categories for c in ("Sale/Share", "Data Sale / Sharing")):
+        if "US-CA" in jurisdiction_set:
+            lines.append(
+                "California residents can submit a \"Do Not Sell or Share My "
+                "Personal Information\" request through the service's privacy "
+                "settings or a designated privacy link."
+            )
+        else:
+            lines.append(
+                "Look for an opt-out of data sale/sharing in the service's privacy settings."
+            )
+
+    if any(
+        c in categories
+        for c in ("User Rights", "Data Rights", "Individual Rights", "Privacy Rights")
+    ):
+        if "GDPR" in jurisdiction_set or "UK-GDPR" in jurisdiction_set:
+            lines.append(
+                "EU/UK residents can request data access, correction, and deletion "
+                "under GDPR / UK GDPR. Filed with the service directly; complaints "
+                "filed with the national data protection authority."
+            )
+        lines.append(
+            "A data download and account deletion path is usually available in "
+            "the service's account settings."
+        )
+
+    if any(c in categories for c in ("AI Training", "AI Training Opt-Out")):
+        lines.append(
+            "Look for AI training opt-out settings in the service's privacy or "
+            "account controls. Not every service offers a full opt-out."
+        )
+
+    if any(
+        c in categories
+        for c in (
+            "Automated Decision-Making",
+            "ADM",
+            "Consequential AI Decisions",
+        )
+    ):
+        lines.append(
+            "Automated decisions with significant effect may be challengeable — "
+            "request human review through the service's support channels."
+        )
+
+    if any(
+        c in categories
+        for c in ("Children's Privacy", "COPPA Compliance", "Minors")
+    ):
+        lines.append(
+            "For accounts involving children, look for parental supervision or "
+            "family-account tools. Underage accounts can be reported to the "
+            "service and, in the US, to the FTC."
+        )
+
+    if any(c in categories for c in ("Liability", "Unilateral Changes")):
+        lines.append(
+            "For work/vendor use, escalate liability and unilateral-change "
+            "clauses to legal review before signing."
+        )
+
+    return lines[:5]
 
 
 def _bump_severity(finding: Finding, boost: float) -> Finding:
-    """Return a copy of finding with severity bumped by one level if boost >= 0.2."""
+    """Return a copy of finding with severity bumped by one level if boost >= 0.2.
+
+    Fails fast on unknown severity values rather than silently defaulting to
+    "Low" — a bad severity signals a data-model drift the caller must fix.
+    """
+    if finding.severity not in _KNOWN_SEVERITIES:
+        raise ValueError(
+            f"Unknown severity: {finding.severity!r} "
+            f"(expected one of {sorted(_KNOWN_SEVERITIES)})"
+        )
     if boost < 0.2:
         return finding
-    current_idx = _SEV_ORDER.get(finding.severity, 0)
+    current_idx = _SEV_ORDER[finding.severity]
     new_idx = min(current_idx + 1, 3)
     if new_idx == current_idx:
         return finding
@@ -216,9 +414,13 @@ def _apply_industry_emphasis(
 def calculate_risk_score(findings: List[Finding]) -> float:
     if not findings:
         return 0.0
-    weights = {"Low": 0.2, "Medium": 0.5, "High": 0.8, "Critical": 1.0}
-    avg = sum(weights.get(f.severity, 0.5) for f in findings) / len(findings)
-    return round(avg * 10, 2)
+    severity_weights = {"Low": 0.2, "Medium": 0.5, "High": 0.8, "Critical": 1.0}
+    scores = [
+        f.irp_score if f.irp_score is not None
+        else severity_weights.get(f.severity, 0.5)
+        for f in findings
+    ]
+    return round((sum(scores) / len(scores)) * 10, 2)
 
 
 def _grade(score: float) -> str:
@@ -246,9 +448,12 @@ async def analyze_text(
     source_url: Optional[str] = None,
     mode: str = "full",
     source_document: Optional[str] = None,
+    context: Optional[List[ContextChip]] = None,
 ) -> AnalysisResult:
     cleaned = _truncate_text(text.strip())
     start_time = time.time()
+    # Normalise context to a list so downstream helpers can trust the type.
+    context_list: List[ContextChip] = list(context) if context else []
     
     # Quick mode: only detect high-severity findings, skip ML inference
     if mode == "quick":
@@ -296,9 +501,39 @@ async def analyze_text(
                     # Ensure needs_review is set for LLM findings
                     if finding.confidence < 0.6:
                         finding = finding.model_copy(update={"needs_review": True})
+                    # Compute irp_score from LLM-provided IRP fields if not already set
+                    if finding.irp_score is None:
+                        finding = finding.model_copy(update={
+                            "irp_score": _compute_irp(finding.impact, finding.likelihood, finding.safeguard_score)
+                        })
                     llm_findings.append(finding)
                 except Exception:
                     continue
+
+        # Filter LLM findings by requested jurisdictions. Rule-based detection
+        # is already jurisdiction-scoped in ``detect_findings``, but the LLM
+        # can return findings tagged for jurisdictions the user did not
+        # request (e.g., BIPA for a California-only request) or for no
+        # jurisdiction at all. A finding is kept only if it declares at least
+        # one jurisdiction and at least one of those declared jurisdictions
+        # matches the caller's list. Findings with an empty jurisdictions list
+        # are dropped: an unclaimed jurisdiction can't be verified as
+        # applicable, so we don't surface it. (PR #34 security review HIGH-2.)
+        #
+        # Fix 4 (global-tool contract): an empty requested ``jurisdictions``
+        # list means "no jurisdiction filter". Unclaimed LLM findings
+        # (``jurisdictions=[]``) are STILL dropped in that mode — an LLM
+        # finding without a declared jurisdiction remains unverifiable
+        # regardless of the caller's filter posture.
+        if jurisdictions:
+            jurisdiction_set = set(jurisdictions)
+            llm_findings = [
+                f for f in llm_findings
+                if f.jurisdictions and any(j in jurisdiction_set for j in f.jurisdictions)
+            ]
+        else:
+            # No jurisdiction filter, but still drop unclaimed findings.
+            llm_findings = [f for f in llm_findings if f.jurisdictions]
 
     # Add source_document to findings for batch processing
     if source_document:
@@ -309,6 +544,8 @@ async def analyze_text(
     merged = _merge_findings(rule_findings, llm_findings)
     merged = _apply_doctype_weighting(merged, doc_type)
     merged = _apply_industry_emphasis(merged, industry)
+    # Context chips re-order findings so the most reader-relevant surface first.
+    merged = apply_category_weights(merged, context_list)
     validation = validate_findings(merged, cleaned)
     confidence_parts = [validation.confidence]
     if overall_confidence is not None:
@@ -332,6 +569,14 @@ async def analyze_text(
     completeness = _compute_completeness(cleaned)
     action_readiness = _compute_action_readiness(risk_score, confidence, completeness)
 
+    # Group top findings by domain — merged is already sorted by
+    # ``apply_category_weights`` so first eligible per domain is the highest.
+    top_by_domain = _group_by_domain(merged)
+
+    # Backend-generated action items (Fix 8). Frontend no longer has to
+    # duplicate the derivation logic.
+    action_items = _derive_action_items(merged, list(jurisdictions) if jurisdictions else [])
+
     elapsed_time = time.time() - start_time
 
     payload = AnalysisPayload(
@@ -354,6 +599,12 @@ async def analyze_text(
         estimated_time=round(elapsed_time, 2),
         action_readiness=action_readiness,
         completeness=completeness,
+        context=context_list,
+        jurisdictions=list(jurisdictions) if jurisdictions else [],
+        verdict_headline=verdict_headline(context_list, action_readiness),
+        verdict_label=verdict_label(context_list, action_readiness),
+        top_by_domain=top_by_domain,
+        action_items=action_items,
     )
     return AnalysisResult(payload=payload, issues=validation.issues)
 
@@ -391,10 +642,16 @@ def _merge_findings(
             hybrid_confidence = 0.6 * finding.confidence + 0.4 * llm_finding.confidence
             hybrid_confidence = max(0.0, min(1.0, hybrid_confidence))
             
+            # Merge IRP: use rule's impact/likelihood as reliable baseline, take max safeguard_score
+            merged_safeguard = max(finding.safeguard_score, llm_finding.safeguard_score)
+            merged_irp = _compute_irp(finding.impact, finding.likelihood, merged_safeguard)
+
             # Create a merged finding with hybrid confidence
             merged_finding = finding.model_copy(update={
                 "confidence": hybrid_confidence,
                 "needs_review": hybrid_confidence < 0.6,
+                "safeguard_score": merged_safeguard,
+                "irp_score": merged_irp,
             })
             merged.append(merged_finding)
             del llm_map[key]  # Mark as processed
@@ -418,30 +675,40 @@ def _merge_findings(
 
 
 def detect_high_severity_findings(text: str, jurisdictions: List[Jurisdiction]) -> List[Finding]:
-    """Quick mode: detect only high and critical severity findings."""
+    """Quick mode: detect only high and critical severity findings.
+
+    Empty ``jurisdictions`` == "no filter" — global-tool contract per Fix 4.
+    """
     from .rules import PATTERNS
-    
+
+    jurisdiction_filter = set(jurisdictions) if jurisdictions else None
     findings: List[Finding] = []
     for pattern in PATTERNS:
         # Only include High and Critical severity patterns
         if pattern.severity not in ["High", "Critical"]:
             continue
-        
-        # Check if pattern applies to any requested jurisdiction
-        if not any(j in pattern.jurisdictions for j in jurisdictions):
+
+        # Check if pattern applies to any requested jurisdiction. Empty
+        # requested list means "no filter" (global tool, unknown user location).
+        if jurisdiction_filter is not None and not any(
+            j in pattern.jurisdictions for j in jurisdiction_filter
+        ):
             continue
-        
+
         for regex_pattern in pattern.patterns:
             try:
                 for match in re.finditer(regex_pattern, text, re.IGNORECASE | re.MULTILINE):
                     start = max(0, match.start() - 50)
                     end = min(len(text), match.end() + 50)
                     excerpt = text[start:end].strip()
-                    
+
                     # Calculate line numbers
                     line_start = text[:match.start()].count('\n') + 1
                     line_end = text[:match.end()].count('\n') + 1
-                    
+
+                    # Seed IRP fields from category defaults
+                    irp_impact, irp_likelihood, irp_safeguard, irp_score = _seed_irp(pattern.category)
+
                     finding = Finding(
                         category=pattern.category,
                         severity=pattern.severity,
@@ -454,11 +721,15 @@ def detect_high_severity_findings(text: str, jurisdictions: List[Jurisdiction]) 
                             line_end=line_end,
                             legal_basis=pattern.legal_basis,
                         ),
+                        impact=irp_impact,
+                        likelihood=irp_likelihood,
+                        safeguard_score=irp_safeguard,
+                        irp_score=irp_score,
                     )
                     findings.append(finding)
             except Exception:
                 continue
-    
+
     return findings
 
 
@@ -468,6 +739,7 @@ async def analyze_batch_documents(
     jurisdictions: List[Jurisdiction],
     mode: str = "full",
     detect_cross_references: bool = True,
+    context: Optional[List[ContextChip]] = None,
 ) -> tuple[List[AnalysisPayload], List[dict]]:
     """
     Analyze multiple documents in batch.
@@ -475,7 +747,7 @@ async def analyze_batch_documents(
     """
     results = []
     cross_refs = []
-    
+
     # Process documents in parallel where possible
     tasks = []
     for idx, (text, name, url, doc_type) in enumerate(documents):
@@ -489,6 +761,7 @@ async def analyze_batch_documents(
             source_url=url,
             mode=mode,
             source_document=doc_name,
+            context=context,
         )
         tasks.append((idx, task))
     

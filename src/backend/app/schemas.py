@@ -39,6 +39,75 @@ Jurisdiction = Literal[
 ]
 Severity = Literal["Low", "Medium", "High", "Critical"]
 
+# ── Canonical finding categories ─────────────────────────────────────────────
+# Single source of truth for category strings used across ``rules.py``,
+# ``analyzer.py``, and ``context.py``. Modules that key dicts on category
+# names must validate their keys against this set at import time so drift
+# fails loudly instead of silently mis-mapping.
+#
+# NOTE: ``Sale/Share`` (canonical, emitted by rules) and ``Data Sale / Sharing``
+# (defensive alias for LLM-generated variants) both live here on purpose.
+CATEGORIES: frozenset[str] = frozenset({
+    # Data-collection categories
+    "Sensitive Data",
+    "Sensitive Data / Opt-Out",
+    "Biometric Data",
+    "Health Data",
+    "Financial Data",
+    "Children's Privacy",
+    "Collection Notice",
+    "Minors",
+    # Data-use categories
+    "AI Training",
+    "AI Training Opt-Out",
+    "AI Training (Opt-Out)",  # alias used by ``_CATEGORY_IRP_DEFAULTS``
+    "Sale/Share",
+    "Data Sale / Sharing",  # LLM alias
+    "Tracking / Profiling",
+    "Tracking & Consent",
+    "Marketing Communications",
+    "Purpose Limitation",
+    "ADM",
+    "Automated Decision-Making",
+    "Consequential AI Decisions",
+    "High-Risk AI",
+    "Prohibited AI",
+    "GPAI / Generative AI",
+    "AI-Generated Content",
+    "Algorithmic Accountability",
+    "Human Oversight",
+    "AI Non-Discrimination",
+    # Terms-of-use categories
+    "Liability",
+    "Unilateral Changes",
+    "Dark Patterns",
+    "Deceptive Practices",
+    "Retention",
+    "Breach Notification",
+    "Data Security",
+    "Consent",
+    # Privacy-rights categories
+    "User Rights",
+    "Data Rights",
+    "Individual Rights",
+    "Privacy Rights",
+    "Cross-Border Transfer",
+    "COPPA Compliance",
+    "HIPAA Compliance",
+    "FERPA Compliance",
+    "PCI DSS Compliance",
+    "PIPEDA Consent",
+    "LGPD Rights",
+    "APPI Disclosure",
+    "DPDP Consent",
+    "POPIA Processing",
+    "PIPA Processing",
+    "APP Privacy",
+    "UK Data Rights",
+    "Privacy as Human Right",
+    "Serious Privacy Invasion",
+})
+
 DocType = Literal[
     "Privacy Policy",
     "Terms of Service",
@@ -56,6 +125,16 @@ IndustryProfile = Literal[
     "AI / Tech Platform",
     "Gaming",
     "Retail",
+]
+
+# Context chips: capture the reader's stated intent for the intake (Streamlit v2).
+# Used to bias which findings surface first and to swap verdict copy.
+ContextChip = Literal[
+    "want_understand",   # "I want to understand what I'm agreeing to"
+    "for_child",         # "Something my child wants to use"
+    "for_care",          # "Helping someone I care about with this"
+    "for_work",          # "For work / business use"
+    "just_curious",      # "Just curious"
 ]
 
 
@@ -79,6 +158,10 @@ class Finding(BaseModel):
     evidence: Evidence
     needs_review: bool = Field(False, description="Flag when confidence < 0.6 or finding needs manual review")
     source_document: Optional[str] = Field(default=None, description="Document source for batch analysis")
+    impact: int = Field(default=2, ge=1, le=5, description="Potential harm if clause enforced (1=trivial, 5=catastrophic)")
+    likelihood: int = Field(default=3, ge=1, le=5, description="Probability clause activates (1=extremely rare, 5=automatic/routine)")
+    safeguard_score: int = Field(default=0, ge=0, le=5, description="Existing mitigations offsetting risk (0=none, 5=full mitigation)")
+    irp_score: Optional[float] = Field(None, ge=0.0, le=1.0, description="IRP composite: 0.5*(impact/5)+0.4*(likelihood/5)-0.3*(safeguard_score/5), clamped to [0,1]")
 
 
 class AnalyzeRequest(BaseModel):
@@ -87,8 +170,26 @@ class AnalyzeRequest(BaseModel):
     doc_type: Optional[DocType] = None
     industry: Optional[IndustryProfile] = None
     source_url: Optional[str] = None
-    jurisdictions: List[Jurisdiction] = Field(default_factory=lambda: ["US-CA", "GDPR"])
+    jurisdictions: List[Jurisdiction] = Field(default_factory=list)
     mode: Literal["full", "quick"] = Field(default="full", description="Analysis mode: 'full' for complete analysis, 'quick' for high-severity rules only")
+    context: List[ContextChip] = Field(default_factory=list, description="Context chip selections from intake (biases top-things surfacing)")
+
+    @field_validator("source_url")
+    @classmethod
+    def _validate_source_url_scheme(cls, v: Optional[str]) -> Optional[str]:
+        # Defense-in-depth against ``javascript:`` (and other non-web) schemes
+        # that survive ``html.escape()`` intact and would execute if rendered
+        # in an ``<a href>``. Mirrors ``WatchlistCreateRequest`` — see PR #34
+        # security review HIGH-1.
+        if v is None or v == "":
+            return v
+        from urllib.parse import urlparse
+        parsed = urlparse(v)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("source_url must use http or https scheme")
+        if not parsed.hostname:
+            raise ValueError("source_url must include a valid hostname")
+        return v
 
 
 class AnalyzeUrlRequest(BaseModel):
@@ -96,8 +197,24 @@ class AnalyzeUrlRequest(BaseModel):
     name: Optional[str] = None
     doc_type: Optional[DocType] = None
     industry: Optional[IndustryProfile] = None
-    jurisdictions: List[Jurisdiction] = Field(default_factory=lambda: ["US-CA", "GDPR"])
+    jurisdictions: List[Jurisdiction] = Field(default_factory=list)
     mode: Literal["full", "quick"] = Field(default="full", description="Analysis mode: 'full' for complete analysis, 'quick' for high-severity rules only")
+    context: List[ContextChip] = Field(default_factory=list, description="Context chip selections from intake (biases top-things surfacing)")
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url_scheme(cls, v: str) -> str:
+        # See ``AnalyzeRequest._validate_source_url_scheme`` — reject
+        # ``javascript:`` and other non-http(s) schemes before they reach the
+        # fetch layer or get echoed back into rendered payloads. SSRF-target
+        # rejection still happens downstream in ``ingest._validate_url``.
+        from urllib.parse import urlparse
+        parsed = urlparse(v)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("url must use http or https scheme")
+        if not parsed.hostname:
+            raise ValueError("url must include a valid hostname")
+        return v
 
 
 class AnalysisPayload(BaseModel):
@@ -127,6 +244,21 @@ class AnalysisPayload(BaseModel):
         ge=0.0,
         le=1.0,
         description="Fraction of expected policy sections detected (rights, retention, contact, opt-out, ADM, security, third-party, minors)",
+    )
+    context: List[ContextChip] = Field(default_factory=list, description="Context chips supplied on the analyze request")
+    jurisdictions: List[Jurisdiction] = Field(
+        default_factory=list,
+        description="Jurisdiction codes the analysis was filtered against (echoes the request so the UI can display 'Rules applied for: ...').",
+    )
+    verdict_headline: Optional[str] = Field(default=None, description="Context-appropriate verdict sentence for the reader")
+    verdict_label: Optional[str] = Field(default=None, description="Short context-appropriate verdict chip label")
+    top_by_domain: dict[str, list[Finding]] = Field(
+        default_factory=dict,
+        description="Top findings grouped by domain (Data, Data use, Terms of use, Privacy rights). Max 2 per domain, 8 total.",
+    )
+    action_items: List[str] = Field(
+        default_factory=list,
+        description="Suggested reader-actionable next steps derived from findings + jurisdictions. Backend-generated so the frontend does not have to know the derivation rules.",
     )
 
 
@@ -199,20 +331,63 @@ class WatchlistCreateRequest(BaseModel):
         return v
 
 
+class InferRequest(BaseModel):
+    """Request to infer jurisdiction, doc_type, and industry from URL and/or text."""
+    url: Optional[str] = Field(default=None, description="Source URL (used for TLD signals)")
+    text: Optional[str] = Field(
+        default=None,
+        max_length=200_000,
+        description="Policy text (used for statute / geographic / regulatory-body signals). Capped at 200k chars to bound cache and regex work.",
+    )
+    context: List[ContextChip] = Field(default_factory=list, description="Context chip selections from the intake")
+
+    @field_validator("text")
+    @classmethod
+    def _validate_text_not_all_whitespace(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not v.strip():
+            return None
+        return v
+
+
+class InferResponse(BaseModel):
+    """Response with inferred jurisdictions, doc_type, industry, and transparency signals."""
+    jurisdictions: List[Jurisdiction] = Field(default_factory=list)
+    doc_type: Optional[DocType] = None
+    industry: Optional[IndustryProfile] = None
+    location_needed: bool = Field(default=False, description="True if jurisdiction inference confidence is low and the intake should show the location Q")
+    detected_signals: dict = Field(default_factory=dict, description="Human-readable list of which signals fired, for transparency")
+
+
 class BatchItem(BaseModel):
     """Individual item for batch analysis (URL or file reference)"""
     url: Optional[str] = Field(default=None, description="URL to analyze")
     name: Optional[str] = Field(default=None, description="Display name for document")
     doc_type: Optional[DocType] = None
-    
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url_scheme(cls, v: Optional[str]) -> Optional[str]:
+        # Same defense as ``AnalyzeRequest`` / ``AnalyzeUrlRequest`` — reject
+        # non-http(s) schemes at the schema layer.
+        if v is None or v == "":
+            return v
+        from urllib.parse import urlparse
+        parsed = urlparse(v)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("url must use http or https scheme")
+        if not parsed.hostname:
+            raise ValueError("url must include a valid hostname")
+        return v
+
 
 class AnalyzeBatchRequest(BaseModel):
     """Request for batch analysis of multiple documents"""
     items: List[BatchItem] = Field(..., min_items=1, description="Documents to analyze")
     industry: Optional[IndustryProfile] = None
-    jurisdictions: List[Jurisdiction] = Field(default_factory=lambda: ["US-CA", "GDPR"])
+    jurisdictions: List[Jurisdiction] = Field(default_factory=list)
     mode: Literal["full", "quick"] = Field(default="full", description="Analysis mode: 'full' for complete analysis, 'quick' for high-severity rules only")
     detect_cross_references: bool = Field(default=True, description="Detect references between documents")
+    context: List[ContextChip] = Field(default_factory=list, description="Context chip selections from intake (biases top-things surfacing)")
 
 
 class BatchAnalysisResult(BaseModel):

@@ -403,7 +403,7 @@ class TestAnalyzeBatch:
         async def fake_fetch(url):
             return "Privacy policy content."
 
-        async def fake_analyze_batch(documents, industry, jurisdictions, mode, detect_cross_refs):
+        async def fake_analyze_batch(documents, industry, jurisdictions, mode, detect_cross_refs, **kwargs):
             payloads = [_make_payload(name=f"Doc{i}") for i in range(len(documents))]
             return payloads, []
 
@@ -676,7 +676,7 @@ class TestAnalyzeBatchPydanticValidation:
             return "Privacy policy content for pydantic path test."
 
         async def fake_analyze_batch(
-            documents, industry, jurisdictions, mode, detect_cross_refs
+            documents, industry, jurisdictions, mode, detect_cross_refs, **kwargs
         ):
             return [_make_payload(name="Doc1")], []
 
@@ -813,7 +813,7 @@ class TestAnalyzeBatchLegacyResult:
             return "Content for legacy result test."
 
         async def fake_analyze_batch(
-            documents, industry, jurisdictions, mode, detect_cross_refs
+            documents, industry, jurisdictions, mode, detect_cross_refs, **kwargs
         ):
             return [_make_payload(name="LegacyDoc")], []
 

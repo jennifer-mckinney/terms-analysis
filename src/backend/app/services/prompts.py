@@ -51,6 +51,9 @@ def build_user_prompt(
         '      "excerpt": "string",\n'
         '      "explanation": "string",\n'
         '      "jurisdictions": ["US-CA","GDPR"],\n'
+        '      "impact": 2,\n'
+        '      "likelihood": 3,\n'
+        '      "safeguard_score": 0,\n'
         '      "evidence": {\n'
         '        "line_start": 1,\n'
         '        "line_end": 1,\n'
@@ -65,6 +68,7 @@ def build_user_prompt(
         "- Only include issues supported by the text.\n"
         "- Keep categories short (e.g., Sale/Share, ADM, Retention, Rights).\n"
         "- If there are no issues, return an empty findings list.\n"
+        "- Estimate impact (1-5: harm if clause enforced), likelihood (1-5: how automatic/probable), safeguard_score (0-5: mitigations visible in the document for this specific finding).\n"
         f"{legal_section}\n"
         "Rule-based detections (for context, may be partial):\n"
         f"{rule_findings}\n\n"

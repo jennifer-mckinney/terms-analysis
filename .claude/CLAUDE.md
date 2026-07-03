@@ -7,7 +7,7 @@
 | Purpose | Analyze ToS/Privacy Policies for compliance risks using rule-based + LLM + RAG detection |
 | Stack | FastAPI backend, Streamlit UI (primary) + vanilla JS SPA (fallback), SQLite, LocalAI (Apertus-8B/EuroLLM-22B), numpy exhaustive search (legal-KB embeddings — not FAISS, see Hard Requirements) |
 | Jurisdictions | 30 codes including US-CA (CCPA/CPRA), GDPR, PIPEDA, US-CO, US-CT, US-NY (full list in `schemas.py`) |
-| Risk Method | Severity-weighted average (see `analyzer.py::calculate_risk_score`); an Impact/Likelihood/Safeguards "IRP" formula is a planned, not-yet-implemented enhancement |
+| Risk Method | IRP (Impact/Likelihood/Safeguards) composite per finding — `0.5*(impact/5)+0.4*(likelihood/5)-0.3*(safeguard/5)` — seeded by rule category in `rules.py::_seed_irp`, requested from LLM in prompts, merged in `_merge_findings`. Falls back to severity weight for legacy findings without `irp_score`. See LIB-RULES §IRP Scoring. |
 | Status | Beta — PR #4 (rubric expansion, API-key auth, PDF-export escaping, CI) and PR #5 (docs reconciliation, legal-KB RAG, XSS/SSRF fixes) merged into `main`; no open PRs/branches |
 
 ## Hard Requirements
@@ -26,7 +26,7 @@
 
 | Path | Purpose |
 |------|---------|
-| `src/webapp/` | Streamlit UI (primary, `app_streamlit.py`) + static SPA fallback: `index.html`, `app.js`, `style.css` |
+| `src/webapp/` | Streamlit UI (primary, `app_streamlit_v2.py` — issue #19 redesign; `app_streamlit_legacy.py` retained) + static SPA fallback: `index.html`, `app.js`, `style.css` |
 | `src/backend/app/` | FastAPI app: `main.py` (24 endpoints + `/health`), `services/`, `schemas.py`, `models.py` |
 | `src/backend/app/services/` | Core logic: `rules.py`, `analyzer.py`, `validation.py`, `ingest.py`, `localai.py`, `embedding.py`, `legal_kb.py`, `diffing.py`, `prompts.py` |
 | `src/backend/tests/` | pytest suite |
