@@ -3,8 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field, StrictFloat
-
+from pydantic import BaseModel, Field, StrictFloat, field_validator
 
 Jurisdiction = Literal[
     "US-CA",
@@ -119,6 +118,16 @@ class AnalysisPayload(BaseModel):
     summary: Optional[str] = None
     analysis_mode: str = Field(default="full", description="Mode used for this analysis")
     estimated_time: float = Field(default=0.0, description="Estimated execution time in seconds")
+    action_readiness: Literal["Go", "Review", "Stop"] = Field(
+        default="Review",
+        description="High-level recommendation: Go (low risk, high completeness), Stop (high risk), Review (all else)",
+    )
+    completeness: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of expected policy sections detected (rights, retention, contact, opt-out, ADM, security, third-party, minors)",
+    )
 
 
 class ReviewItemPayload(BaseModel):
@@ -138,6 +147,7 @@ class ReviewUpdate(BaseModel):
 class RubricScores(BaseModel):
     productIntegrity: float = Field(..., ge=0.0, le=10.0)
     legalSignalQuality: float = Field(..., ge=0.0, le=10.0)
+    aiLawSignalQuality: float = Field(..., ge=0.0, le=10.0)
     privacySecurity: float = Field(..., ge=0.0, le=10.0)
     accessibilityUsability: float = Field(..., ge=0.0, le=10.0)
     visualIxd: float = Field(..., ge=0.0, le=10.0)
@@ -174,6 +184,19 @@ class WatchlistItemPayload(BaseModel):
 class WatchlistCreateRequest(BaseModel):
     vendor: str = Field(..., min_length=1)
     source_url: Optional[str] = None
+
+    @field_validator("source_url")
+    @classmethod
+    def validate_source_url_scheme(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        from urllib.parse import urlparse
+        parsed = urlparse(v)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("source_url must use http or https scheme")
+        if not parsed.hostname:
+            raise ValueError("source_url must include a valid hostname")
+        return v
 
 
 class BatchItem(BaseModel):
@@ -254,5 +277,10 @@ class PolicyWatchPayload(BaseModel):
 class PolicyWatchCreateRequest(BaseModel):
     """Request to create a new policy watch."""
     url: str = Field(..., min_length=4)
-    user_id: Optional[str] = None
+    user_id: Optional[str] = Field(
+        default=None,
+        max_length=255,
+        pattern=r"^[a-zA-Z0-9@._\-]+$",
+        description="Opaque user identifier; alphanumeric, @, ., _, - only",
+    )
     check_frequency: int = Field(default=86400, ge=300, le=604800)  # 5 minutes to 7 days

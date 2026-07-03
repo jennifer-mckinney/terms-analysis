@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
 from ..schemas import Evidence, Finding, Jurisdiction, Severity
@@ -950,10 +950,9 @@ def _confidence_rules_based(
     pattern_total: int,
 ) -> float:
     """Calculate confidence for rules-based matches (90-95% range).
-    
+
     Rules-based matches are inherently high confidence since they're pattern-matched.
     """
-    base = SEVERITY_BASE.get(severity, 0.6)
     hit_ratio = pattern_hits / pattern_total if pattern_total else 0.0
     # For rules-based: return 0.90-0.95 range based on hit quality
     if pattern_hits >= pattern_total * 0.5:  # Multiple patterns hit
@@ -975,19 +974,6 @@ def _match_stats(patterns: Iterable[str], text: str) -> tuple[Optional[re.Match]
             if first_match is None:
                 first_match = matches[0]
     return first_match, pattern_hits, match_count
-
-
-def _confidence(
-    severity: Severity,
-    pattern_hits: int,
-    match_count: int,
-    pattern_total: int,
-) -> float:
-    base = SEVERITY_BASE.get(severity, 0.6)
-    hit_ratio = pattern_hits / pattern_total if pattern_total else 0.0
-    density = min(1.0, match_count / 5)
-    score = 0.25 + 0.5 * base + 0.15 * hit_ratio + 0.1 * density
-    return max(0.35, min(0.95, score))
 
 
 def detect_findings(text: str, jurisdictions: List[Jurisdiction]) -> List[Finding]:

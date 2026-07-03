@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Terms & Policies Reviewer - AI Compliance & Governance Tool</title>
+    <title>Privacy Policy Checker — Plain-English Policy Reviews</title>
     <link rel="stylesheet" href="style.css">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
 </head>
@@ -13,14 +13,14 @@
         <div class="header-container">
             <div class="header-brand">
                 <i class="fas fa-shield-alt"></i>
-                <h1>Terms & Policies Reviewer</h1>
+                <h1>Privacy Policy Checker</h1>
             </div>
             <nav class="header-nav">
                 <button class="nav-btn active" data-page="dashboard">
                     <i class="fas fa-tachometer-alt"></i> Dashboard
                 </button>
                 <button class="nav-btn" data-page="review">
-                    <i class="fas fa-search"></i> Document Review
+                    <i class="fas fa-search"></i> Check a Policy
                 </button>
                 <button class="nav-btn" data-page="compare">
                     <i class="fas fa-balance-scale"></i> Compare Vendors
@@ -54,10 +54,10 @@
         <!-- Dashboard Page -->
         <div class="page active" id="dashboard">
             <div class="page-header">
-                <h2>Compliance Dashboard</h2>
-                <p class="page-subtitle">AI-powered governance and legal document analysis</p>
+                <h2>Policy Safety Dashboard</h2>
+                <p class="page-subtitle">See at a glance which apps and services are safe for your family</p>
             </div>
-            
+
             <div class="dashboard-grid">
                 <div class="dashboard-stats">
                     <div class="stat-card">
@@ -66,7 +66,7 @@
                         </div>
                         <div class="stat-content">
                             <div class="stat-number" id="statDocuments">0</div>
-                            <div class="stat-label">Documents Analyzed</div>
+                            <div class="stat-label">Policies Checked</div>
                         </div>
                     </div>
                     <div class="stat-card">
@@ -75,7 +75,7 @@
                         </div>
                         <div class="stat-content">
                             <div class="stat-number" id="statNeedsReview">0</div>
-                            <div class="stat-label">Needs Review</div>
+                            <div class="stat-label">Flagged as Risky</div>
                         </div>
                     </div>
                     <div class="stat-card">
@@ -84,7 +84,7 @@
                         </div>
                         <div class="stat-content">
                             <div class="stat-number" id="statWatchlist">0</div>
-                            <div class="stat-label">Vendors Tracked</div>
+                            <div class="stat-label">Apps Tracked</div>
                         </div>
                     </div>
                     <div class="stat-card">
@@ -93,14 +93,14 @@
                         </div>
                         <div class="stat-content">
                             <div class="stat-number" id="statAlerts">0</div>
-                            <div class="stat-label">New Alerts</div>
+                            <div class="stat-label">Policy Changes</div>
                         </div>
                     </div>
                 </div>
 
                 <div class="dashboard-main">
                     <div class="recent-analysis">
-                        <h3>Recent Analysis</h3>
+                        <h3>Recently Checked</h3>
                         <div class="analysis-list" id="recentAnalysis">
                             <!-- Populated by JavaScript -->
                         </div>
@@ -122,8 +122,18 @@
                     </div>
 
                     <div class="watchlist-alerts">
-                        <h3>Watchlist Alerts</h3>
+                        <h3>Policy Change Alerts</h3>
                         <div class="alert-list" id="watchlistAlerts">
+                            <!-- Populated by JavaScript -->
+                        </div>
+                    </div>
+
+                    <div class="dashboard-risk-breakdown">
+                        <h3>Risk Breakdown</h3>
+                        <div class="grade-distribution" id="gradeDistribution">
+                            <!-- Populated by JavaScript -->
+                        </div>
+                        <div class="top-risk-categories" id="topRiskCategories">
                             <!-- Populated by JavaScript -->
                         </div>
                     </div>
@@ -134,8 +144,8 @@
         <!-- Document Review Page -->
         <div class="page" id="review">
             <div class="page-header">
-                <h2>Document Review</h2>
-                <p class="page-subtitle">Analyze terms, policies, and legal documents for compliance risks</p>
+                <h2>Check a Policy</h2>
+                <p class="page-subtitle">Paste a link, upload a file, or paste text — we'll tell you what to watch out for in plain English</p>
             </div>
 
             <div class="review-container">
@@ -174,64 +184,238 @@
 
                     <div class="analysis-options">
                         <label class="form-label">Jurisdictions</label>
-                        <div class="analysis-modes">
-                            <label class="mode-option">
-                                <input type="checkbox" name="jurisdiction" value="US-CA" checked>
-                                <div class="mode-card">
-                                    <div class="mode-title">US-CA (CCPA/CPRA)</div>
-                                    <div class="mode-desc">California privacy requirements</div>
+                        <div class="jurisdiction-selector">
+                            <div class="jurisdiction-summary" id="jurisdictionSummary">
+                                Selected: US-CA, GDPR
+                                <button type="button" class="jurisdiction-toggle-btn" id="jurisdictionToggleBtn" aria-expanded="false">
+                                    Show all <i class="fas fa-chevron-down"></i>
+                                </button>
+                            </div>
+                            <div class="jurisdiction-panel hidden" id="jurisdictionPanel">
+                                <div class="jurisdiction-group">
+                                    <div class="jurisdiction-group-label">United States</div>
+                                    <div class="jurisdiction-group-items">
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="US-CA" checked>
+                                            <span class="jx-code">US-CA</span>
+                                            <span class="jx-name">CCPA/CPRA</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="US-FED">
+                                            <span class="jx-code">US-FED</span>
+                                            <span class="jx-name">Federal</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="US-NY">
+                                            <span class="jx-code">US-NY</span>
+                                            <span class="jx-name">SHIELD Act</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="US-TX">
+                                            <span class="jx-code">US-TX</span>
+                                            <span class="jx-name">TDPSA</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="US-VA">
+                                            <span class="jx-code">US-VA</span>
+                                            <span class="jx-name">VCDPA</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="US-CO">
+                                            <span class="jx-code">US-CO</span>
+                                            <span class="jx-name">CPA</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="US-CT">
+                                            <span class="jx-code">US-CT</span>
+                                            <span class="jx-name">CTDPA</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="US-IL">
+                                            <span class="jx-code">US-IL</span>
+                                            <span class="jx-name">BIPA</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="US-NJ">
+                                            <span class="jx-code">US-NJ</span>
+                                            <span class="jx-name">NJDPA</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="US-MN">
+                                            <span class="jx-code">US-MN</span>
+                                            <span class="jx-name">MCDPA</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="US-OR">
+                                            <span class="jx-code">US-OR</span>
+                                            <span class="jx-name">OCPA</span>
+                                        </label>
+                                    </div>
                                 </div>
-                            </label>
-                            <label class="mode-option">
-                                <input type="checkbox" name="jurisdiction" value="GDPR" checked>
-                                <div class="mode-card">
-                                    <div class="mode-title">GDPR</div>
-                                    <div class="mode-desc">EU privacy requirements</div>
+                                <div class="jurisdiction-group">
+                                    <div class="jurisdiction-group-label">European Union / UK</div>
+                                    <div class="jurisdiction-group-items">
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="GDPR" checked>
+                                            <span class="jx-code">GDPR</span>
+                                            <span class="jx-name">EU GDPR</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="UK-GDPR">
+                                            <span class="jx-code">UK-GDPR</span>
+                                            <span class="jx-name">UK GDPR</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="EU-AI-ACT">
+                                            <span class="jx-code">EU-AI-ACT</span>
+                                            <span class="jx-name">EU AI Act</span>
+                                        </label>
+                                    </div>
                                 </div>
-                            </label>
+                                <div class="jurisdiction-group">
+                                    <div class="jurisdiction-group-label">Canada</div>
+                                    <div class="jurisdiction-group-items">
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="PIPEDA">
+                                            <span class="jx-code">PIPEDA</span>
+                                            <span class="jx-name">Federal</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="CA-QC">
+                                            <span class="jx-code">CA-QC</span>
+                                            <span class="jx-name">Quebec Law 25</span>
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="jurisdiction-group">
+                                    <div class="jurisdiction-group-label">Asia-Pacific</div>
+                                    <div class="jurisdiction-group-items">
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="APP">
+                                            <span class="jx-code">APP</span>
+                                            <span class="jx-name">Australia Privacy</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="APPI">
+                                            <span class="jx-code">APPI</span>
+                                            <span class="jx-name">Japan</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="PDPA-TH">
+                                            <span class="jx-code">PDPA-TH</span>
+                                            <span class="jx-name">Thailand</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="PIPA">
+                                            <span class="jx-code">PIPA</span>
+                                            <span class="jx-name">South Korea</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="DPDP">
+                                            <span class="jx-code">DPDP</span>
+                                            <span class="jx-name">India</span>
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="jurisdiction-group">
+                                    <div class="jurisdiction-group-label">Global AI Standards</div>
+                                    <div class="jurisdiction-group-items">
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="OECD-AI">
+                                            <span class="jx-code">OECD-AI</span>
+                                            <span class="jx-name">OECD AI Principles</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="UNESCO-AI">
+                                            <span class="jx-code">UNESCO-AI</span>
+                                            <span class="jx-name">UNESCO Recommendation</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="COE-AI-225">
+                                            <span class="jx-code">COE-AI-225</span>
+                                            <span class="jx-name">CoE Framework Convention</span>
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="jurisdiction-group">
+                                    <div class="jurisdiction-group-label">Other</div>
+                                    <div class="jurisdiction-group-items">
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="LGPD">
+                                            <span class="jx-code">LGPD</span>
+                                            <span class="jx-name">Brazil</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="POPIA">
+                                            <span class="jx-code">POPIA</span>
+                                            <span class="jx-name">South Africa</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="PDPA-KE">
+                                            <span class="jx-code">PDPA-KE</span>
+                                            <span class="jx-name">Kenya</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="NDPR">
+                                            <span class="jx-code">NDPR</span>
+                                            <span class="jx-name">Nigeria</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="ICCPR-17">
+                                            <span class="jx-code">ICCPR-17</span>
+                                            <span class="jx-name">UN Human Rights</span>
+                                        </label>
+                                        <label class="jurisdiction-item">
+                                            <input type="checkbox" name="jurisdiction" value="COE-108">
+                                            <span class="jx-code">COE-108</span>
+                                            <span class="jx-name">Convention 108+</span>
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
 
                     <div class="analysis-options">
-                        <label class="form-label">Analysis Mode</label>
+                        <label class="form-label">What concerns you most? <span class="text-secondary" style="font-weight:400">(optional)</span></label>
+                        <div class="concern-chips" id="concernChips">
+                            <button type="button" class="concern-chip" data-concern="Selling My Data">Selling My Data</button>
+                            <button type="button" class="concern-chip" data-concern="Health &amp; Medical Info">Health &amp; Medical Info</button>
+                            <button type="button" class="concern-chip" data-concern="How Long They Keep My Data">How Long They Keep My Data</button>
+                            <button type="button" class="concern-chip" data-concern="Children's Safety">Children's Safety</button>
+                            <button type="button" class="concern-chip" data-concern="Tracking &amp; Profiling">Tracking &amp; Profiling</button>
+                            <button type="button" class="concern-chip" data-concern="Automated Decisions (AI)">Automated Decisions (AI)</button>
+                            <button type="button" class="concern-chip" data-concern="Arbitration &amp; Legal Rights">Arbitration &amp; Legal Rights</button>
+                            <button type="button" class="concern-chip" data-concern="Financial Information">Financial Information</button>
+                            <button type="button" class="concern-chip" data-concern="Right to Delete">Right to Delete</button>
+                            <button type="button" class="concern-chip" data-concern="Security Practices">Security Practices</button>
+                        </div>
+                    </div>
+
+                    <div class="analysis-options">
+                        <label class="form-label">How thorough?</label>
                         <div class="analysis-modes">
                             <label class="mode-option">
                                 <input type="radio" name="analysisMode" value="quick" checked>
                                 <div class="mode-card">
                                     <div class="mode-icon"><i class="fas fa-bolt"></i></div>
                                     <div class="mode-title">Quick Scan</div>
-                                    <div class="mode-desc">Fast analysis of critical issues</div>
+                                    <div class="mode-desc">Highlights the most serious issues only — takes a few seconds</div>
                                 </div>
                             </label>
                             <label class="mode-option">
                                 <input type="radio" name="analysisMode" value="full">
                                 <div class="mode-card">
                                     <div class="mode-icon"><i class="fas fa-microscope"></i></div>
-                                    <div class="mode-title">Full Analysis</div>
-                                    <div class="mode-desc">Comprehensive review with all findings</div>
-                                </div>
-                            </label>
-                            <label class="mode-option">
-                                <input type="radio" name="analysisMode" value="progressive">
-                                <div class="mode-card">
-                                    <div class="mode-icon"><i class="fas fa-layer-group"></i></div>
-                                    <div class="mode-title">Progressive</div>
-                                    <div class="mode-desc">Summary first, expandable details</div>
-                                </div>
-                            </label>
-                            <label class="mode-option">
-                                <input type="radio" name="analysisMode" value="guided">
-                                <div class="mode-card">
-                                    <div class="mode-icon"><i class="fas fa-compass"></i></div>
-                                    <div class="mode-title">Guided</div>
-                                    <div class="mode-desc">Step-by-step walkthrough</div>
+                                    <div class="mode-title">Deep Read</div>
+                                    <div class="mode-desc">Finds everything — best before signing up for a new service</div>
                                 </div>
                             </label>
                         </div>
                     </div>
 
                     <button class="btn btn--primary btn--full-width" id="analyzeBtn">
-                        <i class="fas fa-search"></i> Analyze Document
+                        <i class="fas fa-search"></i> Check This Policy
                     </button>
                 </div>
 
@@ -344,14 +528,16 @@
                 </div>
 
                 <div class="rubric-scores">
-                    <h3>Rubric Scoring System</h3>
+                    <h3>Tool Performance Scores</h3>
+                    <p class="text-secondary" style="font-size:0.85rem;margin-bottom:12px">How well our checker is doing across all policies you've tested</p>
                     <div class="rubric-grid" id="rubricGrid">
                         <!-- Rubric scores populated by JavaScript -->
                     </div>
                 </div>
 
                 <div class="rubric-scores">
-                    <h3>Review Queue</h3>
+                    <h3>Needs Human Review</h3>
+                    <p class="text-secondary" style="font-size:0.85rem;margin-bottom:12px">Low-confidence scans waiting for a person to verify the findings</p>
                     <div class="review-queue" id="reviewQueue">
                         <!-- Review queue populated by JavaScript -->
                     </div>
@@ -362,11 +548,15 @@
         <!-- Review Queue Page -->
         <div class="page" id="reviews">
             <div class="page-header">
-                <h2>Review Queue</h2>
-                <p class="page-subtitle">Analyses needing human review (confidence below 0.80)</p>
+                <h2>Human Review Queue</h2>
+                <p class="page-subtitle">These policy checks scored below 80% confidence — the AI wasn't sure enough. A person should verify the findings before acting on them.</p>
             </div>
 
             <div class="review-container">
+                <div style="padding:12px 16px;background:var(--color-highlight,rgba(15,164,175,0.08));border-radius:8px;margin-bottom:16px;font-size:0.88rem">
+                    <strong>How to review:</strong> Open the original policy in a new tab, then read the findings from the analysis.
+                    Click <em>Findings Look Right</em> if the issues are real, or <em>Findings Seem Wrong</em> if the AI misread the document.
+                </div>
                 <div class="review-list" id="reviewList">
                     <!-- Review items populated by JavaScript -->
                 </div>
@@ -393,12 +583,10 @@
                             </select>
                         </div>
                         <div class="form-group">
-                            <label class="form-label">Default Analysis Mode</label>
+                            <label class="form-label">Default Check Depth</label>
                             <select class="form-control">
-                                <option value="quick">Quick Scan</option>
-                                <option value="full">Full Analysis</option>
-                                <option value="progressive">Progressive Disclosure</option>
-                                <option value="guided">Guided Walkthrough</option>
+                                <option value="quick">Quick Scan — serious issues only</option>
+                                <option value="full">Deep Read — find everything</option>
                             </select>
                         </div>
                     </div>

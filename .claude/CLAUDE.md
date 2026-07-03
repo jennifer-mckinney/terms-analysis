@@ -5,7 +5,7 @@
 | Key | Value |
 |-----|-------|
 | Purpose | Analyze ToS/Privacy Policies for compliance risks using rule-based + LLM + RAG detection |
-| Stack | FastAPI backend, vanilla JS SPA, SQLite, SaulLM-7B (local legal LLM), FAISS (embeddings) |
+| Stack | FastAPI backend, vanilla JS SPA, SQLite, EuroLLM-22B + Apertus-8B (local LLMs via LocalAI), BM25 + dense + RRF embeddings |
 | Jurisdictions | US-CA (CCPA/CPRA), EU (GDPR), Canada (PIPEDA), US-CO, US-CT, US-NY |
 | Risk Method | IRP Score = 0.5*(I/5) + 0.4*(L/5) - 0.3*(S/5) |
 | Status | Beta — backend on `claude/analyze-project-1Q21W`, tests on `claude/improve-test-coverage-DGT1c` |
@@ -17,7 +17,7 @@
 - **IMPORTANT:** All dependencies must score IRP Grade A or higher.
 - **IMPORTANT:** All data stays local. No external API calls.
 - **IMPORTANT:** LLM failures must always fall back to rule-only findings with reduced confidence.
-- **IMPORTANT:** No OpenAI dependency. LLM inference is local-only via Ollama + SaulLM.
+- **IMPORTANT:** No OpenAI dependency. LLM inference is local-only via LocalAI (EuroLLM-22B for EU/legal text, Apertus-8B for multilingual/world coverage).
 - Confidence < 0.80 triggers human-in-the-loop review.
 - Rule confidence is clamped to [0.35, 0.95].
 - Risk scores map to grades: A (0-3), B (3-5), C+ (5-7), C (7-8), D+ (8-9), D (9-10).
@@ -26,9 +26,9 @@
 
 | Path | Purpose |
 |------|---------|
-| `src/webapp/` | Static SPA: `index.html`, `app.js`, `style.css` |
+| `src/webapp/` | Vanilla JS SPA: `index.html` + `app.js` + `style.css` (port 8000) |
 | `src/backend/app/` | FastAPI app: `main.py` (16 endpoints), `services/`, `schemas.py`, `models.py` |
-| `src/backend/app/services/` | Core logic: `rules.py`, `analyzer.py`, `validation.py`, `ingest.py`, `lm_studio.py`, `diffing.py`, `prompts.py` |
+| `src/backend/app/services/` | Core logic: `rules.py`, `analyzer.py`, `validation.py`, `ingest.py`, `localai.py`, `embedding.py`, `diffing.py`, `prompts.py` |
 | `src/backend/tests/` | pytest suite |
 | `src/backend/evaluation/` | Gold dataset + F1/Kappa evaluation scripts |
 | `docs/` | `DESIGN.md`, `TODO.md`, `reports/`, `specs/`, `wireframes/` |

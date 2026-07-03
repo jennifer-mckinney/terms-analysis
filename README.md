@@ -31,7 +31,9 @@ A privacy-focused tool for analyzing Terms of Service and Privacy Policies. Iden
 ### Prerequisites
 
 - Python 3.11+
-- [LM Studio](https://lmstudio.ai/) running locally (for LLM-powered analysis)
+- [LocalAI](https://localai.io) running locally (Apache 2.0, zero VC) with two models loaded:
+  - [Apertus 8B Instruct](https://huggingface.co/swiss-ai/Apertus-8B-Instruct-2509-GGUF) — Swiss AI Initiative (EPFL/ETH/CSCS), 1,000+ languages
+  - [EuroLLM 22B Instruct](https://huggingface.co/utter-project/EuroLLM-22B-Instruct-GGUF) — EU Horizon Europe / EuroHPC, 35 EU languages
 
 ### Installation
 
@@ -61,8 +63,12 @@ cp .env.example .env
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LM_STUDIO_BASE_URL` | `http://localhost:1234/v1` | LM Studio API endpoint |
-| `DATABASE_URL` | `sqlite:///./data/terms.db` | Database location |
+| `LOCALAI_BASE_URL` | `http://localhost:8080/v1` | LocalAI endpoint |
+| `MODEL_WORLD` | `apertus-8b-instruct` | World/multilingual model (Apertus 8B) |
+| `MODEL_EU` | `eurollm-22b-instruct` | EU language model (EuroLLM 22B) |
+| `DATABASE_URL` | `sqlite:///./data/terms_analysis.db` | Database location |
+| `API_KEY` | *(empty — auth disabled)* | Set to enable endpoint authentication |
+| `REVIEW_THRESHOLD` | `0.80` | Confidence threshold for human review |
 
 ## Architecture
 

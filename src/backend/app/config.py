@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
-
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -26,19 +25,10 @@ class Settings:
     # ── Inference backend ────────────────────────────────────────────────────
     # LocalAI (Apache 2.0, zero VC — https://localai.io)
     localai_base_url: str = os.getenv("LOCALAI_BASE_URL", "http://localhost:8080/v1")
-    # Backward-compatibility aliases for older code/tests.
-    lm_studio_base_url: str = os.getenv(
-        "LM_STUDIO_BASE_URL",
-        os.getenv("LOCALAI_BASE_URL", "http://localhost:8080/v1"),
-    )
 
     # Apertus 8B Instruct (Swiss AI Initiative — EPFL/ETH Zurich/CSCS, 1,000+ languages)
     # Download: https://huggingface.co/swiss-ai/Apertus-8B-Instruct-2509-GGUF
     model_world: str = os.getenv("MODEL_WORLD", "apertus-8b-instruct")
-    lm_studio_model: str = os.getenv(
-        "LM_STUDIO_MODEL",
-        os.getenv("MODEL_WORLD", "apertus-8b-instruct"),
-    )
 
     # EuroLLM 22B Instruct (EU Horizon Europe / EuroHPC, 35 languages, EU legal corpus)
     # Download: https://huggingface.co/utter-project/EuroLLM-22B-Instruct-GGUF
@@ -76,6 +66,11 @@ class Settings:
         )
     )
     watchlist_refresh_seconds: int = int(os.getenv("WATCHLIST_REFRESH_SECONDS", "0"))
+    # Optional API key for endpoint authentication.  Set API_KEY env var in
+    # production.  Empty string disables auth (default: disabled for local dev).
+    api_key: str = os.getenv("API_KEY", "")
+    # Maximum pages to process per PDF when OCR is involved.
+    max_pdf_pages: int = int(os.getenv("MAX_PDF_PAGES", "100"))
 
 
 settings = Settings()

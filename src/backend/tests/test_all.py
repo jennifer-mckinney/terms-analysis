@@ -143,14 +143,16 @@ def test_analyze_file_accepts_small_valid_upload(
     assert captured["doc_type"] == "Privacy Policy"
 
 
-def test_health_endpoint_exposes_expected_keys_only(app_client):
+def test_health_endpoint_returns_only_status(app_client):
     response = app_client.get("/health")
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"status", "model_world", "model_eu", "review_threshold"}
+    assert body == {"status": "ok"}
+    assert "model_world" not in body
+    assert "model_eu" not in body
+    assert "review_threshold" not in body
     assert "database_url" not in body
     assert "lm_studio_base_url" not in body
-    assert "lm_studio_model" not in body
 
 
 def test_export_analyses_csv_quotes_commas_and_newlines(app_client, db_session):

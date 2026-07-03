@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hmac
 import json
 import logging
 import typing
@@ -9,43 +10,56 @@ from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from io import BytesIO, StringIO
 from uuid import uuid4
+from xml.sax.saxutils import escape as _xml_escape
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .database import db_session, get_db, init_db
-from .models import Analysis, ReviewItem, WatchlistItem, PolicySnapshot, PolicyWatch
+from .models import Analysis, PolicySnapshot, PolicyWatch, ReviewItem, WatchlistItem
 from .schemas import (
     AnalysisPayload,
     AnalysisSummary,
+    AnalyzeBatchRequest,
     AnalyzeRequest,
     AnalyzeUrlRequest,
-    AnalyzeBatchRequest,
     BatchAnalysisResult,
+    DiffResult,
+    DiffToken,
     DocType,
     IndustryProfile,
+    PolicySnapshotListItem,
+    PolicySnapshotPayload,
+    PolicyWatchCreateRequest,
+    PolicyWatchPayload,
     ReviewItemPayload,
     ReviewUpdate,
     RubricScores,
     WatchlistCreateRequest,
     WatchlistItemPayload,
-    PolicySnapshotPayload,
-    PolicySnapshotListItem,
-    DiffResult,
-    DiffToken,
-    PolicyWatchPayload,
-    PolicyWatchCreateRequest,
 )
-from .services.analyzer import analyze_text, calculate_risk_score, analyze_batch_documents
+from .services.analyzer import (
+    analyze_batch_documents,
+    analyze_text,
+    calculate_risk_score,
+)
 from .services.diffing import content_hash, diff_summary, diff_tokens
 from .services.ingest import extract_text_from_bytes, fetch_url_text
 from .services.rules import detect_findings
 
-
 logger = logging.getLogger("uvicorn.error")
+
+
+def _verify_api_key(x_api_key: str | None = Header(default=None)) -> None:
+    """Enforce API key auth when settings.api_key is set.  No-op when unset."""
+    required = settings.api_key
+    if not required:
+        return
+    if x_api_key is None or not hmac.compare_digest(x_api_key, required):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
 @asynccontextmanager
@@ -61,25 +75,25 @@ async def lifespan(app: FastAPI):
             await task
 
 
-app = FastAPI(title="Terms Analysis Backend", version="0.1.0", lifespan=lifespan)
+app = FastAPI(
+    title="Terms Analysis Backend",
+    version="0.1.0",
+    lifespan=lifespan,
+    dependencies=[Depends(_verify_api_key)],
+)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type", "X-API-Key"],
 )
 
 
 @app.get("/health")
 def health() -> dict:
-    return {
-        "status": "ok",
-        "model_world": settings.model_world,
-        "model_eu": settings.model_eu,
-        "review_threshold": settings.review_threshold,
-    }
+    return {"status": "ok"}
 
 
 async def _watchlist_loop_async() -> None:
@@ -164,7 +178,7 @@ def _persist_analysis(
         confidence=payload.confidence,
         risk_score=payload.risk_score,
         grade=payload.grade,
-        document_text=payload.document_text,
+        document_text=(payload.document_text or "")[:50_000] or None,
         result_json=payload_json,
     )
     db.add(analysis)
@@ -185,15 +199,42 @@ def _compute_rubric_scores(records: list[Analysis]) -> RubricScores:
     confidence_score = _clamp(avg_conf * 10)
     review_score = _clamp(10 - review_rate * 10)
 
+    # AI Law Signal Quality: reward high confidence (AI rules firing reliably)
+    # and penalise high needs-review rates (uncertain AI-law detections).
+    # Static coverage bonus: 12/64 rules cover AI law jurisdictions → 8.5 base.
+    ai_law = _clamp(8.5 * avg_conf + 1.5 * (1.0 - review_rate))
+
+    product_integrity = _clamp(base)
+    legal_signal = _clamp(confidence_score)
+    ai_law_signal = ai_law
+    privacy_security = _clamp(base * 0.9 + confidence_score * 0.1)
+    accessibility = _clamp(review_score * 0.6 + confidence_score * 0.4)
+    visual_ixd = _clamp(review_score * 0.5 + base * 0.5)
+    performance = _clamp(review_score * 0.7 + base * 0.3)
+    governance = _clamp(review_score)
+
+    # Weighted overall per rubric spec weights
+    weighted = (
+        0.20 * product_integrity
+        + 0.20 * legal_signal
+        + 0.10 * ai_law_signal
+        + 0.10 * privacy_security
+        + 0.15 * accessibility
+        + 0.10 * visual_ixd
+        + 0.10 * performance
+        + 0.05 * governance
+    )
+
     return RubricScores(
-        productIntegrity=_clamp(base),
-        legalSignalQuality=_clamp(confidence_score),
-        privacySecurity=_clamp(base * 0.9 + confidence_score * 0.1),
-        accessibilityUsability=_clamp(review_score * 0.6 + confidence_score * 0.4),
-        visualIxd=_clamp(review_score * 0.5 + base * 0.5),
-        performanceReliability=_clamp(review_score * 0.7 + base * 0.3),
-        governanceReadiness=_clamp(review_score),
-        overall=_clamp((base + confidence_score + review_score) / 3),
+        productIntegrity=product_integrity,
+        legalSignalQuality=legal_signal,
+        aiLawSignalQuality=ai_law_signal,
+        privacySecurity=privacy_security,
+        accessibilityUsability=accessibility,
+        visualIxd=visual_ixd,
+        performanceReliability=performance,
+        governanceReadiness=governance,
+        overall=_clamp(weighted),
     )
 
 
@@ -239,7 +280,8 @@ async def analyze_url(request: AnalyzeUrlRequest, db: Session = Depends(get_db))
         text = await fetch_url_text(request.url)
     except ValueError as e:
         return JSONResponse(status_code=400, content={"detail": str(e)})
-    except Exception:
+    except Exception as exc:
+        logger.error("Failed to fetch URL %s: %s", request.url, exc, exc_info=True)
         return JSONResponse(status_code=500, content={"detail": "Failed to fetch URL"})
 
     if not text:
@@ -340,18 +382,9 @@ async def analyze_file(
 
 
 @app.post("/analyze/batch", response_model=dict)
-async def analyze_batch(request, db: Session = Depends(get_db)):
+async def analyze_batch(request: AnalyzeBatchRequest, db: Session = Depends(get_db)):
     """Analyze multiple documents in batch with cross-reference detection."""
-    from .schemas import AnalyzeBatchRequest, BatchAnalysisResult
-    from .services.analyzer import analyze_batch_documents
-    
-    # Parse request - handle both JSON and form data
-    if hasattr(request, 'json'):
-        body = await request.json()
-        batch_req = AnalyzeBatchRequest(**body)
-    else:
-        batch_req = request
-    
+    batch_req = request
     logger.info(
         "Batch analyze request: items=%d mode=%s detect_cross_refs=%s",
         len(batch_req.items),
@@ -408,7 +441,10 @@ async def analyze_batch(request, db: Session = Depends(get_db)):
 
 
 @app.get("/analyses", response_model=list[AnalysisSummary])
-def list_analyses(limit: int = 25, db: Session = Depends(get_db)):
+def list_analyses(
+    limit: int = Query(default=25, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
     records = (
         db.query(Analysis)
         .order_by(Analysis.created_at.desc())
@@ -448,15 +484,8 @@ def get_analysis(analysis_id: str, db: Session = Depends(get_db)):
         data = json.loads(record.result_json)
     except json.JSONDecodeError:
         raise HTTPException(status_code=500, detail="Stored analysis is invalid")
+    data["document_text"] = None  # strip raw text from public detail response
     return AnalysisPayload(**data)
-
-
-@app.get("/exports/analysis/{analysis_id}")
-def export_analysis_json(analysis_id: str, db: Session = Depends(get_db)):
-    record = db.query(Analysis).filter(Analysis.id == analysis_id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Analysis not found")
-    return json.loads(record.result_json)
 
 
 @app.get("/exports/analyses.csv")
@@ -509,7 +538,7 @@ def export_analysis_pdf(analysis_id: str, db: Session = Depends(get_db)):
             TableStyle,
         )
     except ImportError:
-        raise HTTPException(status_code=500, detail="PDF export dependency missing")
+        raise HTTPException(status_code=503, detail="PDF export is not available — reportlab package not installed")
 
     record = db.query(Analysis).filter(Analysis.id == analysis_id).first()
     if not record:
@@ -538,10 +567,6 @@ def export_analysis_pdf(analysis_id: str, db: Session = Depends(get_db)):
     small_style = ParagraphStyle(
         "Small", parent=body_style, fontSize=8, textColor=colors.HexColor("#555555")
     )
-    label_style = ParagraphStyle(
-        "Label", parent=body_style, fontSize=8, fontName="Helvetica-Bold"
-    )
-
     _SEV_COLORS = {
         "Critical": colors.HexColor("#DC2626"),
         "High": colors.HexColor("#EA580C"),
@@ -692,22 +717,23 @@ def export_analysis_pdf(analysis_id: str, db: Session = Depends(get_db)):
         story.append(HRFlowable(width="100%", thickness=1, color=sev_color, spaceAfter=6))
 
         for f in sev_findings:
-            category = f.get("category", "Unknown")
+            category = _xml_escape(f.get("category", "Unknown"))
             conf_pct = int((f.get("confidence") or 0) * 100)
             story.append(Paragraph(f"<b>{category}</b>", h3_style))
             story.append(Paragraph(
-                f"Severity: <b>{severity}</b> &nbsp;|&nbsp; Confidence: {conf_pct}%",
+                f"Severity: <b>{_xml_escape(severity)}</b> &nbsp;|&nbsp; Confidence: {conf_pct}%",
                 small_style,
             ))
 
-            excerpt = (f.get("excerpt") or "")[:500]
-            if len(f.get("excerpt") or "") > 500:
+            raw_excerpt = f.get("excerpt") or ""
+            excerpt = _xml_escape(raw_excerpt[:500])
+            if len(raw_excerpt) > 500:
                 excerpt += "…"
             if excerpt:
                 story.append(Spacer(1, 3))
                 story.append(Paragraph(f'"{excerpt}"', italic_style))
 
-            explanation = f.get("explanation") or ""
+            explanation = _xml_escape(f.get("explanation") or "")
             if explanation:
                 story.append(Spacer(1, 3))
                 story.append(Paragraph(explanation, body_style))
@@ -715,14 +741,14 @@ def export_analysis_pdf(analysis_id: str, db: Session = Depends(get_db)):
             legal = f.get("evidence", {}).get("legal_basis") or []
             if legal:
                 story.append(Paragraph(
-                    "<b>Legal basis:</b> " + "; ".join(legal),
+                    "<b>Legal basis:</b> " + "; ".join(_xml_escape(b) for b in legal),
                     small_style,
                 ))
 
             jurs = f.get("jurisdictions") or []
             if jurs:
                 story.append(Paragraph(
-                    "<b>Jurisdictions:</b> " + ", ".join(jurs),
+                    "<b>Jurisdictions:</b> " + ", ".join(_xml_escape(j) for j in jurs),
                     small_style,
                 ))
 
@@ -762,6 +788,14 @@ def export_analysis_pdf(analysis_id: str, db: Session = Depends(get_db)):
     doc.build(story)
     buffer.seek(0)
     return Response(content=buffer.read(), media_type="application/pdf")
+
+
+@app.get("/exports/analysis/{analysis_id}")
+def export_analysis_json(analysis_id: str, db: Session = Depends(get_db)):
+    record = db.query(Analysis).filter(Analysis.id == analysis_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    return json.loads(record.result_json)
 
 
 @app.get("/reviews", response_model=list[ReviewItemPayload])
@@ -968,7 +1002,8 @@ async def create_snapshot(url: str, db: Session = Depends(get_db)):
     try:
         text = await fetch_url_text(url)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to fetch URL: {str(e)}")
+        logger.warning("Snapshot URL fetch failed for %s: %s", url, e)
+        raise HTTPException(status_code=400, detail="Failed to fetch the requested URL.")
     
     if not text:
         raise HTTPException(status_code=400, detail="URL content is empty")
@@ -1146,7 +1181,8 @@ async def capture_watch_snapshot(watch_id: str, db: Session = Depends(get_db)):
     try:
         text = await fetch_url_text(watch.url)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to fetch URL: {str(e)}")
+        logger.warning("Policy-watch URL fetch failed for %s: %s", watch.url, e)
+        raise HTTPException(status_code=400, detail="Failed to fetch the requested URL.")
     
     if not text:
         raise HTTPException(status_code=400, detail="URL content is empty")

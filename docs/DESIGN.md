@@ -1,23 +1,26 @@
 # Design Overview
 
 ## Goals and Scope
-- Local-only analysis with LM Studio on the LAN.
-- Jurisdictions: US-CA (CCPA/CPRA) and GDPR.
+- Local-only analysis. No data leaves the machine.
+- Jurisdictions: US-CA (CCPA/CPRA), EU (GDPR), Canada (PIPEDA), US-CO, US-CT, US-NY.
 - Human-in-the-loop review for confidence < 0.80.
 
 ## Architecture
-- `src/webapp/`: static UI (HTML/CSS/JS) served via local HTTP server.
-- `src/backend/`: FastAPI backend for ingestion, analysis, and storage.
-- LM Studio: Local LLM inference server at `LM_STUDIO_BASE_URL` (default `http://localhost:1234/v1`).
+- `src/webapp/`: static SPA (HTML/CSS/JS) served via local HTTP server on port 8000.
+- `src/backend/`: FastAPI backend on port 9000 for ingestion, analysis, and storage.
+- LocalAI (Apache 2.0, zero VC): local LLM inference at `LOCALAI_BASE_URL` (default `http://localhost:8080/v1`).
+  - **Apertus 8B Instruct** (Swiss AI Initiative — EPFL/ETH Zurich/CSCS): world model, 1,000+ languages.
+  - **EuroLLM 22B Instruct** (EU Horizon Europe / EuroHPC): EU legal specialist, 35 EU languages.
+  - Language routing: EU ISO 639-1 codes → EuroLLM; all others → Apertus.
 - Local data: SQLite at `data/terms_analysis.db` (gitignored).
 
 ## Data Flow
 1. User submits URL, file, or pasted text in the UI.
-2. FastAPI ingests and normalizes the document (HTML/PDF/DOCX/RTF/TXT).
-3. Rule-based detections run for baseline signals.
-4. LLM analysis runs via LM Studio with line-numbered context.
+2. FastAPI ingests and normalizes the document (HTML/PDF/DOCX/RTF/TXT/OCR).
+3. Rule-based detections run for baseline signals across 9 risk categories.
+4. LLM analysis runs via LocalAI (Apertus or EuroLLM depending on detected language).
 5. Results are merged, validated, and scored for confidence.
-6. If confidence < 0.80, a review item is created.
+6. If confidence < 0.80, a review item is created for human-in-the-loop review.
 7. Analysis results are stored and surfaced in the UI.
 
 ## Storage

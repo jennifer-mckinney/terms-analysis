@@ -1,5 +1,71 @@
 // Terms & Policies Reviewer Application JavaScript
 
+// Plain-English category labels and impact descriptions for parents/students/caretakers
+const CATEGORY_INFO = {
+    'Dark Patterns': {
+        label: 'Misleading Design',
+        impact: 'The app may use tricks or confusing layouts to get you to agree to things you didn\'t intend to.'
+    },
+    'Sale/Share': {
+        label: 'Selling Your Data',
+        impact: 'Your personal information may be sold or shared with other companies for advertising or profit.'
+    },
+    'Retention': {
+        label: 'Keeps Your Data Indefinitely',
+        impact: 'They may store your information forever with no clear date for deleting it.'
+    },
+    'Unilateral Changes': {
+        label: 'Can Change Terms Without Notice',
+        impact: 'They can quietly update the policy at any time and it still applies to you — even if you never see the new version.'
+    },
+    'Children\'s Privacy': {
+        label: 'Children\'s Data at Risk',
+        impact: 'Your child\'s information may not be adequately protected or could be collected without proper parental consent.'
+    },
+    'Biometric Data': {
+        label: 'Face, Voice & Fingerprint Data',
+        impact: 'The app may record and store your child\'s biometric data such as facial recognition, voice prints, or fingerprints.'
+    },
+    'Sensitive Data': {
+        label: 'Collects Sensitive Personal Info',
+        impact: 'Health, financial, location, or other sensitive details are being collected — often shared more broadly than you\'d expect.'
+    },
+    'Automated Decisions': {
+        label: 'Computer Makes Decisions About You',
+        impact: 'An algorithm automatically makes decisions that affect you or your child — without a human reviewing them.'
+    },
+    'Liability': {
+        label: 'Limits Your Legal Rights',
+        impact: 'You may have signed away your right to sue or join a class action lawsuit if the company causes harm.'
+    },
+    'User Rights': {
+        label: 'Hard to Delete or Access Your Data',
+        impact: 'The policy makes it difficult for you to see what data they have, correct mistakes, or have it deleted.'
+    }
+};
+
+const CONCERN_MAP = {
+    'Selling My Data':           ['sale', 'share', 'sell', 'third'],
+    'Health & Medical Info':     ['health', 'medical', 'biometric'],
+    'How Long They Keep My Data':['retention', 'retain', 'store', 'indefinit'],
+    "Children's Safety":         ['child', 'minor', 'coppa', 'under 13'],
+    'Tracking & Profiling':      ['track', 'profil', 'monitor'],
+    'Automated Decisions (AI)':  ['automat', 'ai training', 'decision'],
+    'Arbitration & Legal Rights':['arbitrat', 'class action', 'waive', 'dispute'],
+    'Financial Information':     ['financ', 'payment', 'credit'],
+    'Right to Delete':           ['delet', 'remov', 'erasure', 'right to'],
+    'Security Practices':        ['secur', 'breach', 'encrypt'],
+};
+
+const GRADE_NARRATIVE = {
+    'A':  { emoji: '✅', headline: 'Looks Safe',         detail: 'This policy scored well. We didn\'t find major red flags.' },
+    'B':  { emoji: '🟡', headline: 'Minor Concerns',     detail: 'A few things to be aware of, but nothing alarming. Worth a quick look.' },
+    'C+': { emoji: '🟠', headline: 'Watch Out',          detail: 'Several issues that could affect your privacy. Read the findings carefully.' },
+    'C':  { emoji: '🟠', headline: 'Concerning',         detail: 'Notable privacy or safety problems. Think carefully before using this service.' },
+    'D+': { emoji: '🔴', headline: 'Serious Issues',     detail: 'Significant problems found. We recommend avoiding this service or contacting the company.' },
+    'D':  { emoji: '🔴', headline: 'Very Concerning',    detail: 'Major red flags. This policy has serious privacy or safety violations.' }
+};
+
 // Application Data
 const API_BASE_URL = window.API_BASE_URL || 'http://localhost:9000';
 const API_LOGGING = true;
@@ -251,11 +317,16 @@ async function fetchJSON(path, options = {}) {
     }
     const response = await fetch(url, options);
     if (!response.ok) {
-        const message = await response.text();
+        const raw = await response.text();
         if (API_LOGGING) {
             const duration = Math.round(performance.now() - startedAt);
             console.info(`[api] ${method} ${url} -> ${response.status} (${duration}ms)`);
         }
+        let message = raw;
+        try {
+            const parsed = JSON.parse(raw);
+            if (parsed && parsed.detail) message = parsed.detail;
+        } catch (_) { /* use raw text */ }
         throw new Error(message || `Request failed (${response.status})`);
     }
     state.backendOnline = true;
@@ -329,19 +400,46 @@ function populateReviewQueue() {
 
     if (!state.reviews.length) {
         containers.forEach(container => {
-            container.innerHTML = '<p class="text-secondary">No pending reviews.</p>';
+            container.innerHTML = '<p class="text-secondary">No pending reviews — everything checked out automatically.</p>';
         });
         return;
     }
 
+    // Build a quick lookup map: analysis_id → analysis record
+    const analysisMap = {};
+    (state.analyses || []).forEach(a => { analysisMap[a.id] = a; });
+
     const html = state.reviews.map(item => {
+        const analysis = analysisMap[item.analysis_id] || null;
+        const docName  = analysis ? (analysis.name || analysis.source_url || 'Unnamed document') : 'Unknown document';
+        const grade    = analysis ? (analysis.grade || '?') : '?';
+        const gradeInfo = GRADE_NARRATIVE[grade] || { emoji: '', headline: grade };
+        const confPct  = analysis ? Math.round((analysis.confidence || 0) * 100) : '?';
+        const checkedDate = item.created_at ? new Date(item.created_at).toLocaleDateString() : '';
+
         return `
-            <div class="review-item">
-                <div class="text-secondary">Review ID: ${item.id}</div>
-                <div class="text-secondary">Analysis ID: ${item.analysis_id}</div>
-                <div class="review-actions">
-                    <button class="btn btn--sm btn--primary" onclick="updateReview('${item.id}', 'approved')">Approve</button>
-                    <button class="btn btn--sm btn--outline" onclick="updateReview('${item.id}', 'rejected')">Reject</button>
+            <div class="review-item" style="border:1px solid var(--color-card-border);border-radius:8px;padding:14px;margin-bottom:12px">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+                    <div style="flex:1;min-width:0">
+                        <div style="font-weight:600;font-size:0.95rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${docName}</div>
+                        <div class="text-secondary" style="font-size:0.85rem;margin-top:2px">
+                            Checked ${checkedDate} &middot; Grade ${gradeInfo.emoji} ${grade} &middot; Scan confidence: ${confPct}%
+                        </div>
+                        <div style="font-size:0.82rem;margin-top:6px;color:var(--color-warning)">
+                            <i class="fas fa-exclamation-triangle"></i>
+                            Confidence below 80% — a human should verify these findings before the result is trusted.
+                        </div>
+                    </div>
+                    <div class="review-actions" style="display:flex;gap:8px;flex-shrink:0;align-items:center">
+                        <button class="btn btn--sm btn--primary" onclick="updateReview('${item.id}', 'approved')"
+                            title="The AI findings look correct — mark this analysis as verified">
+                            <i class="fas fa-check"></i> Findings Look Right
+                        </button>
+                        <button class="btn btn--sm btn--outline" onclick="updateReview('${item.id}', 'rejected')"
+                            title="The AI findings seem wrong or misleading — flag this for re-analysis">
+                            <i class="fas fa-times"></i> Findings Seem Wrong
+                        </button>
+                    </div>
                 </div>
             </div>
         `;
@@ -398,6 +496,8 @@ function populateDashboard() {
     populateDashboardStats();
     populateRecentAnalysis();
     populateWatchlistAlerts();
+    populateGradeDistribution();
+    populateTopRiskCategories();
 }
 
 function populateDashboardStats() {
@@ -435,17 +535,21 @@ function populateRecentAnalysis() {
         const date = new Date(doc.created_at).toLocaleDateString();
         const riskClass = getRiskClass(doc.risk_score);
         const name = doc.name || doc.source_url || 'Untitled Document';
-        
+        const gradeInfo = GRADE_NARRATIVE[doc.grade] || { emoji: '', headline: doc.grade };
+
         const reviewBadge = doc.status === 'needs_review'
-            ? '<span class="status status--warning">Needs Review</span>'
-            : '<span class="status status--success">Completed</span>';
+            ? '<span class="status status--warning">Needs expert review</span>'
+            : '';
+        const safeDocId = String(doc.id || '').replace(/'/g, "\\'");
         return `
-            <div class="analysis-item">
+            <div class="analysis-item analysis-item--clickable" style="cursor:pointer"
+                 onclick="navigateToDashboardAnalysis('${safeDocId}')"
+                 title="View full analysis">
                 <div class="analysis-meta">
                     <div class="analysis-name">${name}</div>
-                    <div class="analysis-date">Analyzed ${date} ${reviewBadge}</div>
+                    <div class="analysis-date">Checked ${date} ${reviewBadge}</div>
                 </div>
-                <div class="risk-badge ${riskClass}">${doc.grade}</div>
+                <div class="risk-badge ${riskClass}" title="${gradeInfo.headline}">${gradeInfo.emoji} ${doc.grade}</div>
             </div>
         `;
     }).join('');
@@ -479,11 +583,139 @@ function populateWatchlistAlerts() {
     container.innerHTML = html || '<p class="text-secondary">No recent alerts</p>';
 }
 
+function populateGradeDistribution() {
+    const container = document.getElementById('gradeDistribution');
+    if (!container) return;
+
+    if (!state.analyses.length) {
+        container.innerHTML = '<p class="text-secondary" style="font-size:0.85rem">No policies checked yet.</p>';
+        return;
+    }
+
+    const GRADE_ORDER = ['A', 'B', 'C+', 'C', 'D+', 'D'];
+    const counts = {};
+    GRADE_ORDER.forEach(g => { counts[g] = 0; });
+    state.analyses.forEach(a => {
+        const g = a.grade;
+        if (g in counts) counts[g]++;
+        else counts['C'] = (counts['C'] || 0) + 1;
+    });
+
+    const GRADE_COLORS = { 'A': '#059669', 'B': '#65a30d', 'C+': '#d97706', 'C': '#f59e0b', 'D+': '#dc2626', 'D': '#991b1b' };
+
+    const bars = GRADE_ORDER.map(g => {
+        const count = counts[g];
+        if (!count) return '';
+        const color = GRADE_COLORS[g] || 'var(--color-primary)';
+        return `
+            <div class="grade-bar-item">
+                <div class="grade-bar-label" style="color:${color}">${g}</div>
+                <div class="grade-bar-track">
+                    <div class="grade-bar-fill" style="background:${color};width:${Math.round((count / state.analyses.length) * 100)}%"></div>
+                </div>
+                <div class="grade-bar-count">${count}</div>
+            </div>
+        `;
+    }).join('');
+
+    container.innerHTML = bars || '<p class="text-secondary" style="font-size:0.85rem">No graded policies yet.</p>';
+}
+
+function populateTopRiskCategories() {
+    const container = document.getElementById('topRiskCategories');
+    if (!container) return;
+
+    if (!state.analyses.length) {
+        container.innerHTML = '';
+        return;
+    }
+
+    const categoryCounts = {};
+    state.analyses.forEach(a => {
+        (a.findings || []).forEach(f => {
+            if (f.category) {
+                categoryCounts[f.category] = (categoryCounts[f.category] || 0) + 1;
+            }
+        });
+    });
+
+    const top3 = Object.entries(categoryCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3);
+
+    if (!top3.length) {
+        container.innerHTML = '';
+        return;
+    }
+
+    const items = top3.map(([cat, count]) => {
+        const info = CATEGORY_INFO[cat] || { label: cat };
+        return `<div class="top-risk-item"><span class="top-risk-name">${info.label}</span><span class="top-risk-count">${count} finding${count !== 1 ? 's' : ''}</span></div>`;
+    }).join('');
+
+    container.innerHTML = `<div style="margin-top:12px"><div style="font-size:0.8rem;font-weight:600;color:var(--color-text-secondary);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Top Issues Found</div>${items}</div>`;
+}
+
+function navigateToDashboardAnalysis(docId) {
+    const doc = state.analyses.find(a => String(a.id) === String(docId));
+    if (!doc) {
+        showToast('Analysis not found', 'warning');
+        return;
+    }
+    navigateToPage('review');
+    currentAnalysis = doc;
+    displayAnalysisResults(doc, 'full');
+}
+
 // Document Review Functions
 function setupDocumentReview() {
     setupInputTabs();
     setupFileUpload();
     setupAnalyzeButton();
+    setupJurisdictionToggle();
+    setupConcernChips();
+}
+
+function setupJurisdictionToggle() {
+    const toggleBtn = document.getElementById('jurisdictionToggleBtn');
+    const panel = document.getElementById('jurisdictionPanel');
+    const summary = document.getElementById('jurisdictionSummary');
+    if (!toggleBtn || !panel) return;
+
+    toggleBtn.addEventListener('click', () => {
+        const isOpen = !panel.classList.contains('hidden');
+        panel.classList.toggle('hidden', isOpen);
+        toggleBtn.setAttribute('aria-expanded', String(!isOpen));
+        toggleBtn.innerHTML = isOpen
+            ? 'Show all <i class="fas fa-chevron-down"></i>'
+            : 'Hide <i class="fas fa-chevron-up"></i>';
+    });
+
+    // Update summary line whenever a checkbox changes
+    panel.addEventListener('change', () => {
+        updateJurisdictionSummary();
+    });
+}
+
+function updateJurisdictionSummary() {
+    const summary = document.getElementById('jurisdictionSummary');
+    const toggleBtn = document.getElementById('jurisdictionToggleBtn');
+    if (!summary || !toggleBtn) return;
+    const checked = Array.from(document.querySelectorAll('input[name="jurisdiction"]:checked'))
+        .map(i => i.value);
+    const label = checked.length ? `Selected: ${checked.join(', ')}` : 'None selected';
+    // Preserve the button
+    summary.childNodes[0].textContent = label + ' ';
+}
+
+function setupConcernChips() {
+    const container = document.getElementById('concernChips');
+    if (!container) return;
+    container.addEventListener('click', (e) => {
+        const chip = e.target.closest('.concern-chip');
+        if (!chip) return;
+        chip.classList.toggle('selected');
+    });
 }
 
 function setupInputTabs() {
@@ -546,6 +778,8 @@ function setupAnalyzeButton() {
 }
 
 async function startAnalysis() {
+    const activeTab = document.querySelector('.tab-btn.active');
+    const activeInput = activeTab ? activeTab.getAttribute('data-input') : null;
     const documentUrl = document.getElementById('documentUrl').value;
     const documentText = document.getElementById('documentText').value;
     const fileInput = document.getElementById('fileInput');
@@ -553,8 +787,11 @@ async function startAnalysis() {
     const jurisdictions = Array.from(document.querySelectorAll('input[name="jurisdiction"]:checked'))
         .map(input => input.value);
 
-    // Validate input
-    if (!documentUrl && !documentText && fileInput.files.length === 0) {
+    // Validate input based on active tab
+    const hasUrl = activeInput === 'url' && documentUrl;
+    const hasText = activeInput === 'text' && documentText;
+    const hasFile = activeInput === 'upload' && fileInput.files.length > 0;
+    if (!hasUrl && !hasText && !hasFile) {
         showToast('Please provide a document URL, upload a file, or paste text', 'error');
         return;
     }
@@ -568,17 +805,20 @@ async function startAnalysis() {
         return;
     }
 
+    // Map UI mode names to backend values
+    const backendMode = analysisMode === 'quick' ? 'quick' : 'full';
+
     // Show loading
-    showLoading('Analyzing document...');
-    setResultsPlaceholder('Analyzing document...');
+    showLoading('Checking policy...');
+    setResultsPlaceholder('Checking policy...');
     try {
         let result = null;
-        if (documentUrl) {
-            result = await analyzeUrl(documentUrl, jurisdictions);
-        } else if (fileInput.files.length > 0) {
-            result = await analyzeFile(fileInput.files[0], jurisdictions);
+        if (hasUrl) {
+            result = await analyzeUrl(documentUrl, jurisdictions, backendMode);
+        } else if (hasFile) {
+            result = await analyzeFile(fileInput.files[0], jurisdictions, backendMode);
         } else {
-            result = await analyzeText(documentText, jurisdictions);
+            result = await analyzeText(documentText, jurisdictions, backendMode);
         }
 
         currentAnalysis = result;
@@ -588,20 +828,23 @@ async function startAnalysis() {
         await refreshRubricScores();
         populateRubricScores();
         displayAnalysisResults(result, analysisMode);
-        showToast('Analysis complete', 'success');
+        applyUserConcernFilter();
+        showToast('Policy check complete', 'success');
     } catch (error) {
-        setResultsPlaceholder('Analysis failed. Check the console for API logs.');
-        showToast(error.message || 'Analysis failed', 'error');
+        const msg = error.message || 'Analysis failed';
+        const isBlocked = msg.toLowerCase().includes('block') || msg.toLowerCase().includes('403');
+        const placeholder = isBlocked
+            ? 'This website blocks automated access — try the "Paste Text" tab and paste the policy directly.'
+            : `Check failed: ${msg}`;
+        setResultsPlaceholder(placeholder);
+        showToast(msg, 'error');
     } finally {
         hideLoading();
     }
 }
 
-async function analyzeText(text, jurisdictions) {
-    const payload = {
-        text,
-        jurisdictions
-    };
+async function analyzeText(text, jurisdictions, mode = 'full') {
+    const payload = { text, jurisdictions, mode };
     return fetchJSON('/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -609,11 +852,8 @@ async function analyzeText(text, jurisdictions) {
     });
 }
 
-async function analyzeUrl(url, jurisdictions) {
-    const payload = {
-        url,
-        jurisdictions
-    };
+async function analyzeUrl(url, jurisdictions, mode = 'full') {
+    const payload = { url, jurisdictions, mode };
     return fetchJSON('/analyze/url', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -621,10 +861,11 @@ async function analyzeUrl(url, jurisdictions) {
     });
 }
 
-async function analyzeFile(file, jurisdictions) {
+async function analyzeFile(file, jurisdictions, mode = 'full') {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('jurisdictions', jurisdictions.join(','));
+    formData.append('mode', mode);
     return fetchJSON('/analyze/file', {
         method: 'POST',
         body: formData
@@ -635,57 +876,158 @@ function displayAnalysisResults(doc, mode) {
     const resultsSection = document.getElementById('resultsSection');
 
     const name = doc.name || doc.source_url || 'Untitled Document';
-    const docType = doc.doc_type || 'Document';
     const analyzedDate = new Date(doc.created_at).toLocaleDateString();
-    const confidence = formatConfidence(doc.confidence);
-    const reviewLabel = doc.review_required ? 'Needs Review' : 'Completed';
-    const analysisId = doc.id || 'unknown';
-    const summaryHtml = doc.summary
-        ? `<div class="mt-16"><h4>Summary</h4><p class="text-secondary">${doc.summary}</p></div>`
+    const grade = doc.grade || 'C';
+    const gradeInfo = GRADE_NARRATIVE[grade] || GRADE_NARRATIVE['C'];
+    const riskScore = typeof doc.risk_score === 'number' ? doc.risk_score.toFixed(1) : doc.risk_score;
+    const modeLabel = mode === 'quick' ? 'Quick Scan — serious issues only' : 'Deep Read — full analysis';
+
+    const highCount = (doc.findings || []).filter(f => (f.severity || '').toUpperCase() === 'HIGH').length;
+    const medCount  = (doc.findings || []).filter(f => (f.severity || '').toUpperCase() === 'MEDIUM').length;
+    const lowCount  = (doc.findings || []).filter(f => (f.severity || '').toUpperCase() === 'LOW').length;
+
+    // Confidence explanation
+    const confidencePct = Math.round((doc.confidence || 0) * 100);
+    let confidenceNote = '';
+    if (confidencePct < 50) {
+        confidenceNote = `<p class="text-secondary" style="margin-top:6px;font-size:0.88rem">
+            <i class="fas fa-info-circle"></i>
+            <strong>Scan confidence: ${confidencePct}%</strong> — The AI assistant wasn't available, so this is a pattern-only scan.
+            Results may miss some issues or have false positives. A human review is recommended.
+        </p>`;
+    } else if (confidencePct < 80) {
+        confidenceNote = `<p class="text-secondary" style="margin-top:6px;font-size:0.88rem">
+            <i class="fas fa-info-circle"></i>
+            <strong>Scan confidence: ${confidencePct}%</strong> — Partial AI analysis completed.
+            Some findings may need human verification before acting on them.
+        </p>`;
+    }
+
+    // Score explanation
+    const scoreContext = riskScore >= 8 ? 'Very high risk (8–10)' :
+                         riskScore >= 7 ? 'High risk (7–8)' :
+                         riskScore >= 5 ? 'Moderate risk (5–7)' :
+                         riskScore >= 3 ? 'Low risk (3–5)' : 'Minimal risk (0–3)';
+
+    const humanReviewNote = doc.review_required
+        ? `<p class="text-secondary" style="margin-top:4px"><i class="fas fa-user-check"></i> Low confidence — a human expert should verify these findings before you decide.</p>`
         : '';
 
-    const findingsHtml = doc.findings.length
-        ? doc.findings.map(finding => createFindingHTML(finding)).join('')
-        : '<p class="text-secondary">No findings detected.</p>';
+    const summaryText = doc.summary
+        ? `<p style="margin-top:8px">${doc.summary}</p>`
+        : '';
+
+    const findingsHtml = (doc.findings || []).length
+        ? (doc.findings).map(finding => createFindingHTML(finding)).join('')
+        : '<p class="text-secondary">No issues found in this section.</p>';
+
+    // Action Readiness
+    const readiness = doc.action_readiness || 'Review';
+    const readinessConfig = {
+        Go:     { color: 'var(--color-success,#3ecf8e)', bg: 'rgba(62,207,142,0.12)', icon: '✓', note: 'Low risk — safe to proceed. Keep a copy of this policy and monitor for changes.' },
+        Review: { color: 'var(--color-warning,#ffcc66)', bg: 'rgba(255,204,102,0.12)', icon: '⚠', note: 'Some concerns found — read the flagged items before relying on this policy.' },
+        Stop:   { color: 'var(--color-danger,#ff6b6b)',  bg: 'rgba(255,107,107,0.12)', icon: '✕', note: 'Serious issues detected — do not proceed without legal review or an alternative.' },
+    };
+    const rc = readinessConfig[readiness] || readinessConfig.Review;
+
+    // Completeness meter
+    const completenessPct = Math.round((doc.completeness || 0) * 100);
+    const completenessLabel = completenessPct >= 75 ? 'Well-covered' : completenessPct >= 50 ? 'Partially covered' : 'Incomplete';
 
     const html = `
         <div class="results-header">
-            <div>
+            <div style="flex:1">
                 <h3>${name}</h3>
-                <p class="text-secondary">${docType} • Analyzed ${analyzedDate}</p>
-                <p class="text-secondary">Confidence ${confidence}% • ${reviewLabel}</p>
-                <p class="text-secondary">Analysis ID: ${analysisId}</p>
+                <p class="text-secondary">Checked on ${analyzedDate} &middot; ${modeLabel}</p>
             </div>
-            <div class="risk-score">
-                <div class="risk-score-value">${doc.risk_score}</div>
-                <div class="risk-grade">Grade ${doc.grade}</div>
+            <div class="risk-score" title="${scoreContext}">
+                <div class="risk-score-value">${riskScore}</div>
+                <div class="risk-grade">Grade ${grade}</div>
+                <div style="font-size:0.72rem;color:var(--color-text-secondary);text-align:center;margin-top:2px">${scoreContext}</div>
             </div>
         </div>
-        
+
+        <div style="display:flex;gap:12px;margin-bottom:14px;flex-wrap:wrap">
+            <div style="flex:1;min-width:160px;background:${rc.bg};border:1px solid ${rc.color};border-radius:12px;padding:12px 16px">
+                <div style="font-size:0.75rem;color:var(--color-text-secondary);margin-bottom:2px;text-transform:uppercase;letter-spacing:.05em">Action Readiness</div>
+                <div style="font-size:1.5rem;font-weight:700;color:${rc.color}">${rc.icon} ${readiness}</div>
+                <div style="font-size:0.8rem;margin-top:4px;color:var(--color-text-secondary)">${rc.note}</div>
+            </div>
+            <div style="min-width:160px;background:var(--color-surface-alt,rgba(0,0,0,0.04));border:1px solid var(--color-border);border-radius:12px;padding:12px 16px">
+                <div style="font-size:0.75rem;color:var(--color-text-secondary);margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em">Policy Completeness</div>
+                <div style="height:8px;background:var(--color-border);border-radius:999px;overflow:hidden;margin-bottom:6px">
+                    <div style="height:100%;width:${completenessPct}%;background:${rc.color};border-radius:999px;transition:width .5s ease"></div>
+                </div>
+                <div style="font-size:0.85rem;font-weight:600">${completenessPct}% <span style="font-weight:400;color:var(--color-text-secondary)">${completenessLabel}</span></div>
+                <div style="font-size:0.75rem;color:var(--color-text-secondary);margin-top:2px">sections of a complete policy found</div>
+            </div>
+        </div>
+
+        <div class="finding-item" style="background:var(--color-surface-alt,rgba(94,82,64,0.06));border-left:4px solid var(--color-primary);margin-bottom:16px">
+            <div style="font-size:1.25rem;font-weight:700;margin-bottom:4px">${gradeInfo.emoji} ${gradeInfo.headline}</div>
+            <p>${gradeInfo.detail}</p>
+            ${summaryText}
+            ${confidenceNote}
+            ${humanReviewNote}
+            <div style="margin-top:10px;display:flex;gap:12px;flex-wrap:wrap">
+                ${highCount ? `<span class="finding-severity high">${highCount} Serious</span>` : ''}
+                ${medCount  ? `<span class="finding-severity medium">${medCount} Moderate</span>` : ''}
+                ${lowCount  ? `<span class="finding-severity low">${lowCount} Minor</span>` : ''}
+                ${!highCount && !medCount && !lowCount ? '<span class="text-secondary">No issues flagged</span>' : ''}
+            </div>
+        </div>
+
+        ${(doc.findings || []).length ? '<h4 style="margin-bottom:8px">What We Found</h4>' : ''}
         <div class="findings-list">
             ${findingsHtml}
         </div>
 
-        ${summaryHtml}
-        
         <div class="jurisdiction-summary mt-16">
-            <h4>Jurisdiction Analysis</h4>
-            ${createJurisdictionSummary(doc.findings)}
+            <h4>Privacy Laws Checked Against</h4>
+            ${createJurisdictionSummary(doc.findings || [])}
         </div>
-        
+
         <div class="action-buttons mt-16">
             <button class="btn btn--primary" data-action="export-results">
-                <i class="fas fa-download"></i> Export Report
+                <i class="fas fa-download"></i> Save Report
             </button>
             <button class="btn btn--secondary" data-action="add-watchlist">
-                <i class="fas fa-eye"></i> Add to Watchlist
+                <i class="fas fa-eye"></i> Watch for Changes
             </button>
             <button class="btn btn--outline" onclick="showVerifyView()">
-                <i class="fas fa-list"></i> Verify View
+                <i class="fas fa-list"></i> Show Source Text
             </button>
         </div>
+
+        <div class="rubric-mini-card mt-16">
+            <div class="rubric-mini-header">
+                <i class="fas fa-info-circle"></i> How We Scored This
+            </div>
+            <div class="rubric-mini-body">
+                <div class="rubric-mini-grade">
+                    <span style="font-weight:700;font-size:1.1rem">Grade ${grade}</span>
+                    &mdash; ${gradeInfo.headline}
+                </div>
+                <div class="rubric-mini-thresholds">
+                    <span class="rubric-threshold" title="Score 0–3">A: few/no issues</span>
+                    <span class="rubric-threshold" title="Score 3–5">B: minor concerns</span>
+                    <span class="rubric-threshold" title="Score 5–8">C: watch out</span>
+                    <span class="rubric-threshold" title="Score 8–10">D: serious problems</span>
+                </div>
+                <div style="margin-top:10px;font-size:0.8rem;color:var(--color-text-secondary)">
+                    <strong>IRP Score</strong> = 0.5&times;(Impact/5) + 0.4&times;(Likelihood/5) &minus; 0.3&times;(Safeguards/5)<br>
+                    <strong>Rubric categories</strong> (tool quality, not this document):
+                    Product Integrity (20%) &bull; Legal Signal (20%) &bull; AI Law Signal (10%) &bull;
+                    Privacy &amp; Security (10%) &bull; Accessibility (15%) &bull;
+                    Visual/IXD (10%) &bull; Performance (10%) &bull; Governance (5%)
+                </div>
+            </div>
+            <div class="rubric-mini-footer">
+                <a href="#" onclick="navigateToPage('reports');return false">See full rubric &rarr;</a>
+            </div>
+        </div>
     `;
-    
+
     resultsSection.innerHTML = html;
     currentAnalysis = doc;
 }
@@ -696,22 +1038,51 @@ function setResultsPlaceholder(message) {
     resultsSection.innerHTML = `<p class="text-secondary">${message}</p>`;
 }
 
+function applyUserConcernFilter() {
+    const selectedChips = Array.from(document.querySelectorAll('.concern-chip.selected'));
+    if (!selectedChips.length) return;
+
+    const selectedConcerns = selectedChips.map(c => c.getAttribute('data-concern'));
+    const keywords = selectedConcerns.flatMap(concern => CONCERN_MAP[concern] || []);
+    if (!keywords.length) return;
+
+    const findingsList = document.querySelector('.findings-list');
+    if (!findingsList) return;
+    const items = Array.from(findingsList.querySelectorAll('.finding-item'));
+    if (!items.length) return;
+
+    const matched = [];
+    const unmatched = [];
+    items.forEach(item => {
+        const text = item.textContent.toLowerCase();
+        const hits = keywords.some(kw => text.includes(kw.toLowerCase()));
+        if (hits) {
+            matched.push(item);
+            item.classList.add('concern-highlight');
+        } else {
+            unmatched.push(item);
+            item.classList.remove('concern-highlight');
+        }
+    });
+
+    // Re-order: matched first, then unmatched
+    [...matched, ...unmatched].forEach(el => findingsList.appendChild(el));
+}
+
 function createFindingHTML(finding) {
-    const confidence = formatConfidence(finding.confidence);
+    const info = CATEGORY_INFO[finding.category] || { label: finding.category, impact: finding.explanation || '' };
+    const severityUpper = (finding.severity || '').toUpperCase();
+    const severityLabels = { HIGH: 'Serious', MEDIUM: 'Moderate', LOW: 'Minor' };
+    const severityLabel = severityLabels[severityUpper] || finding.severity;
+    const safeCategory = (finding.category || '').replace(/'/g, "\\'");
     return `
-        <div class="finding-item" onclick="showFindingDetails('${finding.category}')">
+        <div class="finding-item" onclick="showFindingDetails('${safeCategory}')">
             <div class="finding-header">
-                <div class="finding-category">${finding.category}</div>
-                <div class="finding-severity ${finding.severity.toLowerCase()}">${finding.severity}</div>
+                <div class="finding-category">${info.label}</div>
+                <div class="finding-severity ${severityUpper.toLowerCase()}">${severityLabel}</div>
             </div>
+            <p style="margin:6px 0 4px;font-size:0.92rem">${info.impact}</p>
             <div class="finding-excerpt">"${finding.excerpt}"</div>
-            <div class="finding-confidence">
-                <span>Confidence:</span>
-                <div class="confidence-bar">
-                    <div class="confidence-fill" style="width: ${confidence}%"></div>
-                </div>
-                <span>${confidence}%</span>
-            </div>
         </div>
     `;
 }
@@ -728,36 +1099,37 @@ function showFindingDetails(category) {
     const finding = currentAnalysis.findings.find(f => f.category === category);
     if (!finding) return;
     const evidence = finding.evidence || { line_start: '-', line_end: '-', legal_basis: [] };
+    const info = CATEGORY_INFO[category] || { label: category, impact: finding.explanation || '' };
+    const severityUpper = (finding.severity || '').toUpperCase();
+    const severityLabels = { HIGH: 'Serious', MEDIUM: 'Moderate', LOW: 'Minor' };
+    const severityLabel = severityLabels[severityUpper] || finding.severity;
+    const confidencePct = formatConfidence(finding.confidence);
 
     const content = `
         <div class="finding-details">
             <div class="mb-16">
-                <div class="finding-severity ${finding.severity.toLowerCase()}">${finding.severity} Risk</div>
-                <div class="text-secondary">Confidence: ${formatConfidence(finding.confidence)}%</div>
+                <div class="finding-severity ${severityUpper.toLowerCase()}">${severityLabel} Issue</div>
             </div>
-            
-            <h4>Evidence</h4>
-            <div class="finding-excerpt mb-16">"${finding.excerpt}"</div>
-            
-            <h4>Explanation</h4>
-            <p class="mb-16">${finding.explanation}</p>
-            
-            <h4>Location</h4>
-            <p class="text-secondary">Lines ${evidence.line_start}-${evidence.line_end}</p>
 
-            <h4>Legal Basis</h4>
+            <h4>What This Means for You</h4>
+            <p class="mb-16">${info.impact}</p>
+
+            <h4>Where We Found It</h4>
+            <div class="finding-excerpt mb-16">"${finding.excerpt}"</div>
+
+            <h4>More Detail</h4>
+            <p class="mb-16">${finding.explanation || 'No additional detail available.'}</p>
+
+            ${confidencePct >= 80 ? `<p class="text-secondary mb-16">How sure we are: ${confidencePct}%</p>` : ''}
+
+            <h4>Privacy Laws This May Violate</h4>
             <div class="mt-8">
-                ${(evidence.legal_basis || []).map(basis => `<span class="status status--info">${basis}</span>`).join(' ') || '<span class="text-secondary">Not provided</span>'}
-            </div>
-            
-            <h4>Jurisdictions</h4>
-            <div class="mt-8">
-                ${(finding.jurisdictions || []).map(j => `<span class="status status--info">${j}</span>`).join(' ')}
+                ${(evidence.legal_basis || []).map(basis => `<span class="status status--info">${basis}</span>`).join(' ') || '<span class="text-secondary">None specified</span>'}
             </div>
         </div>
     `;
 
-    showModal(`Finding: ${category}`, content);
+    showModal(info.label, content);
 }
 
 function showVerifyView() {
@@ -1127,32 +1499,98 @@ function populateRubricScores() {
         return;
     }
 
+    const totalChecked = state.analyses.length;
+
     if (!state.rubricScores) {
-        container.innerHTML = '<p class="text-secondary">Run evaluations to populate rubric scores.</p>';
+        container.innerHTML = `
+            <p class="text-secondary" style="margin-bottom:12px">
+                No policies have been checked yet. Scores will appear after your first analysis.
+            </p>`;
         return;
     }
 
-    const rubricLabels = {
-        productIntegrity: 'Product Integrity',
-        legalSignalQuality: 'Legal Signal Quality',
-        privacySecurity: 'Privacy & Security',
-        accessibilityUsability: 'Accessibility/Usability',
-        visualIxd: 'Visual/IXD',
-        performanceReliability: 'Performance/Reliability',
-        governanceReadiness: 'Governance Readiness',
-        overall: 'Overall Score'
+    const RUBRIC_META = {
+        overall:               { label: 'Overall Score',            weight: null,  desc: 'Weighted average across all 8 rubric dimensions.' },
+        productIntegrity:      { label: 'Product Integrity (20%)',  weight: '20%', desc: 'How risky the checked policies are on average. Higher = lower average risk score.' },
+        legalSignalQuality:    { label: 'Legal Signal Quality (20%)',weight:'20%', desc: 'How confident the AI is in its findings. Low when the AI model is offline (pattern-only mode).' },
+        aiLawSignalQuality:    { label: 'AI Law Signal (10%)',      weight: '10%', desc: 'Coverage and confidence across EU AI Act, BIPA, Colorado AI Act SB 205, OECD-AI, and related rules.' },
+        privacySecurity:       { label: 'Privacy & Security (10%)', weight: '10%', desc: 'Blend of risk level and AI confidence — reflects overall data-safety picture.' },
+        accessibilityUsability:{ label: 'Accessibility (15%)',      weight: '15%', desc: 'How often analyses need human review. Higher = fewer items flagged for manual check.' },
+        visualIxd:             { label: 'Visual / IXD (10%)',       weight: '10%', desc: 'Combines human-review rate with avg risk — proxy for how clear and actionable the outputs are.' },
+        performanceReliability:{ label: 'Performance (10%)',        weight: '10%', desc: 'How often the tool can complete an analysis without needing manual intervention.' },
+        governanceReadiness:   { label: 'Governance (5%)',          weight:  '5%', desc: 'How close to fully-automated the tool is. Drops when many analyses need human review.' },
     };
 
-    const html = Object.entries(state.rubricScores).map(([key, score]) => {
+    function scoreColor(s) {
+        if (s >= 7) return 'var(--color-success)';
+        if (s >= 4) return 'var(--color-warning)';
+        return 'var(--color-error)';
+    }
+    function scoreLabel(s) {
+        if (s >= 7) return 'Good';
+        if (s >= 4) return 'Fair';
+        return 'Needs work';
+    }
+
+    // Show overall first, then categories in rubric order
+    const ordered = ['overall', 'productIntegrity', 'legalSignalQuality', 'aiLawSignalQuality',
+                     'privacySecurity', 'accessibilityUsability', 'visualIxd', 'performanceReliability', 'governanceReadiness'];
+
+    const rows = ordered.map(key => {
+        const score = state.rubricScores[key];
+        if (score === undefined) return '';
+        const meta = RUBRIC_META[key] || { label: key, desc: '' };
+        const pct = Math.round((score / 10) * 100);
+        const color = scoreColor(score);
+        const lbl = scoreLabel(score);
+        const isOverall = key === 'overall';
         return `
-            <div class="rubric-item">
-                <div class="rubric-label">${rubricLabels[key]}</div>
-                <div class="rubric-score">${score.toFixed(1)}</div>
+            <div style="padding:${isOverall ? '14px 12px' : '10px 12px'};border:1px solid var(--color-card-border);border-radius:8px;
+                        margin-bottom:8px;${isOverall ? 'background:var(--color-highlight,rgba(15,164,175,0.06))' : ''}">
+                <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
+                    <span style="font-weight:${isOverall ? '700' : '600'};font-size:${isOverall ? '1rem' : '0.9rem'}">${meta.label}</span>
+                    <span style="font-weight:700;font-size:${isOverall ? '1.1rem' : '0.95rem'};color:${color}">
+                        ${score.toFixed(1)}<span style="font-size:0.75rem;font-weight:400;color:var(--color-text-secondary)">/10</span>
+                        <span style="font-size:0.75rem;margin-left:4px">${lbl}</span>
+                    </span>
+                </div>
+                <div style="background:var(--color-border);border-radius:4px;height:6px;margin-bottom:6px;overflow:hidden">
+                    <div style="width:${pct}%;height:100%;background:${color};border-radius:4px;transition:width 0.4s"></div>
+                </div>
+                <div class="text-secondary" style="font-size:0.8rem">${meta.desc}</div>
             </div>
         `;
     }).join('');
 
-    container.innerHTML = html;
+    const irpBox = `
+        <div style="margin-top:16px;padding:12px 14px;border:1px dashed var(--color-border);border-radius:8px;background:var(--color-surface)">
+            <div style="font-weight:600;margin-bottom:6px"><i class="fas fa-calculator"></i> How the Risk Score Is Calculated</div>
+            <p style="font-size:0.85rem;margin-bottom:6px">
+                Each policy gets an <strong>IRP (Integrated Risk Profile) score</strong> from 0–10:
+            </p>
+            <code style="font-size:0.82rem;display:block;padding:6px 10px;background:var(--color-secondary);border-radius:4px;margin-bottom:8px">
+                Score = 0.5 × (Impact/5) + 0.4 × (Likelihood/5) − 0.3 × (Safeguards/5)
+            </code>
+            <ul style="font-size:0.82rem;margin:0;padding-left:18px;line-height:1.7">
+                <li><strong>Impact (0–5)</strong> — how serious the harm could be if the clause is enforced</li>
+                <li><strong>Likelihood (0–5)</strong> — how likely the company is to actually use this clause</li>
+                <li><strong>Safeguards (0–5)</strong> — how many protections exist (opt-out, deletion rights, etc.)</li>
+            </ul>
+            <p style="font-size:0.8rem;margin-top:8px;color:var(--color-text-secondary)">
+                Grades: A (0–3) · B (3–5) · C+ (5–7) · C (7–8) · D+ (8–9) · D (9–10)
+            </p>
+        </div>
+    `;
+
+    container.innerHTML = `
+        <p class="text-secondary" style="font-size:0.85rem;margin-bottom:14px">
+            These scores reflect how our tool is performing across
+            <strong>${totalChecked} ${totalChecked === 1 ? 'policy' : 'policies'}</strong> checked so far.
+            All scores are on a 0–10 scale — higher is better.
+        </p>
+        ${rows}
+        ${irpBox}
+    `;
 }
 
 function generateReport(reportType) {
@@ -1282,3 +1720,5 @@ window.refreshWatchlistItem = refreshWatchlistItem;
 window.updateReview = updateReview;
 window.exportReports = exportReports;
 window.closeModal = closeModal;
+window.navigateToDashboardAnalysis = navigateToDashboardAnalysis;
+window.navigateToPage = navigateToPage;

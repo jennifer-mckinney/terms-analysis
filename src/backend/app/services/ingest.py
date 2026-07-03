@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from io import BytesIO
 import ipaddress
-from pathlib import Path
 import re
 import socket
+from io import BytesIO
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -13,6 +13,20 @@ from bs4 import BeautifulSoup
 from docx import Document
 from PIL import Image
 from pypdf import PdfReader
+
+_ALLOWED_CONTENT_TYPES = {
+    "text/plain",
+    "text/html",
+    "text/htm",
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/msword",
+    "application/rtf",
+    "text/rtf",
+    "text/markdown",
+    "application/octet-stream",
+}
+
 try:
     import pytesseract
 except ImportError:  # Optional OCR dependency
@@ -20,7 +34,6 @@ except ImportError:  # Optional OCR dependency
 from striprtf.striprtf import rtf_to_text
 
 from ..config import settings
-
 
 _BLOCKED_NETWORKS = [
     ipaddress.ip_network("127.0.0.0/8"),
@@ -70,7 +83,8 @@ def _extract_pdf_with_ocr(data: bytes) -> str:
         return ""
     reader = PdfReader(BytesIO(data))
     parts = []
-    for page in reader.pages:
+    page_limit = settings.max_pdf_pages
+    for page in reader.pages[:page_limit]:
         text = page.extract_text()
         if text and text.strip():
             parts.append(text)
@@ -107,6 +121,9 @@ def _extract_rtf(data: bytes) -> str:
     return rtf_to_text(raw)
 
 
+_ALLOWED_EXTENSIONS = {".txt", ".md", ".html", ".htm", ".pdf", ".docx", ".rtf"}
+
+
 def extract_text_from_bytes(
     filename: str,
     content_type: Optional[str],
@@ -126,8 +143,12 @@ def extract_text_from_bytes(
         return _normalize_text(_extract_docx(data))
     if ext == ".rtf":
         return _normalize_text(_extract_rtf(data))
-    if content_type and "html" in content_type:
-        return _normalize_text(_extract_html(_decode_bytes(data)))
+    # For unknown extensions, only trust content_type for known HTML MIME types.
+    # Do not fall through for arbitrary MIME types to avoid parser abuse.
+    if content_type:
+        ct_base = content_type.split(";")[0].strip().lower()
+        if ct_base in {"text/html", "application/xhtml+xml"}:
+            return _normalize_text(_extract_html(_decode_bytes(data)))
     return _normalize_text(_decode_bytes(data))
 
 
@@ -162,17 +183,72 @@ def _validate_url(url: str) -> None:
             raise ValueError("URL is not allowed")
 
 
+_FETCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
 async def fetch_url_text(url: str) -> str:
-    try:
-        _validate_url(url)
-    except ValueError:
-        raise
+    _validate_url(url)
 
     timeout = settings.request_timeout_s
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.get(url, follow_redirects=True)
-        response.raise_for_status()
-        content_type = response.headers.get("content-type", "")
+    max_bytes = settings.max_upload_bytes
+
+    async def _on_request(request: httpx.Request) -> None:
+        """Validate each URL before every request, including redirects."""
+        _validate_url(str(request.url))
+
+    _BLOCKED_STATUSES = {401, 403, 407, 429, 503}
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=True,
+        headers=_FETCH_HEADERS,
+        event_hooks={"request": [_on_request]},
+    ) as client:
+        try:
+            response = await client.get(url)
+        except httpx.RequestError as exc:
+            raise ValueError(
+                "Could not connect to this website. "
+                "This may be a typo in the URL, a site that requires login, or a temporary outage. "
+                "Try copying the policy text and using the Paste Text tab instead."
+            ) from exc
+        if response.status_code in _BLOCKED_STATUSES:
+            raise ValueError(
+                "This website blocks automated access. "
+                "Try these instead: for Google/Gmail use policies.google.com/privacy, "
+                "for Apple use apple.com/legal/privacy, "
+                "for Meta/Facebook use facebook.com/privacy/policy "
+                "— or paste the policy text directly."
+            )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise ValueError(
+                f"Website returned an error ({exc.response.status_code}). "
+                "Try pasting the policy text instead."
+            ) from exc
+
+        # Reject oversized responses before buffering the full body.
+        raw_length = response.headers.get("content-length")
+        if raw_length and int(raw_length) > max_bytes:
+            raise ValueError(
+                f"Response size {raw_length} bytes exceeds the "
+                f"{max_bytes}-byte limit"
+            )
         data = response.content
+        if len(data) > max_bytes:
+            raise ValueError(
+                f"Response size {len(data)} bytes exceeds the "
+                f"{max_bytes}-byte limit"
+            )
+        content_type = response.headers.get("content-type", "")
+
     filename = Path(url).name or "document"
     return extract_text_from_bytes(filename, content_type, data)
