@@ -225,9 +225,11 @@ async def fetch_url_text(url: str) -> str:
             ) from exc
         if response.status_code in _BLOCKED_STATUSES:
             raise ValueError(
-                "This website blocks automated access. Here's what you can do:\n"
-                "• Use the 'Paste text' tab and copy the policy from your browser\n"
-                "• Use the 'Upload file' tab if you can save the page as PDF/HTML"
+                "This website blocks automated access. "
+                "Try these instead: for Google/Gmail use policies.google.com/privacy, "
+                "for Apple use apple.com/legal/privacy, "
+                "for Meta/Facebook use facebook.com/privacy/policy "
+                "— or paste the policy text directly."
             )
         try:
             response.raise_for_status()
