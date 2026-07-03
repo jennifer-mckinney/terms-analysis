@@ -582,6 +582,140 @@ def run_analysis() -> None:
         st.rerun()
 
 
+def simplify_finding_for_context(finding: dict, context_selections: list[str]) -> dict:
+    """Simplify finding explanation for non-legal audiences, especially for child context.
+
+    Takes a finding dict and returns a modified copy with a simplified explanation
+    field if "for_child" is in the context selections. Other contexts show the
+    original explanation. The simplified version uses kindergarten-teacher-level
+    language: simple words, storytelling tone, explains why, and avoids acronyms
+    without explanation.
+
+    Args:
+        finding: A finding dict with 'explanation' and other fields.
+        context_selections: List of selected context values (e.g., ["for_child"]).
+
+    Returns:
+        A copy of the finding dict, potentially with a simplified explanation.
+    """
+    if not context_selections or "for_child" not in context_selections:
+        # Return finding unchanged for other contexts.
+        return finding
+
+    finding_copy = finding.copy()
+    explanation = str(finding.get("explanation") or "")
+
+    # Translation map: patterns to simple-english alternatives.
+    # Each tuple is (pattern_to_match, simple_replacement).
+    # Patterns are checked in order; first match wins.
+    replacements = [
+        # COPPA + FERPA
+        (
+            r"(?i)Special protections required for children's personal information under COPPA \(under 13\) and FERPA",
+            "There's a law that says websites have to be extra careful with kids' information (kids under 13). They need special permission before collecting things like age or location.",
+        ),
+        (
+            r"(?i)Special protections required for children's personal information under COPPA",
+            "There's a law that says websites have to be extra careful with kids' information (kids under 13). They need special permission before collecting things like age or location.",
+        ),
+        # AI/ML training disclosure + opt-out
+        (
+            r"(?i)Using user data to train AI/ML models requires clear disclosure and (?:in many jurisdictions )?an? opt-out right",
+            "This service might teach its AI system using your information. The law says they should tell you if they do this, and let you say 'no thanks'.",
+        ),
+        (
+            r"(?i)Using user data to train AI/ML models requires clear disclosure",
+            "This service might teach its AI system using your information. The law says they should tell you if they do this.",
+        ),
+        # Generic children's data
+        (
+            r"(?i)Children's data requires special protections and disclosures",
+            "Kids' information needs extra safety - it's like keeping their data in a special lock.",
+        ),
+        # Marketing/tracking purposes
+        (
+            r"(?i)(?:Using|Tracking|Collecting) (?:user|personal) data for (?:marketing|advertising|analytics) purposes",
+            "This company watches what you do so they can show you better ads.",
+        ),
+        # Retention/storage patterns
+        (
+            r"(?i)(?:Personal|user) data (?:may be )?(?:retained|stored|kept) for [^.]*(?:marketing|business|commercial) purposes",
+            "This company keeps your information to use it for ads and other business reasons.",
+        ),
+        # Third-party sharing
+        (
+            r"(?i)(?:Personal|user) data (?:may be |is )?(?:shared|disclosed|provided) to third.?parties for [^.]*(?:marketing|advertising|commercial) purposes",
+            "This company shares your information with other companies so they can send you ads too.",
+        ),
+        (
+            r"(?i)(?:Personal|user) data (?:may be |is )?(?:shared|disclosed|provided) to third.?parties",
+            "This company shares your information with other companies.",
+        ),
+        # Profiling/behavioral tracking
+        (
+            r"(?i)(?:behavioral|user|activity|usage) profiling (?:for )?(?:targeting|analytics|personalization)",
+            "This service tracks what you do to figure out what you like.",
+        ),
+        # Location tracking
+        (
+            r"(?i)(?:location|geolocation) data (?:is )?(?:collected|tracked|monitored)",
+            "This service can see where you are.",
+        ),
+        # Biometric data
+        (
+            r"(?i)(?:facial recognition|biometric|face scan|fingerprint) (?:data )?(?:collection|processing|use)",
+            "This service can recognize your face or fingerprint.",
+        ),
+        # Deletion/right to be forgotten
+        (
+            r"(?i)(?:right to deletion|right to be forgotten|erasure right) may (?:be limited|be restricted|not apply)",
+            "You might not be able to ask them to delete your information.",
+        ),
+        (
+            r"(?i)(?:right to deletion|right to be forgotten|erasure right)",
+            "You can ask them to delete your information.",
+        ),
+        # Automated decision-making
+        (
+            r"(?i)automated decision.?making (?:based|relying) on (?:personal|user) data",
+            "A computer decides things about you based on your information.",
+        ),
+        # Opt-in vs opt-out consent
+        (
+            r"(?i)(?:opt.?out|negative) consent",
+            "They start doing something unless you say stop.",
+        ),
+        (
+            r"(?i)(?:opt.?in|affirmative|explicit) consent",
+            "They ask permission first before doing something.",
+        ),
+        # Minors/children in general
+        (
+            r"(?i)minors? (?:under |aged? )?(?:\d+)",
+            "kids under that age",
+        ),
+    ]
+
+    for pattern, replacement in replacements:
+        explanation = re.sub(pattern, replacement, explanation)
+
+    # Fallback: if explanation still looks very legal, add a note.
+    # (Only if none of the patterns matched.)
+    if explanation == str(finding.get("explanation") or ""):
+        # Pattern didn't match. Check if it still contains legal jargon markers.
+        jargon_markers = ["GDPR", "CCPA", "regulation", "legislation", "statute", "compliance"]
+        if any(marker in explanation for marker in jargon_markers):
+            # Keep original but try one more generic simplification.
+            explanation = re.sub(
+                r"(?i)(?:This|The) (?:service|company|website)",
+                "This service",
+                explanation,
+            )
+
+    finding_copy["explanation"] = explanation
+    return finding_copy
+
+
 # ── Results view ──────────────────────────────────────────────────────────────
 
 
@@ -1015,7 +1149,9 @@ def render_results() -> None:
             )
             continue
         for i, f in enumerate(items, 1):
-            plain = f.get("explanation") or "See legal details below."
+            # Simplify explanation if "for_child" context is selected.
+            simplified = simplify_finding_for_context(f, st.session_state.context_selections)
+            plain = simplified.get("explanation") or "See legal details below."
             st.markdown(
                 f'<div class="pr-top-thing"><div class="pr-thing-num">{i}</div><div>{html.escape(plain)}</div></div>',
                 unsafe_allow_html=True,
@@ -1024,21 +1160,23 @@ def render_results() -> None:
     # Legal details — collapsed by default (decision #7).
     with st.expander(f"Legal details / {total} issues"):
         for f in findings:
-            sev = f.get("severity", "Low")
+            # Simplify explanation if "for_child" context is selected.
+            simplified = simplify_finding_for_context(f, st.session_state.context_selections)
+            sev = simplified.get("severity", "Low")
             sev_class = f"pr-sev-{sev.lower()}"
-            cat = html.escape(str(f.get("category", "-")))
-            irp = f.get("irp_score")
+            cat = html.escape(str(simplified.get("category", "-")))
+            irp = simplified.get("irp_score")
             irp_str = f"IRP {irp:.2f}" if isinstance(irp, (int, float)) else "-"
-            conf_pct = int((f.get("confidence") or 0) * 100)
-            excerpt = html.escape(str(f.get("excerpt", "")))
-            explanation = html.escape(str(f.get("explanation", "")))
-            evidence = f.get("evidence") or {}
+            conf_pct = int((simplified.get("confidence") or 0) * 100)
+            excerpt = html.escape(str(simplified.get("excerpt", "")))
+            explanation = html.escape(str(simplified.get("explanation", "")))
+            evidence = simplified.get("evidence") or {}
             basis = " / ".join(
                 html.escape(str(b)) for b in (evidence.get("legal_basis") or [])
             )
-            impact = f.get("impact", 0) or 0
-            likelihood = f.get("likelihood", 0) or 0
-            safeguard = f.get("safeguard_score", 0) or 0
+            impact = simplified.get("impact", 0) or 0
+            likelihood = simplified.get("likelihood", 0) or 0
+            safeguard = simplified.get("safeguard_score", 0) or 0
             lstart = evidence.get("line_start")
             lend = evidence.get("line_end")
             line_ref = f"Lines {lstart} to {lend}" if lstart and lend else ""

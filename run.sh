@@ -109,4 +109,4 @@ trap cleanup EXIT
 # Wait on both so the script (and thus the EXIT trap) stays alive until
 # one exits or the script is signaled — this ensures cleanup() actually runs
 # for both processes even under a non-interactive SIGTERM, not just Ctrl+C.
-wait -n "$BACKEND_PID" "$STREAMLIT_PID"
+wait "$BACKEND_PID" "$STREAMLIT_PID" 2>/dev/null || true
