@@ -13,6 +13,7 @@ Design patterns applied:
 """
 from __future__ import annotations
 
+import os
 import re
 import streamlit as st
 import requests
@@ -180,7 +181,7 @@ st.markdown("""
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-API_BASE = "http://localhost:8000"
+API_BASE = os.environ.get("API_BASE_URL", "http://localhost:9000")
 
 JURISDICTIONS = {
     "US-CA":   "California — CCPA / CPRA",
@@ -373,7 +374,7 @@ def analyze_document(
         return None
 
     except requests.exceptions.ConnectionError:
-        st.error("Unable to reach the analysis service on localhost:8000. Start the backend first.")
+        st.error(f"Unable to reach the analysis service at {API_BASE}. Start the backend first.")
         return None
     except Exception as exc:
         st.error(f"Unexpected error: {exc}")
