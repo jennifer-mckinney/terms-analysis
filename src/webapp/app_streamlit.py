@@ -184,17 +184,36 @@ st.markdown("""
 API_BASE = os.environ.get("API_BASE_URL", "http://localhost:9000")
 
 JURISDICTIONS = {
-    "US-CA":   "California — CCPA / CPRA",
-    "GDPR":    "European Union — GDPR",
-    "US-NY":   "New York — SHIELD Act",
-    "US-VA":   "Virginia — VCDPA",
-    "US-CO":   "Colorado — CPA",
-    "US-CT":   "Connecticut — CTDPA",
-    "US-TX":   "Texas — TDPSA",
-    "US-FED":  "United States — Federal",
-    "UK-GDPR": "United Kingdom — UK GDPR",
-    "PIPEDA":  "Canada — PIPEDA / Quebec Law 25",
+    "US-FED":    "United States — Federal (COPPA, HIPAA, GLBA, FTC §5, CAN-SPAM)",
+    "US-CA":     "California — CCPA / CPRA",
+    "US-TX":     "Texas — TDPSA",
+    "US-VA":     "Virginia — VCDPA",
+    "US-CO":     "Colorado — CPA + AI Act SB 205",
+    "US-CT":     "Connecticut — CTDPA",
+    "US-IL":     "Illinois — BIPA + AEIA",
+    "US-NY":     "New York — SHIELD Act",
+    "US-NJ":     "New Jersey — NJDPA",
+    "US-MN":     "Minnesota — MCDPA",
+    "US-OR":     "Oregon — OCPA",
+    "GDPR":      "European Union — GDPR",
+    "UK-GDPR":   "United Kingdom — UK GDPR + DPA 2018",
+    "LGPD":      "Brazil — LGPD",
+    "PIPEDA":    "Canada — PIPEDA",
+    "CA-QC":     "Quebec — Law 25",
+    "POPIA":     "South Africa — POPIA",
+    "PDPA-KE":   "Kenya — PDPA 2019",
+    "DPDP":      "India — DPDP Act 2023",
+    "APPI":      "Japan — APPI",
+    "PIPA":      "South Korea — PIPA",
+    "APP":       "Australia — Privacy Act / APPs",
+    "PDPA-TH":   "Thailand — PDPA",
+    "NDPR":      "Nigeria — NDPR",
+    "ICCPR-17":  "UN ICCPR Article 17",
+    "COE-108":   "Council of Europe — Convention 108+",
     "EU-AI-ACT": "EU AI Act",
+    "COE-AI-225": "Council of Europe — CETS 225 (AI Framework Convention)",
+    "OECD-AI":   "OECD AI Principles",
+    "UNESCO-AI": "UNESCO Recommendation on Ethics of AI",
 }
 
 INDUSTRIES = {
@@ -330,21 +349,22 @@ def analyze_document(
     url: str | None = None,
     file=None,
     mode: str = "quick",
-    jurisdiction: str = "US-CA",
+    jurisdictions: List[str] | None = None,
     industry: str = "General",
 ) -> Dict | None:
+    jurisdictions = jurisdictions or ["US-CA", "GDPR"]
     try:
         if file is not None:
             resp = requests.post(
                 f"{API_BASE}/analyze/file",
                 files={"file": file},
-                data={"mode": mode, "jurisdictions": jurisdiction, "industry": industry},
+                data={"mode": mode, "jurisdictions": ",".join(jurisdictions), "industry": industry},
                 timeout=400,
             )
         elif url:
             resp = requests.post(
                 f"{API_BASE}/analyze/url",
-                json={"url": url, "mode": mode, "jurisdictions": [jurisdiction], "industry": industry},
+                json={"url": url, "mode": mode, "jurisdictions": jurisdictions, "industry": industry},
                 timeout=400,
             )
         else:
@@ -353,7 +373,7 @@ def analyze_document(
                 json={
                     "text": text,
                     "mode": mode,
-                    "jurisdictions": [jurisdiction],
+                    "jurisdictions": jurisdictions,
                     "industry": industry,
                 },
                 timeout=400,
@@ -579,10 +599,20 @@ def main() -> None:
             col_j, col_i = st.columns(2)
 
             with col_j:
-                jurisdiction = st.selectbox(
-                    "Jurisdiction",
+                st.markdown("Jurisdictions")
+                if "jurisdiction_select" not in st.session_state:
+                    st.session_state.jurisdiction_select = ["US-CA", "GDPR"]
+                bcol1, bcol2 = st.columns(2)
+                if bcol1.button("Select all", use_container_width=True):
+                    st.session_state.jurisdiction_select = list(JURISDICTIONS.keys())
+                if bcol2.button("Clear all", use_container_width=True):
+                    st.session_state.jurisdiction_select = []
+                jurisdictions = st.multiselect(
+                    "Jurisdictions",
                     options=list(JURISDICTIONS.keys()),
-                    format_func=lambda x: JURISDICTIONS[x],
+                    format_func=lambda x: f"{x} — {JURISDICTIONS[x]}",
+                    label_visibility="collapsed",
+                    key="jurisdiction_select",
                 )
             with col_i:
                 industry = st.selectbox(
@@ -613,12 +643,14 @@ def main() -> None:
                 st.warning("Provide a document via one of the three input methods above.")
             else:
                 with st.spinner("Analyzing — this may take a few minutes."):
+                    if not jurisdictions:
+                        st.info("Using default jurisdictions (US-CA, GDPR).")
                     result = analyze_document(
                         text=text_input or None,
                         url=url_input or None,
                         file=file_input or None,
                         mode=mode,
-                        jurisdiction=jurisdiction,
+                        jurisdictions=jurisdictions or ["US-CA", "GDPR"],
                         industry=industry,
                     )
                     if result:

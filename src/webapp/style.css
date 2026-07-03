@@ -1089,6 +1089,30 @@ select.form-control {
   margin-top: var(--space-12);
 }
 
+.jurisdiction-actions {
+  display: flex;
+  gap: var(--space-8);
+  margin-top: var(--space-8);
+  margin-bottom: var(--space-8);
+}
+
+.jurisdiction-list {
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-base);
+  padding: var(--space-8) var(--space-12);
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding: 4px 0;
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+}
+
 .mode-option {
   cursor: pointer;
 }

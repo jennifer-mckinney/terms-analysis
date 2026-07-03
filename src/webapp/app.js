@@ -485,6 +485,24 @@ function setupDocumentReview() {
     setupFileUpload();
     setupAnalyzeButton();
     setupDocumentTextCounter();
+    setupJurisdictionBulkActions();
+}
+
+function setupJurisdictionBulkActions() {
+    const selectAllBtn = document.getElementById('selectAllJurisdictions');
+    const clearAllBtn = document.getElementById('clearAllJurisdictions');
+    const checkboxes = () => document.querySelectorAll('input[name="jurisdiction"]');
+
+    if (selectAllBtn) {
+        selectAllBtn.addEventListener('click', () => {
+            checkboxes().forEach(cb => { cb.checked = true; });
+        });
+    }
+    if (clearAllBtn) {
+        clearAllBtn.addEventListener('click', () => {
+            checkboxes().forEach(cb => { cb.checked = false; });
+        });
+    }
 }
 
 function setupDocumentTextCounter() {
@@ -571,8 +589,12 @@ async function startAnalysis() {
     const documentText = document.getElementById('documentText').value;
     const fileInput = document.getElementById('fileInput');
     const analysisMode = document.querySelector('input[name="analysisMode"]:checked').value;
-    const jurisdictions = Array.from(document.querySelectorAll('input[name="jurisdiction"]:checked'))
+    let jurisdictions = Array.from(document.querySelectorAll('input[name="jurisdiction"]:checked'))
         .map(input => input.value);
+    if (jurisdictions.length === 0) {
+        jurisdictions = ['US-CA', 'GDPR'];
+        showToast('Using default jurisdictions (US-CA, GDPR)', 'info');
+    }
 
     // Validate input
     if (!documentUrl && !documentText && fileInput.files.length === 0) {
