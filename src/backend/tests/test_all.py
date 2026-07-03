@@ -902,7 +902,12 @@ def test_doctype_privacy_policy_boosts_sale_share():
 
 
 def test_doctype_tos_boosts_liability():
-    f = _make_finding("Liability Limitation", "Medium")
+    # Uses the canonical category name "Liability" (schemas.CATEGORIES).
+    # Historical test used "Liability Limitation", which was matched only via
+    # the buggy substring lookup in _bump_severity. Both audit findings
+    # LE-012 (exact-match refactor) and LE-013 (canonical boost keys)
+    # required updating this test to the canonical category.
+    f = _make_finding("Liability", "Medium")
     result = _apply_doctype_weighting([f], "Terms of Service")
     assert result[0].severity == "High"
 

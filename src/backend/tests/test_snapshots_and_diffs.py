@@ -9,7 +9,7 @@ import pytest
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from app.models import PolicySnapshot, PolicyWatch
+from app.models import PolicySnapshot, WatchlistItem
 from app.services.diffing import content_hash, diff_tokens, tokenize_text
 
 
@@ -172,53 +172,50 @@ class TestPolicySnapshotModel:
         assert existing.id == snap1.id
 
 
-class TestPolicyWatchModel:
-    """Test PolicyWatch database model."""
-    
-    def test_create_watch(self, db_session):
-        """Create a policy watch."""
-        watch = PolicyWatch(
+class TestWatchlistItemMergedFields:
+    """OE-003 (2026-07-03): ``PolicyWatch`` was merged into ``WatchlistItem``.
+
+    These tests replace the deleted ``TestPolicyWatchModel`` class. They assert
+    the fields formerly on ``PolicyWatch`` now live on ``WatchlistItem`` with
+    the right types (in particular ``enabled`` is a real ``Boolean``, not the
+    old string ``"true"`` — LE-010 fix).
+    """
+
+    def test_watchlist_item_has_merged_fields(self, db_session):
+        item = WatchlistItem(
             id=str(uuid4()),
-            url="https://example.com/tos",
+            vendor="example.com",
+            source_url="https://example.com/tos",
             user_id="user123",
             check_frequency=86400,
-            enabled="true",
+            enabled=True,
+            notes="added from CLI test",
             created_at=datetime.now(timezone.utc),
         )
-        db_session.add(watch)
+        db_session.add(item)
         db_session.commit()
-        
-        retrieved = db_session.query(PolicyWatch).filter_by(id=watch.id).first()
+
+        retrieved = db_session.query(WatchlistItem).filter_by(id=item.id).first()
         assert retrieved is not None
-        assert retrieved.url == "https://example.com/tos"
+        assert retrieved.source_url == "https://example.com/tos"
         assert retrieved.check_frequency == 86400
-    
-    def test_watch_url_uniqueness(self, db_session):
-        """URL must be unique in policy watches."""
-        url = "https://example.com/privacy"
-        watch1 = PolicyWatch(
+        # ``enabled`` is stored and read back as a real bool, not a string.
+        assert retrieved.enabled is True
+        assert isinstance(retrieved.enabled, bool)
+        assert retrieved.user_id == "user123"
+        assert retrieved.notes == "added from CLI test"
+
+    def test_watchlist_item_enabled_false_is_boolean(self, db_session):
+        item = WatchlistItem(
             id=str(uuid4()),
-            url=url,
-            check_frequency=86400,
-            enabled="true",
-            created_at=datetime.now(timezone.utc),
+            vendor="example.com",
+            source_url="https://example.com/paused",
+            enabled=False,
         )
-        db_session.add(watch1)
+        db_session.add(item)
         db_session.commit()
-        
-        # Try to add same URL again
-        watch2 = PolicyWatch(
-            id=str(uuid4()),
-            url=url,
-            check_frequency=86400,
-            enabled="true",
-            created_at=datetime.now(timezone.utc),
-        )
-        db_session.add(watch2)
-        
-        # Should fail due to unique constraint
-        with pytest.raises(Exception):
-            db_session.commit()
+        retrieved = db_session.query(WatchlistItem).filter_by(id=item.id).first()
+        assert retrieved.enabled is False
 
 
 class TestSnapshotEndpoints:
@@ -367,211 +364,106 @@ class TestDiffEndpoint:
         assert response.status_code == 404
 
 
-class TestPolicyWatchEndpoints:
-    """Test policy watch API endpoints."""
-    
-    def test_create_policy_watch(self, app_client):
-        """Test POST /policy-watch endpoint."""
-        payload = {
-            "url": "https://example.com/privacy",
-            "user_id": "user123",
-            "check_frequency": 86400,
-        }
-        response = app_client.post("/policy-watch", json=payload)
-        assert response.status_code == 200
-        data = response.json()
-        assert data["url"] == "https://example.com/privacy"
-        assert data["check_frequency"] == 86400
-    
-    def test_create_duplicate_watch(self, app_client, db_session):
-        """Test creating duplicate policy watch fails."""
-        url = "https://example.com/privacy"
-        watch = PolicyWatch(
-            id=str(uuid4()),
-            url=url,
-            check_frequency=86400,
-            enabled="true",
-            created_at=datetime.now(timezone.utc),
-        )
-        db_session.add(watch)
-        db_session.commit()
-        
-        payload = {
-            "url": url,
-            "check_frequency": 86400,
-        }
-        response = app_client.post("/policy-watch", json=payload)
-        assert response.status_code == 409
-    
-    def test_list_policy_watches(self, app_client, db_session):
-        """Test GET /policy-watch endpoint."""
-        # Create test watches
-        for i in range(3):
-            watch = PolicyWatch(
-                id=str(uuid4()),
-                url=f"https://example.com/policy{i}",
-                check_frequency=86400,
-                enabled="true",
-                created_at=datetime.now(timezone.utc),
-            )
-            db_session.add(watch)
-        db_session.commit()
-        
-        response = app_client.get("/policy-watch")
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data) == 3
-    
-    def test_delete_policy_watch(self, app_client, db_session):
-        """Test DELETE /policy-watch/{watch_id} endpoint."""
-        watch = PolicyWatch(
-            id=str(uuid4()),
-            url="https://example.com/privacy",
-            check_frequency=86400,
-            enabled="true",
-            created_at=datetime.now(timezone.utc),
-        )
-        db_session.add(watch)
-        db_session.commit()
-        
-        response = app_client.delete(f"/policy-watch/{watch.id}")
-        assert response.status_code == 200
-        
-        # Verify it's deleted
-        response = app_client.get("/policy-watch")
-        data = response.json()
-        assert len(data) == 0
-    
-    def test_delete_nonexistent_watch(self, app_client):
-        """Test deleting non-existent watch."""
-        response = app_client.delete("/policy-watch/nonexistent")
-        assert response.status_code == 404
+class TestPolicyWatchDeprecatedEndpoints:
+    """OE-003: ``/policy-watch/*`` endpoints are deprecated shims.
 
+    Replaces the deleted ``TestPolicyWatchEndpoints`` class. The migration
+    landed in main.py as 308 redirects for CRUD paths and a 410 Gone for the
+    snapshot subpath — see the design note above the shim handlers in main.py.
+    """
 
-class TestCaptureWatchSnapshot:
-    """Test snapshot capture for policy watches."""
-    
-    def test_capture_watch_snapshot(self, app_client, db_session, monkeypatch):
-        """Test POST /policy-watch/{watch_id}/snapshot endpoint."""
-        # Mock fetch_url_text
-        async def mock_fetch_url_text(url):
-            return "Test policy content"
-        
-        import app.main
-        import app.services.ingest
-        original_fetch = app.services.ingest.fetch_url_text
-        
-        # Patch both locations
-        app.services.ingest.fetch_url_text = mock_fetch_url_text
-        app.main.fetch_url_text = mock_fetch_url_text
-        
-        try:
-            # Create watch
-            watch = PolicyWatch(
-                id=str(uuid4()),
-                url="https://example.com/privacy",
-                check_frequency=86400,
-                enabled="true",
-                created_at=datetime.now(timezone.utc),
-            )
-            db_session.add(watch)
-            db_session.commit()
-            
-            response = app_client.post(f"/policy-watch/{watch.id}/snapshot")
-            assert response.status_code == 200
-            data = response.json()
-            assert data["url"] == "https://example.com/privacy"
-            assert data["captured_at"]
-        finally:
-            app.services.ingest.fetch_url_text = original_fetch
-            app.main.fetch_url_text = original_fetch
-    
-    def test_capture_watch_snapshot_updates_last_check(self, app_client, db_session, monkeypatch):
-        """Test that capturing snapshot updates last_check time."""
-        async def mock_fetch_url_text(url):
-            return "Test policy content"
-        
-        import app.main
-        import app.services.ingest
-        original_fetch = app.services.ingest.fetch_url_text
-        
-        app.services.ingest.fetch_url_text = mock_fetch_url_text
-        app.main.fetch_url_text = mock_fetch_url_text
-        
-        try:
-            watch = PolicyWatch(
-                id=str(uuid4()),
-                url="https://example.com/privacy",
-                check_frequency=86400,
-                enabled="true",
-                created_at=datetime.now(timezone.utc),
-            )
-            db_session.add(watch)
-            db_session.commit()
-            
-            app_client.post(f"/policy-watch/{watch.id}/snapshot")
-            
-            # Verify last_check was updated
-            db_session.refresh(watch)
-            assert watch.last_check is not None
-        finally:
-            app.services.ingest.fetch_url_text = original_fetch
-            app.main.fetch_url_text = original_fetch
+    def test_policy_watch_post_returns_308_redirect(self, app_client):
+        # 308 preserves method + body; do not follow redirects so we can
+        # observe the raw status.
+        response = app_client.post(
+            "/policy-watch",
+            json={"url": "https://example.com/privacy", "check_frequency": 3600},
+            follow_redirects=False,
+        )
+        assert response.status_code == 308
+        assert response.headers.get("Location") == "/watchlist"
+        assert response.headers.get("Deprecation") == "true"
+        assert response.headers.get("Sunset") == "2026-10-01"
+
+    def test_policy_watch_get_returns_308_redirect(self, app_client):
+        response = app_client.get("/policy-watch", follow_redirects=False)
+        assert response.status_code == 308
+        assert response.headers.get("Location") == "/watchlist"
+
+    def test_policy_watch_delete_returns_308_redirect(self, app_client):
+        response = app_client.delete(
+            "/policy-watch/some-id", follow_redirects=False
+        )
+        assert response.status_code == 308
+        assert response.headers.get("Location") == "/watchlist/some-id"
+        assert response.headers.get("Deprecation") == "true"
+
+    def test_policy_watch_snapshot_returns_410_gone(self, app_client):
+        response = app_client.post("/policy-watch/some-id/snapshot")
+        assert response.status_code == 410
+        body = response.json()
+        assert "successor" in body
+        assert body["successor"] == "/watchlist/{id}/refresh"
+        assert response.headers.get("Deprecation") == "true"
 
 
 class TestIntegration:
-    """Integration tests for the full snapshot and diff workflow."""
-    
+    """Integration tests for the full snapshot and diff workflow.
+
+    Rewritten for OE-003: the workflow now runs against the merged
+    ``/watchlist`` endpoint set (``POST /watchlist`` + ``POST /snapshots`` +
+    ``GET /diff``) instead of the deprecated ``/policy-watch/*`` endpoints.
+    """
+
     def test_full_workflow(self, app_client, db_session, monkeypatch):
-        """Test complete workflow: create watch, capture snapshots, compare diffs."""
+        """Create watchlist item, capture two snapshots, compare diffs."""
         call_count = [0]
-        
+
         async def mock_fetch_url_text(url):
-            # Return different content on subsequent calls
             call_count[0] += 1
             if call_count[0] == 1:
                 return "Original privacy policy content here."
-            else:
-                return "Original privacy policy content here. Updated section added."
-        
+            return "Original privacy policy content here. Updated section added."
+
         import app.main
         import app.services.ingest
         original_fetch = app.services.ingest.fetch_url_text
-        
+
         app.services.ingest.fetch_url_text = mock_fetch_url_text
         app.main.fetch_url_text = mock_fetch_url_text
-        
+
         try:
-            # 1. Create policy watch
+            # 1. Create watchlist item with the OE-003 merged optional fields.
             watch_payload = {
-                "url": "https://example.com/privacy",
+                "vendor": "example.com",
+                "source_url": "https://example.com/privacy",
                 "user_id": "user123",
                 "check_frequency": 86400,
             }
-            resp = app_client.post("/policy-watch", json=watch_payload)
+            resp = app_client.post("/watchlist", json=watch_payload)
             assert resp.status_code == 200
-            watch_data = resp.json()
-            watch_id = watch_data["id"]
-            
-            # 2. Capture first snapshot
-            resp = app_client.post(f"/policy-watch/{watch_id}/snapshot")
+            body = resp.json()
+            assert body["check_frequency"] == 86400
+            assert body["user_id"] == "user123"
+
+            # 2. Capture first snapshot via the general /snapshots endpoint.
+            resp = app_client.post(
+                "/snapshots", params={"url": "https://example.com/privacy"}
+            )
             assert resp.status_code == 200
-            snap1_data = resp.json()
-            snap1_id = snap1_data["id"]
-            
-            # 3. Capture second snapshot (with different content)
-            resp = app_client.post(f"/policy-watch/{watch_id}/snapshot")
-            # May be 200 (new snapshot) or 409 (duplicate) - we'll check for dedup
+            snap1_id = resp.json()["id"]
+
+            # 3. Second snapshot with different content.
+            resp = app_client.post(
+                "/snapshots", params={"url": "https://example.com/privacy"}
+            )
             if resp.status_code == 200:
-                snap2_data = resp.json()
-                snap2_id = snap2_data["id"]
-            
-                # 4. Compare the two snapshots
+                snap2_id = resp.json()["id"]
+                # 4. Compare.
                 resp = app_client.get(f"/diff/{snap1_id}/{snap2_id}")
                 assert resp.status_code == 200
                 diff_data = resp.json()
                 assert diff_data["url"] == "https://example.com/privacy"
-                # Should have changes (added tokens)
                 assert diff_data["change_count"] > 0
         finally:
             app.services.ingest.fetch_url_text = original_fetch

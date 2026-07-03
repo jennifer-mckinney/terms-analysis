@@ -197,7 +197,10 @@ _FETCH_HEADERS = {
 async def fetch_url_text(url: str) -> str:
     _validate_url(url)
 
-    timeout = settings.request_timeout_s
+    # URL fetch uses its own budget — distinct from the LLM inference timeout
+    # so a hung remote host cannot starve LocalAI callers. See ``config.py::
+    # url_fetch_timeout_s``.
+    timeout = settings.url_fetch_timeout_s
     max_bytes = settings.max_upload_bytes
 
     async def _on_request(request: httpx.Request) -> None:

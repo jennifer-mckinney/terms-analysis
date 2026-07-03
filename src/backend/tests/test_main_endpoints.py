@@ -36,7 +36,6 @@ import pytest
 from app.models import (
     Analysis as AnalysisModel,
     PolicySnapshot,
-    PolicyWatch,
     ReviewItem,
     WatchlistItem,
 )
@@ -691,205 +690,167 @@ class TestUpdateReview:
 
 
 # ===========================================================================
-# POST /policy-watch
+# OE-003 (2026-07-03): the ``/policy-watch/*`` endpoint family was deprecated.
+# Its handlers now return 308 redirects (CRUD paths) or 410 Gone (snapshot).
+# The rewritten tests below replace ``TestCreatePolicyWatch``,
+# ``TestListPolicyWatches``, ``TestDeletePolicyWatch``, and
+# ``TestCaptureWatchSnapshot`` — see main.py for the design note.
 # ===========================================================================
 
-class TestCreatePolicyWatch:
-    def test_main_create_policy_watch_creates_watch(self, app_client):
+
+class TestPolicyWatchDeprecationShim:
+    """Every ``/policy-watch/*`` route must signal deprecation."""
+
+    def test_main_policy_watch_post_returns_308_with_headers(self, app_client):
         response = app_client.post(
             "/policy-watch",
             json={"url": "https://example.com/privacy", "check_frequency": 3600},
+            follow_redirects=False,
+        )
+        assert response.status_code == 308
+        assert response.headers.get("Location") == "/watchlist"
+        assert response.headers.get("Deprecation") == "true"
+        assert response.headers.get("Sunset") == "2026-10-01"
+
+    def test_main_policy_watch_get_returns_308(self, app_client):
+        response = app_client.get("/policy-watch", follow_redirects=False)
+        assert response.status_code == 308
+        assert response.headers.get("Location") == "/watchlist"
+
+    def test_main_policy_watch_delete_returns_308(self, app_client):
+        response = app_client.delete(
+            "/policy-watch/some-id", follow_redirects=False
+        )
+        assert response.status_code == 308
+        assert response.headers.get("Location") == "/watchlist/some-id"
+
+    def test_main_policy_watch_snapshot_returns_410(self, app_client):
+        response = app_client.post("/policy-watch/some-id/snapshot")
+        assert response.status_code == 410
+        body = response.json()
+        assert body.get("successor") == "/watchlist/{id}/refresh"
+
+
+# ===========================================================================
+# POST /watchlist — extended with the OE-003 merged fields
+# ===========================================================================
+
+
+class TestCreateWatchlistWithMergedFields:
+    """Assertions for the merged ``WatchlistCreateRequest`` shape (OE-003)."""
+
+    def test_main_add_watchlist_accepts_check_frequency(self, app_client):
+        response = app_client.post(
+            "/watchlist",
+            json={
+                "vendor": "example.com",
+                "source_url": "https://example.com/privacy",
+                "check_frequency": 3600,
+            },
         )
         assert response.status_code == 200
         body = response.json()
-        assert body["url"] == "https://example.com/privacy"
         assert body["check_frequency"] == 3600
-        assert body["enabled"] == "true"
-        assert body["last_check"] is None
+        # next_check_at is computed from last_checked + cadence.
+        assert body.get("next_check_at") is not None
+        assert body["enabled"] is True
 
-    def test_main_create_policy_watch_with_user_id(self, app_client):
+    def test_main_add_watchlist_accepts_enabled_false(self, app_client):
         response = app_client.post(
-            "/policy-watch",
+            "/watchlist",
             json={
-                "url": "https://example.com/tos",
-                "check_frequency": 86400,
+                "vendor": "example.com",
+                "source_url": "https://example.com/paused",
+                "enabled": False,
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["enabled"] is False
+        # Disabled items should not report a next check time.
+        assert body.get("next_check_at") is None
+
+    def test_main_add_watchlist_accepts_user_id_and_notes(self, app_client):
+        response = app_client.post(
+            "/watchlist",
+            json={
+                "vendor": "example.com",
+                "source_url": "https://example.com/x",
                 "user_id": "user-123",
+                "notes": "Track for Q3 review",
             },
         )
         assert response.status_code == 200
         body = response.json()
         assert body["user_id"] == "user-123"
+        assert body["notes"] == "Track for Q3 review"
 
-    def test_main_create_policy_watch_409_for_duplicate_url(self, app_client):
-        payload = {"url": "https://dup.example.com/privacy", "check_frequency": 3600}
-        first = app_client.post("/policy-watch", json=payload)
-        assert first.status_code == 200
-
-        second = app_client.post("/policy-watch", json=payload)
-        assert second.status_code == 409
-        assert "already being watched" in second.json()["detail"]
-
-    def test_main_create_policy_watch_422_for_short_url(self, app_client):
+    def test_main_add_watchlist_rejects_check_frequency_too_low(self, app_client):
         response = app_client.post(
-            "/policy-watch",
-            json={"url": "x", "check_frequency": 3600},
+            "/watchlist",
+            json={
+                "vendor": "example.com",
+                "source_url": "https://example.com/privacy",
+                "check_frequency": 60,  # below 300s floor
+            },
         )
         assert response.status_code == 422
 
-    def test_main_create_policy_watch_422_check_frequency_too_low(self, app_client):
+    def test_main_add_watchlist_rejects_check_frequency_wrong_type(self, app_client):
         response = app_client.post(
-            "/policy-watch",
-            json={"url": "https://example.com/privacy", "check_frequency": 60},
+            "/watchlist",
+            json={
+                "vendor": "example.com",
+                "source_url": "https://example.com/privacy",
+                "check_frequency": "hourly",
+            },
         )
         assert response.status_code == 422
 
-
-# ===========================================================================
-# GET /policy-watch
-# ===========================================================================
-
-class TestListPolicyWatches:
-    def test_main_list_policy_watches_empty(self, app_client):
-        response = app_client.get("/policy-watch")
-        assert response.status_code == 200
-        assert response.json() == []
-
-    def test_main_list_policy_watches_returns_all(self, app_client, db_session):
-        for url in ["https://a.com/privacy", "https://b.com/tos"]:
-            watch = PolicyWatch(
-                id=str(uuid4()),
-                url=url,
-                check_frequency=3600,
-                enabled="true",
-                created_at=datetime.now(timezone.utc),
-            )
-            db_session.add(watch)
-        db_session.commit()
-
-        response = app_client.get("/policy-watch")
-        assert response.status_code == 200
-        assert len(response.json()) == 2
-
-
-# ===========================================================================
-# DELETE /policy-watch/{id}
-# ===========================================================================
-
-class TestDeletePolicyWatch:
-    def test_main_delete_policy_watch_removes_item(self, app_client, db_session):
-        watch = PolicyWatch(
-            id=str(uuid4()),
-            url="https://example.com/delete-me",
-            check_frequency=3600,
-            enabled="true",
-            created_at=datetime.now(timezone.utc),
+    def test_main_add_watchlist_rejects_enabled_wrong_type(self, app_client):
+        response = app_client.post(
+            "/watchlist",
+            json={
+                "vendor": "example.com",
+                "source_url": "https://example.com/privacy",
+                "enabled": "sometimes",
+            },
         )
-        db_session.add(watch)
-        db_session.commit()
+        assert response.status_code == 422
 
-        response = app_client.delete(f"/policy-watch/{watch.id}")
-        assert response.status_code == 200
-        body = response.json()
-        assert body["status"] == "deleted"
-        assert body["id"] == watch.id
-
-    def test_main_delete_policy_watch_404_for_missing(self, app_client):
-        response = app_client.delete("/policy-watch/nonexistent-watch-id")
-        assert response.status_code == 404
-        assert response.json()["detail"] == "Policy watch not found"
-
-
-# ===========================================================================
-# POST /policy-watch/{id}/snapshot
-# ===========================================================================
-
-class TestCaptureWatchSnapshot:
-    def _insert_watch(self, db_session, url: str = "https://example.com/privacy") -> PolicyWatch:
-        watch = PolicyWatch(
-            id=str(uuid4()),
-            url=url,
-            check_frequency=3600,
-            enabled="true",
-            created_at=datetime.now(timezone.utc),
+    def test_main_add_watchlist_rejects_user_id_invalid_chars(self, app_client):
+        response = app_client.post(
+            "/watchlist",
+            json={
+                "vendor": "example.com",
+                "source_url": "https://example.com/privacy",
+                "user_id": "<script>alert(1)</script>",
+            },
         )
-        db_session.add(watch)
-        db_session.commit()
-        db_session.refresh(watch)
-        return watch
+        assert response.status_code == 422
 
-    def test_main_capture_watch_snapshot_creates_new(self, app_client, db_session, monkeypatch):
-        watch = self._insert_watch(db_session)
+    def test_main_add_watchlist_rejects_user_id_too_long(self, app_client):
+        response = app_client.post(
+            "/watchlist",
+            json={
+                "vendor": "example.com",
+                "source_url": "https://example.com/privacy",
+                "user_id": "a" * 256,
+            },
+        )
+        assert response.status_code == 422
 
-        async def fake_fetch(url):
-            return "Fresh policy text for watch snapshot."
-
-        monkeypatch.setattr("app.main.fetch_url_text", fake_fetch)
-
-        response = app_client.post(f"/policy-watch/{watch.id}/snapshot")
+    def test_main_add_watchlist_backward_compat_no_optional_fields(self, app_client):
+        # Pre-OE-003 callers only sent {vendor, source_url}; that must still work.
+        response = app_client.post(
+            "/watchlist",
+            json={"vendor": "OldClient", "source_url": "https://old.example.com"},
+        )
         assert response.status_code == 200
         body = response.json()
-        assert body["url"] == watch.url
-        assert body["raw_text"] == "Fresh policy text for watch snapshot."
-
-    def test_main_capture_watch_snapshot_deduplicates(self, app_client, db_session, monkeypatch):
-        url = "https://example.com/dedup"
-        watch = self._insert_watch(db_session, url=url)
-        text = "Unchanged policy text."
-        _insert_snapshot(db_session, url=url, text=text)
-
-        async def fake_fetch(url_arg):
-            return text
-
-        monkeypatch.setattr("app.main.fetch_url_text", fake_fetch)
-
-        response = app_client.post(f"/policy-watch/{watch.id}/snapshot")
-        assert response.status_code == 200
-        body = response.json()
-        assert body["raw_text"] is None  # no duplicate raw_text returned
-
-    def test_main_capture_watch_snapshot_404_for_missing_watch(self, app_client):
-        response = app_client.post("/policy-watch/nonexistent-watch/snapshot")
-        assert response.status_code == 404
-        assert response.json()["detail"] == "Policy watch not found"
-
-    def test_main_capture_watch_snapshot_400_on_fetch_error(self, app_client, db_session, monkeypatch):
-        watch = self._insert_watch(db_session)
-
-        async def fake_fetch(url):
-            raise RuntimeError("Network unavailable")
-
-        monkeypatch.setattr("app.main.fetch_url_text", fake_fetch)
-
-        response = app_client.post(f"/policy-watch/{watch.id}/snapshot")
-        assert response.status_code == 400
-        assert "Failed to fetch the requested URL." in response.json()["detail"]
-
-    def test_main_capture_watch_snapshot_400_on_empty_content(self, app_client, db_session, monkeypatch):
-        watch = self._insert_watch(db_session)
-
-        async def fake_fetch(url):
-            return ""
-
-        monkeypatch.setattr("app.main.fetch_url_text", fake_fetch)
-
-        response = app_client.post(f"/policy-watch/{watch.id}/snapshot")
-        assert response.status_code == 400
-        assert "empty" in response.json()["detail"].lower()
-
-    def test_main_capture_watch_snapshot_updates_last_check(self, app_client, db_session, monkeypatch):
-        watch = self._insert_watch(db_session)
-        original_last_check = watch.last_check
-
-        async def fake_fetch(url):
-            return "Policy text that triggers last_check update."
-
-        monkeypatch.setattr("app.main.fetch_url_text", fake_fetch)
-
-        app_client.post(f"/policy-watch/{watch.id}/snapshot")
-
-        db_session.refresh(watch)
-        assert watch.last_check is not None
-        assert watch.last_check != original_last_check
+        assert body["vendor"] == "OldClient"
+        # Server default enabled=True.
+        assert body["enabled"] is True
 
 
 # ===========================================================================
@@ -1245,42 +1206,45 @@ class TestSecurityCorsHeaders:
         assert "PUT" not in allow
 
 
-class TestSecurityPolicyWatchUserIdValidation:
-    """POST /policy-watch must reject oversized or malformed user_id."""
+class TestSecurityWatchlistUserIdValidation:
+    """OE-003: POST /watchlist inherits ``user_id`` validation from PolicyWatch.
 
-    def test_security_policy_watch_user_id_too_long_rejected(self, app_client):
+    Replaces ``TestSecurityPolicyWatchUserIdValidation``. Same security surface,
+    same regex, same length cap — now against the merged endpoint.
+    """
+
+    def test_security_watchlist_user_id_too_long_rejected(self, app_client):
         response = app_client.post(
-            "/policy-watch",
+            "/watchlist",
             json={
-                "url": "https://example.com/privacy",
+                "vendor": "example.com",
+                "source_url": "https://example.com/privacy",
                 "user_id": "a" * 256,
-                "check_frequency": 3600,
             },
         )
         assert response.status_code == 422
 
-    def test_security_policy_watch_user_id_invalid_chars_rejected(self, app_client):
+    def test_security_watchlist_user_id_invalid_chars_rejected(self, app_client):
         response = app_client.post(
-            "/policy-watch",
+            "/watchlist",
             json={
-                "url": "https://example.com/privacy",
+                "vendor": "example.com",
+                "source_url": "https://example.com/privacy",
                 "user_id": "<script>alert(1)</script>",
-                "check_frequency": 3600,
             },
         )
         assert response.status_code == 422
 
-    def test_security_policy_watch_valid_user_id_accepted(self, app_client, db_session, monkeypatch):
+    def test_security_watchlist_valid_user_id_accepted(self, app_client, db_session, monkeypatch):
         response = app_client.post(
-            "/policy-watch",
+            "/watchlist",
             json={
-                "url": "https://example.com/privacy",
+                "vendor": "example.com",
+                "source_url": "https://example.com/privacy",
                 "user_id": "user123@example.com",
-                "check_frequency": 3600,
             },
         )
-        # May 409 if URL already watched; either 201 or 409 is correct
-        assert response.status_code in {200, 201, 409}
+        assert response.status_code in {200, 201}
 
 
 class TestSecurityBatchEndpointValidation:
@@ -1570,7 +1534,14 @@ class TestPr34MustFixRegressions:
         assert "BOGUS-JUR" not in captured["jurisdictions"]
 
     def test_analyze_file_defaults_jurisdictions_when_all_invalid(self, app_client, monkeypatch):
-        """When no valid jurisdiction survives the filter, fall back to the JSON default."""
+        """When no valid jurisdiction survives the filter, the empty list
+        propagates through — the JSON endpoints default to ``[]`` per
+        schemas.py and the global-tool contract (CLAUDE.md §Session
+        outcomes) treats empty as "no filter".
+
+        Regression per audit finding LE-002: the multipart endpoint used to
+        fall back to ``["US-CA", "GDPR"]`` here, silently double-scoping
+        every anonymous file upload."""
         captured: dict = {}
 
         async def fake_analyze(text, jurisdictions, name=None, doc_type=None,
@@ -1590,8 +1561,9 @@ class TestPr34MustFixRegressions:
             data={"jurisdictions": "NOT-REAL,ALSO-FAKE"},
         )
         assert response.status_code == 200, response.text
-        # Sensible default matching JSON endpoints.
-        assert captured["jurisdictions"] == ["US-CA", "GDPR"]
+        # Global-tool contract: empty jurisdictions == "no filter" — must
+        # NOT silently re-scope to US-CA + GDPR.
+        assert captured["jurisdictions"] == []
 
     def test_analyze_rejects_javascript_source_url(self, app_client):
         """``javascript:`` scheme is rejected by pydantic before hitting the handler.

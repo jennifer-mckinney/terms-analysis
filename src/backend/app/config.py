@@ -80,7 +80,12 @@ class Settings:
     )
     review_threshold: float = float(os.getenv("REVIEW_THRESHOLD", "0.80"))
     request_timeout_s: float = float(os.getenv("LM_REQUEST_TIMEOUT_S", "60"))
-    max_input_chars: int = int(os.getenv("MAX_INPUT_CHARS", "20000"))
+    # URL fetch timeout is deliberately separate from LLM inference timeout.
+    # A remote website that hangs must not consume the full LLM budget; keeping
+    # the two independent lets ops tune them per constraint. Audit finding
+    # tracked via PRD §5 open question resolved in Phase 2 remediation.
+    url_fetch_timeout_s: float = float(os.getenv("LM_URL_FETCH_TIMEOUT_S", "30"))
+    max_input_chars: int = int(os.getenv("MAX_INPUT_CHARS", "50000"))
     # 10 MB default upload limit (H5)
     max_upload_bytes: int = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
     allowed_origins: List[str] = field(

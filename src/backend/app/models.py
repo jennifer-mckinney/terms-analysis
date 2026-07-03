@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
 
 from .database import Base
 
@@ -50,6 +50,19 @@ class WatchlistItem(Base):
     vendor = Column(String, nullable=False)
     source_url = Column(String, nullable=True)
     status = Column(String, nullable=False, default="No Changes")
+    # OE-003 merged fields (previously on PolicyWatch — see docs/reports/user-decision-brief-2026-07-03.md).
+    # ``user_id`` is nullable because the tool remains local-single-user by default; it exists so
+    # multi-tenant deployments can attribute watches without a schema migration. ``check_frequency``
+    # is per-item seconds and is now honored by ``_watchlist_loop_async`` — previously ``PolicyWatch``
+    # carried this field but nothing consumed it (silent user-facing bug). ``enabled`` is a real
+    # Boolean here (LE-010 fix — ``PolicyWatch.enabled`` was a string ``"true"``). ``created_at`` is
+    # separate from ``last_checked`` so we can compute ``next_check_at = last_checked + check_frequency``
+    # and display "added on" independently of last poll time.
+    user_id = Column(String, nullable=True)
+    check_frequency = Column(Integer, nullable=False, default=86400)  # seconds (24 hours default)
+    enabled = Column(Boolean, nullable=False, default=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     last_checked = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     changes_since = Column(DateTime, nullable=True)
     change_count = Column(Integer, nullable=False, default=0)
@@ -72,14 +85,8 @@ class PolicySnapshot(Base):
     raw_text = Column(Text, nullable=False)
 
 
-class PolicyWatch(Base):
-    """Configuration for watching policies, tracking check frequency and user preferences."""
-    __tablename__ = "policy_watches"
-
-    id = Column(String, primary_key=True, index=True)
-    url = Column(String, nullable=False, index=True, unique=True)
-    user_id = Column(String, nullable=True)
-    check_frequency = Column(Integer, nullable=False, default=86400)  # seconds (default 24 hours)
-    last_check = Column(DateTime, nullable=True)
-    enabled = Column(String, nullable=False, default="true")
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+# OE-003: ``PolicyWatch`` was merged into ``WatchlistItem`` (2026-07-03). See the
+# decision brief in ``docs/reports/user-decision-brief-2026-07-03.md`` (A3). The
+# old ``policy_watches`` table is intentionally not declared here — deployments
+# that had rows in it should run ``scripts/migrate_policywatch_to_watchlist.py``
+# to move them into ``watchlist_items`` before dropping the legacy table.

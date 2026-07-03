@@ -106,8 +106,12 @@ class TestApplyDoctypeWeighting:
         assert result[0].severity == findings[0].severity
 
     def test_analyzer_apply_doctype_weighting_privacy_policy_boosts_sharing(self):
+        # Uses the canonical category "Data Sale / Sharing" (schemas.CATEGORIES).
+        # Historical test used lower-case "data sale / sharing", which only
+        # matched via the buggy case-insensitive substring lookup. Audit
+        # findings LE-012 (exact match) + LE-013 (canonical boost keys).
         from app.services.analyzer import _apply_doctype_weighting
-        f = _finding(category="data sale / sharing", severity="Medium")
+        f = _finding(category="Data Sale / Sharing", severity="Medium")
         result = _apply_doctype_weighting([f], "Privacy Policy")
         assert result[0].severity == "High"
 
@@ -138,8 +142,10 @@ class TestApplyIndustryEmphasis:
         assert result[0].severity == "Low"
 
     def test_analyzer_apply_industry_emphasis_healthcare_boosts_health_data(self):
+        # Uses the canonical category "Health Data" (schemas.CATEGORIES).
+        # Audit findings LE-012 + LE-013.
         from app.services.analyzer import _apply_industry_emphasis
-        f = _finding(category="health data", severity="Medium")
+        f = _finding(category="Health Data", severity="Medium")
         result = _apply_industry_emphasis([f], "Healthcare")
         assert result[0].severity == "High"
 
