@@ -1,0 +1,48 @@
+#!/bin/bash
+# P9 Enforcement: warn before pushing to main without P9 reviews
+# This hook runs BEFORE a push to detect early if P9 reviews are documented
+
+set -e
+
+# Parse refs being pushed
+while read local_ref local_sha remote_ref remote_sha; do
+    # Extract branch name from ref (refs/heads/main -> main)
+    branch=$(echo "$remote_ref" | sed 's|refs/heads/||')
+
+    if [[ "$branch" == "main" ]]; then
+        echo ""
+        echo "════════════════════════════════════════════════════════════════"
+        echo "⚠️  P9 REVIEW REMINDER: Before Pushing to Main"
+        echo "════════════════════════════════════════════════════════════════"
+        echo ""
+        echo "P9 (LIB-PRINCIPLES) Requirement:"
+        echo "  Before ANY push to main, you MUST have reviewed commits with:"
+        echo "    1. security-engineer agent (STRIDE threat-model review)"
+        echo "    2. grumpy-developer agent (code-quality review)"
+        echo ""
+        echo "Review Scope:"
+        echo "  • security-engineer: auth, secrets, user input, RLS, CSP,"
+        echo "                       dependencies, session/cookie, migrations"
+        echo "  • grumpy-developer: swallowed errors, dead code, edge cases,"
+        echo "                      tautological tests, dispatch artifacts"
+        echo ""
+        echo "Zero-Tolerance Policy:"
+        echo "  • security-engineer: ALL findings (CRITICAL→NIT) must be fixed"
+        echo "  • grumpy-developer: CRITICAL/HIGH must be fixed; MEDIUM/LOW/NIT can be follow-ups"
+        echo ""
+        echo "Documentation Format:"
+        echo "  After reviews complete, add to PR body:"
+        echo "    ✅ security-engineer: approved (no findings)"
+        echo "    ✅ grumpy-developer: approved (no blocking findings)"
+        echo ""
+        echo "Continue?"
+        read -p "  (y/n): " -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "Push cancelled by user"
+            exit 1
+        fi
+    fi
+done
+
+exit 0
