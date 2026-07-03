@@ -48,8 +48,8 @@ class TestFunctionName:
 
 ### Rules
 - **IMPORTANT**: Use `from __future__ import annotations` in every test file
-- **IMPORTANT**: Mock external dependencies (LM Studio, httpx, database) — never call real services
-- **IMPORTANT**: Use `@pytest.mark.asyncio` for async functions
+- **IMPORTANT**: Mock external dependencies (LocalAI, httpx, database) — never call real services
+- **IMPORTANT**: Use `asyncio.run(...)` inside a regular (non-`async def`) test function. Do NOT use `@pytest.mark.asyncio` — see @.claude/rules/testing.md T1 for why (marker silently no-ops as PytestUnknownMarkWarning).
 - Use descriptive test names: `test_<function>_<scenario>`
 - One assertion per test when possible
 - Use factories/fixtures from conftest.py for Finding, Evidence, etc.

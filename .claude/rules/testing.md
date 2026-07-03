@@ -65,7 +65,7 @@ rule: mock `localStorage` for theme persistence
 |--------|--------|
 | line coverage | >= 85% (baseline: 98.06%) |
 | branch coverage | >= 75% |
-| core rule categories tested | Yes (~50 categories/64 patterns; not all require individual tests) |
+| core rule categories tested | No — CRITICAL gap: only 2/50 categories individually tested; see docs/research/test-coverage-matrix.md |
 | validation penalty paths | Yes |
 | LLM failure/fallback | Yes |
 | API endpoint happy + error | Yes |

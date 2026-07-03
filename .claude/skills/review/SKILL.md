@@ -26,29 +26,20 @@ allowed-tools: Read, Bash, Grep, Glob
 | Async I/O | Any HTTP/DB call must be async |
 | Pydantic models | API request/response shapes use Pydantic |
 | Error handling | LLM failures fall back to rule-only with reduced confidence |
-| No external calls | All data stays local — only call local LM Studio |
-| Confidence clamping | Rule confidence in [0.35, 0.95] |
+| No external calls | All data stays local — only call local LocalAI |
+| Confidence clamping | Rule confidence in [0.90, 0.95] |
 | Security | No command injection, XSS, SQL injection risks |
 
 ### Test Code Checklist
 
 | Check | Rule |
 |-------|------|
-| No real services | LM Studio, httpx, database are mocked |
-| `@pytest.mark.asyncio` | Present on async test functions |
+| No real services | LocalAI, httpx, database are mocked |
+| Async tests | Use asyncio.run(...) from a regular (non-async def) test function; do NOT use @pytest.mark.asyncio (see .claude/rules/testing.md T1) |
 | Descriptive names | `test_<function>_<scenario>` pattern |
 | Assertions | Clear, specific assertions — not just `assert result` |
 | Edge cases | Empty input, boundary values, error paths covered |
 | Fixtures | Shared fixtures in conftest.py, not duplicated |
-
-### JavaScript Frontend Checklist
-
-| Check | Rule |
-|-------|------|
-| Vanilla JS | No frameworks or transpilation |
-| 4-space indent | Consistent indentation |
-| `window.*` | Global functions exposed for inline handlers |
-| XSS safety | No raw innerHTML with user input |
 
 3. **Report findings** as:
    ```

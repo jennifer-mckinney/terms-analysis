@@ -12,7 +12,7 @@ xref: [[LIB-ARCH]] [[LIB-STACK]] [[LIB-LEGAL]] [[LIB-TEST]] [[LIB-API]] [[LIB-RU
 | Stack | FastAPI backend, Streamlit UI (v2 primary, v1 legacy rollback), SQLite, LocalAI (Apertus-8B/EuroLLM-22B), numpy exhaustive search (legal-KB — not FAISS) |
 | Jurisdictions | 30 codes incl. US-CA (CCPA/CPRA), GDPR, PIPEDA, US-CO, US-CT, US-NY (full list in `schemas.py`) |
 | Risk method | IRP composite per finding: `clamp(0.5*(impact/5)+0.4*(likelihood/5)-0.3*(safeguard/5), 0, 1)`; seeded in `rules.py::_seed_irp`; requested from LLM; hybrid merge takes rule impact/likelihood + `safeguard=max(rule,llm)`; recomputed in `_compute_irp`; sort tier-first `(weight, irp_score, severity_rank)` all desc; falls back to severity weight for legacy findings |
-| Status | Beta — PR #4 + PR #5 merged; PR #34 shipped issue-19 redesign |
+| Status | Beta — PR #4, #5, #34, #35 merged |
 
 xref: [[LIB-RULES#IRP]] [[LIB-CONTEXT]]
 

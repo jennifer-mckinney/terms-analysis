@@ -10,12 +10,12 @@ allowed-tools: Bash, Read, Write, Edit, WebFetch, WebSearch, Grep, Glob
 
 | Jurisdiction | Law | Source | Status |
 |-------------|-----|--------|--------|
-| EU | GDPR | EUR-Lex (CC-BY-4.0) | Planned |
-| US-CA | CCPA/CPRA | leginfo.legislature.ca.gov (public domain) | Planned |
-| US-CO | Colorado Privacy Act | coag.gov (public domain) | Planned |
-| US-CT | CTDPA | cga.ct.gov (public domain) | Planned |
-| US-NY | SHIELD Act | nysenate.gov (public domain) | Planned |
-| Canada | PIPEDA | laws-lois.justice.gc.ca (public domain) | Planned |
+| EU | GDPR | EUR-Lex (CC-BY-4.0) | Placeholder corpus (code live) |
+| US-CA | CCPA/CPRA | leginfo.legislature.ca.gov (public domain) | Placeholder corpus (code live) |
+| US-CO | Colorado Privacy Act | coag.gov (public domain) | Placeholder corpus (code live) |
+| US-CT | CTDPA | cga.ct.gov (public domain) | Placeholder corpus (code live) |
+| US-NY | SHIELD Act | nysenate.gov (public domain) | Placeholder corpus (code live) |
+| Canada | PIPEDA | laws-lois.justice.gc.ca (public domain) | Placeholder corpus (code live) |
 
 ## Workflow
 
