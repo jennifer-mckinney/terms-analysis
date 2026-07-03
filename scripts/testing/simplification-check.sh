@@ -52,7 +52,13 @@ for _attr in [
 _st.session_state = {}
 sys.modules["streamlit"] = _st
 
-sys.path.insert(0, os.environ["WEBAPP_DIR"])
+import pathlib as _pathlib
+_webapp_dir = os.environ["WEBAPP_DIR"]
+_sentinel = _pathlib.Path(_webapp_dir) / "app_streamlit_v2.py"
+if not _sentinel.is_file():
+    print(f"ERROR: WEBAPP_DIR {_webapp_dir!r} does not contain app_streamlit_v2.py — possible path injection")
+    sys.exit(2)
+sys.path.insert(0, _webapp_dir)
 
 try:
     from app_streamlit_v2 import simplify_finding_for_context
@@ -71,11 +77,11 @@ def run_test(name: str, finding: dict, context: list[str], checks: list) -> None
     tests_run += 1
     try:
         result = simplify_finding_for_context(finding, context)
-        for desc, cond in checks:
-            if not cond(result):
-                tests_failed += 1
+        local_failures = [(desc, cond) for desc, cond in checks if not cond(result)]
+        if local_failures:
+            tests_failed += 1
+            for desc, _ in local_failures:
                 failures.append((name, f"ASSERT FAILED: {desc}"))
-                return
     except Exception as exc:
         tests_failed += 1
         failures.append((name, f"EXCEPTION: {exc}"))
@@ -201,6 +207,7 @@ run_test(
     ["for_child"],
     [
         ("raw <script> not in output (CRITICAL-3 defense-in-depth)", lambda r: "<script>" not in r["explanation"]),
+        ("escaped &lt;script&gt; present (proves html.escape ran, not just pattern-replaced)", lambda r: "&lt;script&gt;" in r["explanation"]),
     ],
 )
 

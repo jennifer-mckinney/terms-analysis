@@ -154,10 +154,10 @@ case "${scope}" in
         args=("${TESTS_DIR}/test_all.py")
         ;;
     simplification)
-        exec "${REPO_ROOT}/scripts/testing/simplification-check.sh"
+        exec "${REPO_ROOT}/scripts/testing/simplification-check.sh" "${@:2}"
         ;;
     smoke-live)
-        exec "${REPO_ROOT}/scripts/testing/smoke-test.sh"
+        exec "${REPO_ROOT}/scripts/testing/smoke-test.sh" "${@:2}"
         ;;
     *)
         echo "ERROR: unknown scope '${scope}'" >&2

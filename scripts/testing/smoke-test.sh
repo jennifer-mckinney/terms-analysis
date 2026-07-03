@@ -30,6 +30,20 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+# Guard: BASE_URL must be localhost to prevent SSRF in CI environments (security F2).
+_validate_base_url() {
+    local url="$1"
+    case "${url}" in
+        http://localhost:*|http://127.*|https://localhost:*|https://127.*)
+            return 0 ;;
+        *)
+            echo "ERROR: BASE_URL must be a localhost URL — got: ${url}" >&2
+            echo "For remote targets, connect via a local port-forward." >&2
+            exit 2 ;;
+    esac
+}
+_validate_base_url "${BASE_URL}"
+
 # Preflight: jq required
 if ! command -v jq >/dev/null 2>&1; then
     echo "ERROR: jq not found — install jq (brew install jq) to run smoke tests"
@@ -37,7 +51,7 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 # Preflight: backend reachable
-if ! curl -sf --max-time 3 "${BASE_URL}/health" >/dev/null 2>&1; then
+if ! curl -sf --max-redirs 0 --max-time 3 "${BASE_URL}/health" >/dev/null 2>&1; then
     echo "ERROR: backend not reachable at ${BASE_URL} — start with ./run.sh"
     exit 2
 fi
@@ -48,6 +62,11 @@ failures=()
 
 t0=$(python3 -c "import time; print(time.time())" 2>/dev/null || echo "0")
 
+# Global temp file for _post(); cleaned up by trap on any exit (security F3).
+_SMOKE_TMP=""
+_cleanup_tmp() { rm -f "${_SMOKE_TMP:-}"; }
+trap '_cleanup_tmp' EXIT INT TERM
+
 _pass() { tests_run=$((tests_run + 1)); }
 _fail() {
     local name="$1" reason="$2"
@@ -57,15 +76,17 @@ _fail() {
 }
 
 # Post JSON body to path; sets HTTP_CODE, prints response body.
+# body MUST be a static JSON literal — not safe for user-supplied content (security F4).
 _post() {
     local path="$1" body="$2"
     HTTP_CODE="000"
-    local tmp
-    tmp=$(mktemp)
-    HTTP_CODE=$(curl -s -o "${tmp}" -w "%{http_code}" -X POST "${BASE_URL}${path}" \
+    _SMOKE_TMP=$(mktemp -t smoke-test.XXXXXX)
+    HTTP_CODE=$(curl -s --max-redirs 0 -o "${_SMOKE_TMP}" -w "%{http_code}" \
+        -X POST "${BASE_URL}${path}" \
         -H "Content-Type: application/json" -d "${body}" --max-time 30 2>/dev/null)
-    cat "${tmp}"
-    rm -f "${tmp}"
+    cat "${_SMOKE_TMP}"
+    rm -f "${_SMOKE_TMP}"
+    _SMOKE_TMP=""
 }
 
 # ── Test 1: /analyze quick mode — mirrors test_analyze_endpoint_with_mode_parameter
@@ -127,10 +148,10 @@ fi
 
 # ── Test 6: invalid mode rejected 422 — mirrors test_batch_endpoint_exists error path
 name="test_analyze_invalid_mode_422"
-HTTP_CODE="000"
-HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X POST "${BASE_URL}/analyze" \
+HTTP_CODE=$(curl -s --max-redirs 0 -o /dev/null -w "%{http_code}" -X POST "${BASE_URL}/analyze" \
     -H "Content-Type: application/json" -d '{"text":"test","mode":"banana"}' \
-    --max-time 10 2>/dev/null || echo "000")
+    --max-time 10 2>/dev/null)
+HTTP_CODE="${HTTP_CODE:-000}"
 if [ "$HTTP_CODE" = "422" ]; then
     _pass
 else
@@ -139,10 +160,10 @@ fi
 
 # ── Test 7: empty text rejected 400 or 422
 name="test_analyze_empty_text_rejected"
-HTTP_CODE="000"
-HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X POST "${BASE_URL}/analyze" \
+HTTP_CODE=$(curl -s --max-redirs 0 -o /dev/null -w "%{http_code}" -X POST "${BASE_URL}/analyze" \
     -H "Content-Type: application/json" -d '{"text":"","jurisdictions":[]}' \
-    --max-time 10 2>/dev/null || echo "000")
+    --max-time 10 2>/dev/null)
+HTTP_CODE="${HTTP_CODE:-000}"
 if [ "$HTTP_CODE" = "400" ] || [ "$HTTP_CODE" = "422" ]; then
     _pass
 else
@@ -152,11 +173,12 @@ fi
 # ── Test 8: /analyze/batch endpoint exists — mirrors test_batch_endpoint_exists
 name="test_batch_endpoint_exists"
 HTTP_CODE="000"
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${BASE_URL}/analyze/batch" \
+HTTP_CODE=$(curl -s --max-redirs 0 -o /dev/null -w "%{http_code}" -X POST "${BASE_URL}/analyze/batch" \
     -H "Content-Type: application/json" \
     -d '{"items":[{"url":"https://example.com/privacy","name":"P","doc_type":"Privacy Policy"}],"jurisdictions":["US-CA"],"mode":"full","detect_cross_references":true}' \
-    --max-time 30 2>/dev/null || echo "000")
-if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "400" ] || [ "$HTTP_CODE" = "422" ] || [ "$HTTP_CODE" = "500" ]; then
+    --max-time 30 2>/dev/null)
+HTTP_CODE="${HTTP_CODE:-000}" 
+if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "400" ] || [ "$HTTP_CODE" = "422" ]; then
     _pass
 else
     _fail "$name" "unexpected status ${HTTP_CODE} from /analyze/batch"
@@ -164,7 +186,7 @@ fi
 
 # ── Test 9: /health returns status field
 name="test_health_status_field"
-resp=$(curl -sf "${BASE_URL}/health" --max-time 5 2>/dev/null)
+resp=$(curl -s --max-redirs 0 "${BASE_URL}/health" --max-time 5 2>/dev/null)
 if [ -z "$resp" ]; then
     _fail "$name" "/health returned empty response"
 elif ! echo "$resp" | jq -e '.status' >/dev/null 2>&1; then
