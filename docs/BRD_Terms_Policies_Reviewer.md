@@ -17,11 +17,12 @@ The AI Terms & Policies Reviewer is a privacy-focused web application that analy
 
 **Current State:** Working prototype with:
 - Multi-format document ingestion (URLs, PDFs, DOCX, RTF, HTML, text)
-- Risk scoring using IRP (Impact/Risk/Protection) methodology
-- Multi-jurisdiction compliance mapping (US, EU, UK, Canada, Australia, Brazil)
+- Severity-weighted risk scoring (Impact/Likelihood/Safeguards "IRP" formula is a planned, not-yet-implemented enhancement)
+- Multi-jurisdiction compliance mapping (30 jurisdiction codes spanning US federal/state, EU/UK, Canada, Latin America, Africa, Asia-Pacific, and AI-law frameworks)
 - Industry-specific analysis profiles
 - FastAPI backend with SQLite storage
-- Browser-based frontend (vanilla HTML/CSS/JS)
+- Streamlit primary UI + vanilla JS SPA fallback
+- Legal-knowledge-base RAG retrieval (FAISS + BM25/RRF), shipped with placeholder corpus text pending real statute ingestion
 
 ### Strategic Goals
 
@@ -110,9 +111,9 @@ The AI Terms & Policies Reviewer addresses this gap through:
 - User maintains complete data control
 
 **2. Comprehensive Risk Analysis**
-- IRP scoring methodology (Impact/Risk/Protection)
-- 9 risk categories (data sharing, automated decisions, dark patterns, retention, user rights, minors, sensitive data, unilateral changes, liability)
-- Multi-jurisdiction compliance mapping
+- Severity-weighted risk scoring (Impact/Likelihood/Safeguards "IRP" formula is a planned enhancement, not yet implemented — see Risk Scoring Methodology below)
+- 9 core risk categories (data sharing, automated decisions, dark patterns, retention, user rights, minors, sensitive data, unilateral changes, liability), expanded in practice to ~50 categories across 64 rule patterns
+- Multi-jurisdiction compliance mapping (30 jurisdiction codes)
 - Industry-specific analysis profiles
 
 **3. Accessible & Transparent**
@@ -134,7 +135,7 @@ The AI Terms & Policies Reviewer addresses this gap through:
 | Privacy-First | Yes (local) | Yes | No (cloud) |
 | Automated Analysis | Yes (AI) | No (manual) | Yes (cloud AI) |
 | Multi-Format Input | 6 formats | Text only | Limited |
-| Jurisdiction Mapping | 26 jurisdictions + AI law | No | Limited |
+| Jurisdiction Mapping | 30 jurisdictions + AI law | No | Limited |
 | Multilingual Analysis | 1,000+ languages (Apertus) | No | English/EU only |
 | AI Law Analysis | EU AI Act, CoE CETS 225, OECD-AI, UNESCO-AI | No | Limited |
 | Cost | Free/Low | Free | $10K-100K+ |
@@ -338,81 +339,75 @@ The AI Terms & Policies Reviewer addresses this gap through:
 
 **Technology Stack:**
 
-**Frontend:**
-- Plain HTML5/CSS3/JavaScript (no framework)
+**Frontend — two UIs, Streamlit primary:**
+- **Streamlit** (`src/webapp/app_streamlit.py`) — primary UI, launched by `run.sh` on port 8501
+- **Vanilla JS SPA** (`src/webapp/index.html` / `app.js` / `style.css`) — fallback UI, launched by `run.sh` on port 8000, no build step or bundler
 - 4-space indentation (HTML/JS), 2-space (CSS)
-- Located in: `src/webapp/`
-- No build step or bundler
 
 **Backend:**
 - FastAPI (Python 3.11+)
-- SQLite database (`data/terms.db`)
+- SQLite database (`data/terms_analysis.db`)
 - Located in: `src/backend/app/`
-- Services: analysis, ingestion, LLM integration
+- Services: `analyzer.py` (orchestration), `ingest.py` (document extraction + SSRF-guarded URL fetch), `rules.py` (pattern detection), `validation.py`, `diffing.py` (watchlist change detection), `embedding.py` (BM25 + dense RRF chunk selection), `legal_kb.py` (legal-KB retrieval), `localai.py` (LLM client)
 
 **AI/ML:**
-- LocalAI inference (Apertus 8B + EuroLLM 22B, local)
-- API endpoint: `http://localhost:1234/v1`
-- Model agnostic (user chooses local model)
+- LocalAI inference (Apache 2.0) routing between Apertus-8B-Instruct (world/multilingual) and EuroLLM-22B-Instruct (EU legal specialist), selected per-document by language detection
+- API endpoint: `http://localhost:8080/v1` (`LOCALAI_BASE_URL`)
+- Legal-knowledge-base retrieval (`legal_kb.py`): FAISS-backed exact search over an embedded statute corpus (`data/legal_corpus/`), fused with BM25 via Reciprocal Rank Fusion, injecting citable legal passages into the LLM prompt. Ships with placeholder corpus text pending real statute ingestion (see Appendix A note).
 
 **Document Processing:**
-- PDF, DOCX, RTF, HTML, plain text support
-- URL fetching and extraction
+- PDF, DOCX, RTF, HTML, plain text support (OCR fallback for scanned PDFs)
+- URL fetching and extraction (SSRF-protected — blocks private/loopback/link-local ranges)
 - Text normalization and preprocessing
 
 **Database Schema:**
-- Analyses table (document content, scores, findings)
-- Watchlist table (monitored documents)
-- Findings table (individual clause detections)
-- Metadata (jurisdictions, industry profiles)
+- `Analysis` — one row per analysis: document text, risk score, grade, confidence, full findings payload (`result_json`)
+- `ReviewItem` — findings flagged for human review (confidence < 0.80), linked to `Analysis`
+- `WatchlistItem` — monitored vendor URLs, change/risk-delta tracking
+- `PolicySnapshot` / `PolicyWatch` — historical policy versions and watch schedules (token-level diffing)
 
 ### API Endpoints
 
-| Method | Endpoint | Purpose |
-|--------|----------|----------|
-| POST | `/analyze` | Analyze raw text |
-| POST | `/analyze/url` | Analyze from URL |
-| POST | `/analyze/file` | Analyze uploaded file |
-| GET | `/analyses` | List all analyses |
-| GET | `/analyses/{id}` | Get specific analysis |
-| GET | `/watchlist` | List watched documents |
-| POST | `/watchlist` | Add to watchlist |
-| GET | `/exports/analysis/{id}.pdf` | Export as PDF |
+23 business endpoints plus `/health`, grouped as follows (see `src/backend/app/main.py`):
+
+| Group | Endpoints | Purpose |
+|-------|-----------|----------|
+| Analyze | `POST /analyze`, `/analyze/url`, `/analyze/file`, `/analyze/batch` | Analyze text, URL, uploaded file, or a batch with cross-reference detection |
+| Results | `GET /analyses`, `/analyses/{id}`, `/rubric` | List/retrieve analyses, aggregate rubric scores |
+| Exports | `GET /exports/analysis/{id}`, `/exports/analysis/{id}.pdf`, `/exports/analyses.csv` | JSON, PDF, and bulk CSV export |
+| Review queue | `GET /reviews`, `POST /reviews/{id}` | List and approve/reject low-confidence findings |
+| Watchlist | `GET/POST /watchlist`, `DELETE /watchlist/{id}`, `POST /watchlist/{id}/refresh` | Vendor monitoring |
+| Snapshots & diff | `GET/POST /snapshots`, `GET /snapshots/detail/{id}`, `GET /diff/{id1}/{id2}` | Historical versions, token-level diffing |
+| Policy watch | `POST/GET /policy-watch`, `DELETE /policy-watch/{id}`, `POST /policy-watch/{id}/snapshot` | Scheduled policy monitoring |
 
 ### Risk Scoring Methodology
 
-**IRP Score Formula:**
+**Current implementation — severity-weighted average** (`analyzer.py::calculate_risk_score`):
+
 \[
-\text{IRP} = 0.5 \times \frac{\text{Impact}}{5} + 0.4 \times \frac{\text{Likelihood}}{5} - 0.3 \times \frac{\text{Safeguards}}{5}
+\text{score} = 10 \times \frac{\sum_{f \in \text{findings}} \text{weight}(f.\text{severity})}{|\text{findings}|}, \quad \text{weight} = \{\text{Low}: 0.2,\ \text{Medium}: 0.5,\ \text{High}: 0.8,\ \text{Critical}: 1.0\}
 \]
 
-**Grade Mapping:**
-- **A (Low Risk):** IRP < 0.30
-- **B (Low Risk):** 0.30 ≤ IRP < 0.45
-- **C (Medium Risk):** 0.45 ≤ IRP < 0.75
-- **D (High Risk):** 0.75 ≤ IRP < 0.85
-- **F (Critical Risk):** IRP ≥ 0.85
+**Grade Mapping** (0–10 scale, higher = worse):
+- **A:** score < 3.5
+- **A-:** 3.5 ≤ score < 4.5
+- **B:** 4.5 ≤ score < 5.5
+- **B-:** 5.5 ≤ score < 6.5
+- **C+:** 6.5 ≤ score < 7.5
+- **C:** 7.5 ≤ score < 8.5
+- **D+:** score ≥ 8.5
 
-**Risk Categories (9 types):**
-1. Data Sharing (third-party sales, data brokers)
-2. Automated Decisions (ADM without human review)
-3. Dark Patterns (deceptive consent, hidden opt-outs)
-4. Retention (indefinite storage, vague deletion)
-5. User Rights (missing access/correction/deletion)
-6. Minors (inadequate child protections)
-7. Sensitive Data (biometrics, health, financial)
-8. Unilateral Changes (terms modifications without notice)
-9. Liability (excessive limitations, forced arbitration)
+**Planned enhancement (not yet built):** an Impact/Likelihood/Safeguards ("IRP") formula — `0.5×(Impact/5) + 0.4×(Likelihood/5) − 0.3×(Safeguards/5)` — is specified as a future improvement (tracked alongside the legal-KB work); `Finding` schema fields for impact/likelihood/safeguards do not yet exist in code.
+
+**Risk Categories:** the original design specified 9 conceptual categories (Data Sharing, Automated Decisions, Dark Patterns, Retention, User Rights, Minors, Sensitive Data, Unilateral Changes, Liability). Actual rule coverage has grown well beyond this baseline — `rules.py` implements ~50 category labels across 64 `RulePattern` entries, adding AI Act sub-categories (High-Risk AI, Prohibited AI, Automated Decision-Making, AI Training, GPAI, etc.) and industry-specific blocks (HIPAA, FERPA, PCI DSS, COPPA) layered on top of the 9-category framework.
 
 ### Jurisdiction Support
 
-**Current Coverage:**
-- United States (Federal, CA, CO, CT, NY)
-- European Union (GDPR)
-- United Kingdom (UK GDPR, DPA 2018)
-- Canada (PIPEDA)
-- Australia (Privacy Act 1988)
-- Brazil (LGPD)
+**Current Coverage — 30 jurisdiction codes, all with rule coverage** (`schemas.py`):
+- US: `US-FED`, `US-CA`, `US-NY`, `US-TX`, `US-VA`, `US-CO`, `US-CT`, `US-IL`, `US-NJ`, `US-MN`, `US-OR`
+- International privacy: `GDPR`, `UK-GDPR`, `LGPD` (Brazil), `PIPEDA` (Canada), `CA-QC` (Quebec Law 25), `POPIA` (South Africa), `PDPA-KE` (Kenya), `DPDP` (India), `APPI` (Japan), `PIPA` (South Korea), `APP` (Australia), `PDPA-TH` (Thailand), `NDPR` (Nigeria)
+- International frameworks: `ICCPR-17`, `COE-108`
+- AI law: `EU-AI-ACT`, `COE-AI-225`, `OECD-AI`, `UNESCO-AI`
 
 ### Industry Profiles
 
@@ -1150,45 +1145,55 @@ The AI Terms & Policies Reviewer addresses this gap through:
 ```
 terms-analysis/
 ├── src/
-│   ├── webapp/              # Frontend (HTML/CSS/JS)
-│   │   ├── index.html       # Main UI
-│   │   ├── app.js           # Application logic
-│   │   └── style.css        # Styling
-│   ├── backend/             # FastAPI backend
+│   ├── webapp/                   # Frontend — two UIs
+│   │   ├── app_streamlit.py      # Streamlit UI (primary, :8501)
+│   │   ├── index.html            # Vanilla JS SPA (fallback, :8000)
+│   │   ├── app.js
+│   │   └── style.css
+│   ├── backend/                  # FastAPI backend
 │   │   ├── app/
-│   │   │   ├── main.py      # API routes
-│   │   │   ├── services/    # Business logic
-│   │   │   │   ├── analysis.py
-│   │   │   │   ├── ingestion.py
-│   │   │   │   └── llm.py
-│   │   │   ├── models.py    # Database models
-│   │   │   └── config.py    # Configuration
-│   │   └── tests/           # Unit tests
-│   └── demos/               # Prototype versions
+│   │   │   ├── main.py           # API routes (23 endpoints + /health)
+│   │   │   ├── services/
+│   │   │   │   ├── analyzer.py   # Orchestration, risk scoring
+│   │   │   │   ├── ingest.py     # Document extraction, SSRF-guarded URL fetch
+│   │   │   │   ├── rules.py      # Pattern-based detection (64 patterns)
+│   │   │   │   ├── validation.py
+│   │   │   │   ├── diffing.py    # Watchlist change detection
+│   │   │   │   ├── embedding.py  # BM25 + dense RRF chunk selection
+│   │   │   │   ├── legal_kb.py   # Legal-KB retrieval (FAISS + BM25/RRF)
+│   │   │   │   └── localai.py    # LLM client (Apertus/EuroLLM routing)
+│   │   │   ├── models.py         # Database models
+│   │   │   └── config.py         # Configuration
+│   │   └── tests/                # pytest suite
+│   └── demos/                    # Prototype versions
 ├── docs/
 │   ├── specs/               # Requirements, rubric
 │   ├── wireframes/          # UI designs
 │   ├── plans/               # Architecture plans
 │   └── reports/             # Analysis reports
-├── data/                    # SQLite database
+├── data/
+│   ├── terms_analysis.db    # SQLite database (gitignored)
+│   └── legal_corpus/        # Legal-KB source text (tracked; index/metadata gitignored)
 ├── .env                     # Environment config
-└── run.sh                   # Launch script
+└── run.sh                   # Launch script (backend + Streamlit + JS SPA)
 ```
 
 **Environment Variables:**
-- `LM_STUDIO_BASE_URL`: Local LLM endpoint (default: `http://localhost:1234/v1`)
-- `DATABASE_URL`: SQLite database path (default: `sqlite:///./data/terms.db`)
-- `LOG_LEVEL`: Logging verbosity (default: `INFO`)
+- `LOCALAI_BASE_URL`: LocalAI endpoint (default: `http://localhost:8080/v1`)
+- `MODEL_WORLD` / `MODEL_EU`: Apertus / EuroLLM model names for language-routed inference
+- `DATABASE_URL`: SQLite database path (default: `sqlite:///./data/terms_analysis.db`)
+- `REVIEW_THRESHOLD`: confidence threshold for human review (default: `0.80`)
+- `RRF_K`, `LEGAL_KB_TOP_K`: legal-KB retrieval tuning
 
 **Development Workflow:**
-1. Start LocalAI server with Apertus 8B (world model) and EuroLLM 22B (EU specialist)
-2. Run `./run.sh` to launch backend and open UI
-3. Backend serves on `http://localhost:8000`
-4. API docs available at `/docs`
+1. Start a LocalAI server with Apertus-8B-Instruct (world model) and EuroLLM-22B-Instruct (EU specialist) loaded
+2. Run `./run.sh` — launches the backend (port 9000), Streamlit primary UI (port 8501), and vanilla JS SPA fallback (port 8000) together
+3. Primary UI at `http://localhost:8501`; fallback UI at `http://localhost:8000`
+4. API docs available at `http://localhost:9000/docs`
 
 ### Appendix B: Risk Rubric Details
 
-**Clause Detection Categories:**
+**Clause Detection Categories (original 9-category framework — actual rule coverage has grown to ~50 category labels / 64 patterns; these remain the core conceptual buckets):**
 
 1. **Data Sharing**: Third-party sales, data broker relationships, cross-border transfers
 2. **Automated Decisions**: ADM without human review, profiling, scoring
@@ -1200,7 +1205,7 @@ terms-analysis/
 8. **Unilateral Changes**: Policy modifications without notice/consent
 9. **Liability**: Excessive disclaimers, forced arbitration, class action waivers
 
-**Scoring Parameters:**
+**Scoring Parameters (planned — Impact/Likelihood/Safeguards axes are not yet implemented; current scoring uses severity-weighted averaging, see Risk Scoring Methodology):**
 - **Impact** (1-5): Severity of potential harm to users
 - **Likelihood** (1-5): Probability clause will be exercised
 - **Safeguards** (1-5): Protections/limitations in place
@@ -1220,8 +1225,8 @@ terms-analysis/
 | Automated Analysis | Yes (AI) | No | Partial | Yes | Yes |
 | Privacy-First | Yes (local) | Yes | No | No | No |
 | Multi-Format Input | 6 types | Text | Text | Limited | Limited |
-| Risk Scoring | IRP method | Letter grade | Simple | Proprietary | Proprietary |
-| Jurisdiction Mapping | 26 jurisdictions + AI law | No | No | Limited | Yes |
+| Risk Scoring | Severity-weighted (IRP planned) | Letter grade | Simple | Proprietary | Proprietary |
+| Jurisdiction Mapping | 30 jurisdictions + AI law | No | No | Limited | Yes |
 | Vendor Comparison | Yes | No | No | No | No |
 | Watchlist/Monitoring | Yes | No | No | No | Yes |
 | API Access | Yes | No | No | Yes | Yes |
