@@ -90,7 +90,7 @@ reference_impl_test:
 ```python
 def test_main_valid_chips_matches_schema_literal():
     from app.main import _VALID_CHIPS
-    from app.schemas import ContextChip
+    from typing import get_args; from app.schemas import ContextChip
     assert _VALID_CHIPS == frozenset(get_args(ContextChip))
 ```
 
