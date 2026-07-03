@@ -977,19 +977,6 @@ def _match_stats(patterns: Iterable[str], text: str) -> tuple[Optional[re.Match]
     return first_match, pattern_hits, match_count
 
 
-def _confidence(
-    severity: Severity,
-    pattern_hits: int,
-    match_count: int,
-    pattern_total: int,
-) -> float:
-    base = SEVERITY_BASE.get(severity, 0.6)
-    hit_ratio = pattern_hits / pattern_total if pattern_total else 0.0
-    density = min(1.0, match_count / 5)
-    score = 0.25 + 0.5 * base + 0.15 * hit_ratio + 0.1 * density
-    return max(0.35, min(0.95, score))
-
-
 def detect_findings(text: str, jurisdictions: List[Jurisdiction]) -> List[Finding]:
     findings: List[Finding] = []
     for rule in PATTERNS:
