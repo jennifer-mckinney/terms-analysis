@@ -9,7 +9,7 @@ Covers:
   - main.get_analysis success and 404 (GET /analyses/{id})
   - main.analyze_url error paths (ValueError, generic exception, empty text)
   - main.analyze_file error paths (empty file, bad doc_type, bad industry)
-  - main._refresh_all_watchlist_items (internal loop function)
+  - main._refresh_due_watchlist_items (per-item scheduler)
   - main._watchlist_loop_async (background loop)
   - main.export_analysis_pdf with findings (covers sev_counts, used_jurisdictions loop)
   - main._persist_analysis legacy pydantic path (line 157)
@@ -296,37 +296,10 @@ class TestAnalyzeFileErrors:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# _refresh_all_watchlist_items (internal function, called directly)
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestRefreshAllWatchlistItems:
-    def test_main_refresh_all_watchlist_items_no_items(self, db_session):
-        from app.main import _refresh_all_watchlist_items
-        from app.models import WatchlistItem as WatchlistItemModel
-        with patch("app.main.settings") as mock_settings:
-            mock_settings.watchlist_refresh_seconds = 60
-
-            with patch("app.main.db_session") as mock_db_ctx:
-                mock_db_ctx.return_value.__enter__ = lambda s: db_session
-                mock_db_ctx.return_value.__exit__ = MagicMock(return_value=False)
-                asyncio.run(_refresh_all_watchlist_items())
-
-        # With no WatchlistItems in DB, no rows should have been written
-        count = db_session.query(WatchlistItemModel).count()
-        assert count == 0
-
-    def test_main_refresh_all_watchlist_items_skips_when_disabled(self, db_session):
-        from app.main import _refresh_all_watchlist_items
-        # When watchlist_refresh_seconds <= 0, function returns early
-        with patch("app.main.db_session") as mock_db_ctx:
-            mock_db_ctx.return_value.__enter__ = lambda s: db_session
-            mock_db_ctx.return_value.__exit__ = MagicMock(return_value=False)
-            # Default settings have watchlist_refresh_seconds = 0, returns early
-            asyncio.run(_refresh_all_watchlist_items())
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# _watchlist_loop_async (covers lines 89-94)
+# _watchlist_loop_async (OE-003: delegates to _refresh_due_watchlist_items;
+# the tautological ``_refresh_all_watchlist_items`` shim was removed per
+# reviewer P9 grumpy F11 because it delegated with a bare enabled-check that
+# the scheduler already performs, so the shim was pure dead weight.)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestWatchlistLoopAsync:
@@ -340,9 +313,12 @@ class TestWatchlistLoopAsync:
             call_count += 1
             if call_count >= 1:
                 raise asyncio.CancelledError()
+            return 60  # scheduler returns int seconds-to-next-wakeup
 
         async def run_loop():
-            with patch("app.main._refresh_all_watchlist_items", side_effect=fake_refresh):
+            # OE-003: the loop now calls ``_refresh_due_watchlist_items``
+            # directly (not through the legacy shim). Patch the new function.
+            with patch("app.main._refresh_due_watchlist_items", side_effect=fake_refresh):
                 with patch("app.main.settings") as mock_settings:
                     mock_settings.watchlist_refresh_seconds = 0
                     await _watchlist_loop_async()
@@ -366,10 +342,14 @@ class TestWatchlistLoopAsync:
             raise asyncio.CancelledError()
 
         async def run_loop():
-            with patch("app.main._refresh_all_watchlist_items", side_effect=fake_refresh):
+            # OE-003: patch the new scheduler function.
+            with patch("app.main._refresh_due_watchlist_items", side_effect=fake_refresh):
                 with patch("app.main.settings") as mock_settings:
                     mock_settings.watchlist_refresh_seconds = 0
-                    await _watchlist_loop_async()
+                    # Zero-sleep the loop retry so the test doesn't wait 60s
+                    # for the exception-recovery path.
+                    with patch("app.main._WATCHLIST_LOOP_MIN_SLEEP_S", 0):
+                        await _watchlist_loop_async()
 
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(run_loop())
@@ -696,17 +676,27 @@ class TestAnalyzeBatchPydanticValidation:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# _refresh_all_watchlist_items with actual items (covers main.py lines 107-137)
+# _refresh_due_watchlist_items with actual items (covers main.py lines 107-137)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestRefreshWatchlistItemsWithData:
     def test_main_refresh_watchlist_items_processes_changed_unchanged_failed(
         self, db_session
     ):
-        from app.main import _refresh_all_watchlist_items
+        # OE-003 (2026-07-03): the refresh path now honors per-item cadence.
+        # We seed items with ``last_checked`` well in the past so they are
+        # unambiguously past-due for the ``_refresh_due_watchlist_items``
+        # scheduler. ``check_frequency=60`` keeps each item's next-due window
+        # short so the previous global-cadence assumptions still hold. We call
+        # the scheduler directly (not the legacy shim) so this test exercises
+        # the code the background loop actually runs.
+        from datetime import timedelta as _timedelta
+        from app.main import _refresh_due_watchlist_items
         from app.models import WatchlistItem
 
-        # Item with existing hash that will change → "Updated" (lines 127-131)
+        past = datetime.now(timezone.utc) - _timedelta(hours=2)
+
+        # Item with existing hash that will change → "Updated"
         item_changed = WatchlistItem(
             id=str(uuid4()),
             vendor="Vendor A",
@@ -714,8 +704,11 @@ class TestRefreshWatchlistItemsWithData:
             status="Active",
             last_document_hash="old_hash_abc",
             last_risk_score=5.0,
+            check_frequency=60,
+            enabled=True,
+            last_checked=past,
         )
-        # Item with no prior hash → "No Changes" (lines 132-135)
+        # Item with no prior hash → "No Changes"
         item_no_prior = WatchlistItem(
             id=str(uuid4()),
             vendor="Vendor B",
@@ -723,13 +716,19 @@ class TestRefreshWatchlistItemsWithData:
             status="Active",
             last_document_hash=None,
             last_risk_score=None,
+            check_frequency=60,
+            enabled=True,
+            last_checked=past,
         )
-        # Item whose fetch fails → "Check Failed" (lines 111-113)
+        # Item whose fetch fails → "Check Failed"
         item_failed = WatchlistItem(
             id=str(uuid4()),
             vendor="Vendor C",
             source_url="https://broken.example.com/down",
             status="Active",
+            check_frequency=60,
+            enabled=True,
+            last_checked=past,
         )
         db_session.add_all([item_changed, item_no_prior, item_failed])
         db_session.commit()
@@ -753,7 +752,7 @@ class TestRefreshWatchlistItemsWithData:
                                 with patch(
                                     "app.main.calculate_risk_score", return_value=3.0
                                 ):
-                                    asyncio.run(_refresh_all_watchlist_items())
+                                    asyncio.run(_refresh_due_watchlist_items())
 
         db_session.refresh(item_changed)
         db_session.refresh(item_no_prior)

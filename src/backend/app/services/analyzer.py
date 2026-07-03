@@ -145,6 +145,23 @@ def _truncate_text(text: str) -> str:
     return text[: settings.max_input_chars]
 
 
+# Whitespace-only runs (spaces, tabs, newlines, unicode spaces) collapsed to a
+# single space. Applied to user paste input only — URL-fetched documents are
+# normalised upstream and stripping them here would corrupt structural
+# whitespace (numbered clauses, tables) in legal text.
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+
+
+def _normalise_paste_whitespace(text: str) -> str:
+    """Strip surrounding whitespace and collapse internal runs to single spaces.
+
+    Only appropriate for user paste input. URL and file-extracted content is
+    left alone so structural whitespace survives (see ``analyze_text``'s
+    ``is_paste_input`` flag).
+    """
+    return _WHITESPACE_RUN_RE.sub(" ", text.strip())
+
+
 def _with_line_numbers(text: str) -> str:
     lines = text.splitlines()
     return "\n".join(f"{idx + 1:04d}| {line}" for idx, line in enumerate(lines))
@@ -197,35 +214,60 @@ def _compute_action_readiness(risk_score: float, confidence: float, completeness
     return "Review"
 
 
-# Category groups boosted/suppressed per document type
+# Category groups boosted/suppressed per document type.
+#
+# Every key MUST be a member of ``schemas.CATEGORIES`` — the import-time guard
+# below enforces this. Non-canonical labels (e.g. "Data Retention",
+# "Liability Limitation") were removed rather than aliased so the boost dict
+# stays a single source of truth. Audit finding LE-013.
 _DOCTYPE_BOOSTS: dict[str, dict[str, float]] = {
     "Privacy Policy": {
         "Data Sale / Sharing": 0.3,
-        "Data Retention": 0.2,
         "User Rights": 0.2,
+        # Restored from Phase 1 removal: canonical "Retention" replaces the
+        # non-canonical "Data Retention" the substring lookup used to fire on.
+        "Retention": 0.2,
+        # Option Z (drift-1) dormant boost: no rule currently emits
+        # "Third-Party Sharing" so this is inert until a follow-up rule lands.
+        # Kept here so the taxonomy is stable when it does.
         "Third-Party Sharing": 0.2,
     },
     "Terms of Service": {
-        "Liability Limitation": 0.3,
+        "Liability": 0.3,
         "Unilateral Changes": 0.3,
+        # Restored from Phase 1 removal: "Arbitration / Dispute" is a canonical
+        # category (Phase 2 taxonomy expansion added it to ``CATEGORIES``) and
+        # already has a ``_CATEGORY_IRP_DEFAULTS`` entry in ``rules.py``.
         "Arbitration / Dispute": 0.2,
-        "Intellectual Property": 0.1,
+        # Option Z (drift-1) dormant boost: no rule currently emits
+        # "Intellectual Property" so this is inert until a follow-up rule lands.
+        "Intellectual Property": 0.2,
     },
     "Cookie Policy": {
         "Tracking / Profiling": 0.4,
         "Consent": 0.3,
-        "Third-Party Sharing": 0.2,
+        # Option Z (drift-1) dormant boost: no rule currently emits
+        # "Third-Party Sharing" so this is inert until a follow-up rule lands.
+        "Third-Party Sharing": 0.3,
     },
     "Data Processing Agreement": {
         "Data Security": 0.3,
+        "Retention": 0.2,
+        # Restored from Phase 1 removal: canonical "Cross-Border Transfer"
+        # replaces the non-canonical "Data Transfer" the substring lookup
+        # used to fire on.
+        "Cross-Border Transfer": 0.3,
+        # Option Z (drift-1) dormant boosts: no rule currently emits
+        # "Data Transfer" or "Sub-processors" so these are inert until a
+        # follow-up rule lands. Kept here so DPA taxonomy is stable.
         "Data Transfer": 0.3,
         "Sub-processors": 0.2,
-        "Data Retention": 0.2,
     },
     "Combined": {},  # no adjustment — document contains everything
 }
 
-# Category groups boosted per industry
+# Category groups boosted per industry. Same canonical-category rule applies
+# as _DOCTYPE_BOOSTS. Audit finding LE-013.
 _INDUSTRY_BOOSTS: dict[str, dict[str, float]] = {
     "Healthcare": {
         "Health Data": 0.4,
@@ -252,12 +294,17 @@ _INDUSTRY_BOOSTS: dict[str, dict[str, float]] = {
         "Automated Decision-Making": 0.4,
         "AI Training": 0.3,
         "Tracking / Profiling": 0.2,
-        "Transparency": 0.2,
+        # Option Z (drift-1) dormant boost: no rule currently emits
+        # "Transparency" so this is inert until a follow-up rule lands.
+        # Kept here so AI/tech platform disclosure taxonomy is stable.
+        "Transparency": 0.3,
     },
     "Gaming": {
         "Children's Privacy": 0.4,
-        "In-App Purchases": 0.3,
         "Data Sale / Sharing": 0.2,
+        # Option Z (drift-1) dormant boost: no rule currently emits
+        # "In-App Purchases" so this is inert until a follow-up rule lands.
+        "In-App Purchases": 0.3,
     },
     "Retail": {
         "Data Sale / Sharing": 0.3,
@@ -266,6 +313,24 @@ _INDUSTRY_BOOSTS: dict[str, dict[str, float]] = {
     },
     "General": {},
 }
+
+
+# Import-time guard: every boost key must be a canonical category in
+# ``schemas.CATEGORIES``. Drift here would silently fail to boost (after LE-012
+# switches _bump_severity to exact match), so fail loudly instead. Audit
+# finding LE-013 — mirrors the existing _DOMAIN_MAP guard above.
+_unknown_boost_keys = {
+    key
+    for boosts in list(_DOCTYPE_BOOSTS.values()) + list(_INDUSTRY_BOOSTS.values())
+    for key in boosts.keys()
+    if key not in CATEGORIES
+}
+if _unknown_boost_keys:
+    raise RuntimeError(
+        f"_DOCTYPE_BOOSTS / _INDUSTRY_BOOSTS reference unknown categories: "
+        f"{sorted(_unknown_boost_keys)}. Update schemas.CATEGORIES or remove "
+        f"the drifted keys."
+    )
 
 _SEV_ORDER = {"Low": 0, "Medium": 1, "High": 2, "Critical": 3}
 _SEV_LIST = ["Low", "Medium", "High", "Critical"]
@@ -329,8 +394,8 @@ def _derive_action_items(
         )
     ):
         lines.append(
-            "Automated decisions with significant effect may be challengeable — "
-            "request human review through the service's support channels."
+            "Automated decisions with significant effect may be challengeable. "
+            "Consider requesting human review through the service's support channels."
         )
 
     if any(
@@ -376,7 +441,14 @@ def _bump_severity(finding: Finding, boost: float) -> Finding:
 def _apply_doctype_weighting(
     findings: List[Finding], doc_type: Optional[str]
 ) -> List[Finding]:
-    """Boost severity of findings whose category is relevant to the document type."""
+    """Boost severity of findings whose category is relevant to the document type.
+
+    Boost lookup is an exact-category match. Previously a case-insensitive
+    substring match was used (``k.lower() in f.category.lower()``), which
+    fired false positives whenever the boost key was a substring of an
+    unrelated category (e.g. "Consent" matched "PIPEDA Consent",
+    "Tracking & Consent", "DPDP Consent"). Audit finding LE-012.
+    """
     if not doc_type:
         return findings
     boosts = _DOCTYPE_BOOSTS.get(doc_type, {})
@@ -384,10 +456,7 @@ def _apply_doctype_weighting(
         return findings
     result = []
     for f in findings:
-        boost = next(
-            (v for k, v in boosts.items() if k.lower() in f.category.lower()),
-            0.0,
-        )
+        boost = boosts.get(f.category, 0.0)
         result.append(_bump_severity(f, boost))
     return result
 
@@ -395,7 +464,11 @@ def _apply_doctype_weighting(
 def _apply_industry_emphasis(
     findings: List[Finding], industry: Optional[str]
 ) -> List[Finding]:
-    """Boost severity of findings whose category is sensitive for the given industry."""
+    """Boost severity of findings whose category is sensitive for the given industry.
+
+    Boost lookup is an exact-category match — see ``_apply_doctype_weighting``
+    for the rationale. Audit finding LE-012.
+    """
     if not industry or industry == "General":
         return findings
     boosts = _INDUSTRY_BOOSTS.get(industry, {})
@@ -403,10 +476,7 @@ def _apply_industry_emphasis(
         return findings
     result = []
     for f in findings:
-        boost = next(
-            (v for k, v in boosts.items() if k.lower() in f.category.lower()),
-            0.0,
-        )
+        boost = boosts.get(f.category, 0.0)
         result.append(_bump_severity(f, boost))
     return result
 
@@ -449,8 +519,16 @@ async def analyze_text(
     mode: str = "full",
     source_document: Optional[str] = None,
     context: Optional[List[ContextChip]] = None,
+    is_paste_input: bool = False,
 ) -> AnalysisResult:
-    cleaned = _truncate_text(text.strip())
+    # User paste input: strip surrounding whitespace and collapse internal runs
+    # to single spaces before the length gate. URL and file-extracted content
+    # is left as-is so structural whitespace in legal text (numbered clauses,
+    # tables) survives — per PRD §5 open-question resolution.
+    if is_paste_input:
+        cleaned = _truncate_text(_normalise_paste_whitespace(text))
+    else:
+        cleaned = _truncate_text(text.strip())
     start_time = time.time()
     # Normalise context to a list so downstream helpers can trust the type.
     context_list: List[ContextChip] = list(context) if context else []

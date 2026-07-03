@@ -1,13 +1,21 @@
 # Product Requirements Document: AI Terms & Policies Reviewer
 
-**Version:** 2.0  
-**Date:** 2026-06-27  
-**Status:** Draft for Development  
-**Change Notes (v2.0):** AI Law Analysis (F8), expanded jurisdiction coverage (30 codes), multilingual analysis (1,000+ languages), LocalAI inference stack.
-**Product Manager:** [Name]  
-**Engineering Lead:** [Name]  
-**Project Location:** `/Users/jennifermckinney/Documents/_AUTOMATION/Claude_Projects/terms-analysis`  
-**Related Documents:** BRD_Terms_Policies_Reviewer.md
+**Version:** 2.4
+**Date:** 2026-07-03
+**Status:** Draft for Development
+**Product Manager:** [Name]
+**Engineering Lead:** [Name]
+**Related Documents:** BRD_Terms_Policies_Reviewer.md, PRODUCT.md, `.claude/library/LIB-CONTEXT.md`, `.claude/library/LIB-VOICE.md`, `.claude/library/LIB-RULES.md`, `.claude/library/LIB-PRINCIPLES.md`
+
+## Change History
+
+| Version | Date | Summary |
+|---------|------|---------|
+| 2.4 | 2026-07-03 | OE-003 landed — `PolicyWatch` merged into `WatchlistItem`. §7.3.9 (`POST /watchlist`) and §5.6.1 (F6.1) codify the merged model: subject is `vendor` + `source_url` (not `analysis_id`), with optional `check_frequency` (per-item seconds, 300-604800 range), `enabled` (boolean, LE-010 fix — previously stored as the string `"true"` on `PolicyWatch`), `user_id`, and `notes`. `check_frequency` is now honored by `_watchlist_loop_async` (previously written to `PolicyWatch.check_frequency` and silently ignored — a user setting `check_frequency=3600` believed hourly refreshes were happening; they were not). Response payload exposes computed `next_check_at = last_checked + check_frequency`. §5.6.2 F6.2 updated: per-item cadence replaces the prior "global server setting" wording. Legacy `/policy-watch/*` endpoints return `308 Permanent Redirect` to `/watchlist/*` (root, list, delete) with `Deprecation: true` + `Sunset: 2026-10-01` headers; `/policy-watch/{id}/snapshot` returns `410 Gone` (cannot be redirected because the id lookup no longer resolves). Data migration script at `src/backend/scripts/migrate_policywatch_to_watchlist.py` folds existing `policy_watches` rows into `watchlist_items` idempotently. Database schema section rewritten: `policy_watches` table removed; `watchlist_items` extended with the 4 merged columns. |
+| 2.3 | 2026-07-03 | Flow 2 codified as API-only for MVP. UI-bound acceptance criteria (nav surface, CSV upload widget, progress bar, sortable results table, "Export All as CSV" button) removed from §6.2. OPEN QUESTION at §6.2 resolved: batch UI is a P2 follow-up tracked separately. Added JSON `POST /analyze/batch` payload example in §6.2 so researchers can `curl` the endpoint directly. §7.3.13 endpoint spec annotated with API-only status and pointer to optional CSV helper at `src/backend/scripts/batch_analyze.py`. Rationale: synchronous endpoint cannot survive a real 50-URL run behind HTTP proxies without an async job model, which is a multi-day architecture change, not a UI wire-up. |
+| 2.2 | 2026-07-03 | Tech-spec audit remediation follow-up. Resolved three v2.1 `OPEN QUESTION` markers: (a) URL fetch timeout separated from LLM inference timeout — new dedicated `LM_URL_FETCH_TIMEOUT_S` env var (default 30 seconds), distinct from `LM_REQUEST_TIMEOUT_S` (60 seconds) which now governs LLM inference only (§F1.1, §Additional shipped endpoints); (b) text paste cap set to `MAX_INPUT_CHARS = 50000` with paste-time whitespace normalization (strip leading/trailing, collapse internal runs) applied before the length check (§F1.3); (c) Flow 2 batch UI question remains open pending research (§Flow 2 marked `[BLOCKED ON RESEARCH]`). Category taxonomy expanded to codify LE-013 alignment: added canonical shipped category list (~50 labels) with explicit call-out of the seven boost-only labels (`Arbitration / Dispute`, `Third-Party Sharing`, `Sub-processors`, `Data Transfer`, `Intellectual Property`, `Transparency`, `In-App Purchases`) that must be present in both `schemas.CATEGORIES` and the boost dicts (§F3.2). |
+| 2.1 | 2026-07-03 | Reconciliation refresh triggered by `docs/reports/tech-spec-audit.md`. IRP scoring reclassified from "planned enhancement" to shipped (§F3.1, §F4.1, §MVP Acceptance, Appendix D) with real 0-10-scale grade thresholds (A / A- / B / B- / C+ / C / D+) sourced from `analyzer.py::_grade`. Context chip taxonomy, 4-domain grouping, Streamlit v2, `/infer`, and schema-derived allowlists documented as shipped (PR #34, commits `e4fd706` -> `b5ea947`). AnalysisPayload API contract (§API Endpoints Specification) extended with the 8 v2 fields: `action_readiness`, `completeness`, `context`, `jurisdictions`, `verdict_headline`, `verdict_label`, `top_by_domain`, `action_items`. Personal path removed from header. |
+| 2.0 | 2026-06-27 | AI Law Analysis (F8), expanded jurisdiction coverage (30 codes), multilingual analysis (1,000+ languages), LocalAI inference stack. |
 
 ---
 
@@ -39,7 +47,7 @@ Build a privacy-first web application that empowers individuals and small organi
 
 **In Scope:**
 - Multi-format document ingestion (URL, file upload, text paste)
-- Severity-weighted risk scoring across ~50 risk categories (IRP formula is a planned enhancement)
+- IRP (Impact / Likelihood / Safeguards) risk scoring across ~50 risk categories, shipped in PR #34 (see §F3.1 for formula and grade thresholds)
 - Multi-jurisdiction support (30 codes: US federal/state, EU/UK, Canada, Latin America, Africa, Asia-Pacific, AI-law frameworks)
 - Basic results view with findings breakdown
 - PDF export
@@ -237,16 +245,29 @@ Build a privacy-first web application that empowers individuals and small organi
 
 ## Implementation Status Note (2026-07-03)
 
-An independent UI/UX validation pass (live Playwright run against both shipped UIs) found several feature-requirement gaps between this spec and the actual running app, summarized here rather than annotated inline on every checkbox below:
+An independent UI/UX validation pass (live Playwright run) found several feature-requirement gaps between this spec and the running app, summarized here rather than annotated inline on every checkbox below. The vanilla-JS SPA fallback was retired in Phase 4 of the issue #19 remediation; Streamlit v2 (`app_streamlit_v2.py`) is now the sole UI. Status notes below reflect the Streamlit-only state:
 
-- **F1.3 (character count, short-text warning)**: **resolved.** Both UIs now show a live character counter with a short-text warning (JS SPA: `#documentTextCounter`; Streamlit: computed in `app_streamlit.py`).
-- **F2.1 (30-code jurisdiction multi-select with flags/Select-All/Clear-All)**: **resolved.** Both UIs now expose all 30 jurisdiction codes with Select-All/Clear-All controls (Streamlit: `st.multiselect`; JS SPA: a scrollable 30-checkbox list).
-- **F3.1/F4.1 (grade/score display)**: **resolved.** `render_grade_summary()` now shows grade/risk-score/confidence in Streamlit, mirroring the JS SPA's results header.
-- **F4.3 (Verify View)**: **resolved.** Streamlit now has a "View in full document" Verify View expander alongside the JS SPA's modal implementation.
-- **F5.1 (PDF export)**: was broken in both UIs by a backend route-ordering bug (fixed, see issue #16). The JS SPA's export button was relabeled "Export JSON" to accurately describe what it downloads, rather than being mislabeled as a PDF export (issue #17, resolved).
-- **Dark mode**: JS SPA toggle is now functional (`applyTheme()` sets `data-color-scheme`, all three theming blocks in `style.css` corrected); Streamlit follows the OS/browser theme automatically per Streamlit's own theming model, with no in-app toggle.
+- **F1.3 (character count, short-text warning)**: **resolved.** Streamlit shows a live character counter with a short-text warning (computed in `app_streamlit_v2.py`).
+- **F2.1 (30-code jurisdiction multi-select with flags/Select-All/Clear-All)**: **resolved.** Streamlit exposes all 30 jurisdiction codes with Select-All / Clear-All controls (`st.multiselect`).
+- **F3.1/F4.1 (grade/score display)**: **resolved.** `render_grade_summary()` shows grade / risk-score / confidence in Streamlit.
+- **F4.3 (Verify View)**: **resolved.** Streamlit has a "View in full document" Verify View expander.
+- **F5.1 (PDF export)**: was broken by a backend route-ordering bug (fixed, see issue #16). Streamlit's export exposes both PDF and JSON download paths.
+- **Dark mode**: Streamlit follows the OS/browser theme automatically per Streamlit's own theming model, with no in-app toggle; `.streamlit/config.toml` sets the palette.
 
-Given this, the remaining gap between the two UIs (per issue #17/#19) is now narrow: both surface the same core findings, grade, and Verify View. See issue #19 for the planned guided-intake redesign that will make Streamlit the fully-featured flagship UI.
+Given this, the remaining gap between the two UIs (per issue #17/#19) is now narrow: both surface the same core findings, grade, and Verify View.
+
+## Implementation Status Note — v2.1 addendum (2026-07-03)
+
+Landed via PR #34 (`claude/issue-19-plain-language-redesign`) across 4 commits — `e4fd706` (feature) -> `2626e2b` (must-fix) -> `671d3e5` (P1/P2 + audit) -> `b5ea947` (CI green cleanup). 702 tests passing, 98.06% coverage. Cross-reference: `.claude/CLAUDE.md` §Session outcomes (2026-07-03).
+
+- **Streamlit v2 shipped as flagship UI**, gated by `STREAMLIT_UI=v2` in `run.sh` (v2 is the default; `v1` legacy retained as rollback path via `app_streamlit_legacy.py`). File: `src/webapp/app_streamlit_v2.py` (~972 lines). Layout: teal palette, two-view state, tabbed input (link / text / file), 5 multi-select context option cards, hover-triggered contextual help, 4 domain sections rendered from `AnalysisPayload.top_by_domain`, always-visible scope box, dynamic action items from `AnalysisPayload.action_items`.
+- **IRP scoring** — see §F3.1.
+- **Context chip taxonomy** — 5 chips aligned to BRD segments: `want_understand`, `for_child`, `for_care`, `for_work`, `just_curious`. Weight tier scale: 1.0 baseline, 2.0 boosted, 2.5 priority, 3.0 signature. Multi-select merger sums weights across chips, capped at 3.0. Full weight table and priority order: LIB-CONTEXT.
+- **Domain-grouped results** — findings group into 4 fixed domains via `analyzer._group_by_domain`: `Data` (collection), `Data use`, `Terms of use`, `Privacy rights`. Category-to-domain mapping in `analyzer._DOMAIN_MAP` covers ~50 categories. Hardware permissions (camera / mic / contacts / location) are a **scope caveat only, never a domain with findings** — hard scope limit per LIB-PRINCIPLES Principle 4.
+- **Global-tool contract** — empty `jurisdictions=[]` treated as "no filter" across rules + LLM post-filter + Streamlit resolution. No US-CA + GDPR default fallback anywhere. Location dropdowns default to blank (`index=None`).
+- **Schema-derived allowlists via `typing.get_args()`** — `_VALID_CHIPS` and `_VALID_JURISDICTIONS` in `main.py` derived at module load: `frozenset(get_args(ContextChip))`. `schemas.CATEGORIES` is the canonical frozenset for finding category strings; `context.py` and `analyzer.py` validate their category-keyed dicts against it at import time. Any future drift fails at import, not at CI review.
+- **`POST /infer` endpoint shipped** — see §Additional shipped endpoints.
+- **Regression coverage** — `test_regressions_pr34.py` (30 tests) covers cross-endpoint consistency via `typing.get_args()` runtime iteration, schema-Literal allowlist parity, XSS defense-in-depth (blocks `javascript:` / `data:` / `vbscript:` scheme URLs), malformed inputs, ReDoS canary on `inference.py`, domain-grouping edges, and sort stability.
 
 ## Feature Requirements
 
@@ -270,7 +291,7 @@ Given this, the remaining gap between the two UIs (per issue #17/#19) is now nar
 **Technical Notes:**
 - Use `requests` library with User-Agent header
 - Follow redirects (max 5 hops)
-- Timeout: 30 seconds
+- Timeout: URL fetch has a dedicated **30-second** timeout controlled by `LM_URL_FETCH_TIMEOUT_S` env var (default **30 seconds**, `src/backend/app/config.py`, wired into `services/ingest.py`). This is distinct from `LM_REQUEST_TIMEOUT_S` (default **60 seconds**), which governs LLM inference calls only. Separating the two lets a slow origin server fail fast without blocking the longer LLM inference window that legitimate large-policy analyses may need.
 - Handle 4xx/5xx errors gracefully
 - Extract text with BeautifulSoup4, prioritize `<article>`, `<main>`, `<div class="policy">` containers
 - Strip navigation, footer, ads
@@ -290,13 +311,14 @@ Given this, the remaining gap between the two UIs (per issue #17/#19) is now nar
 **Acceptance Criteria:**
 - [ ] User can drag and drop file or click to browse
 - [ ] System accepts: PDF, DOCX, RTF, HTML, TXT files
-- [ ] System validates file size (max 10MB)
+- [ ] System validates file size against `MAX_UPLOAD_BYTES` (default **10 MB = 10 * 1024 * 1024 bytes**, `src/backend/app/config.py:84-85`)
 - [ ] System validates file type by content, not just extension
 - [ ] System displays file name and size after selection
 - [ ] System shows upload progress indicator
 - [ ] System extracts text from uploaded file
 - [ ] System handles password-protected files with clear error
 - [ ] System handles scanned PDFs with OCR fallback
+- [ ] PDF page count capped at `MAX_PDF_PAGES` (default **100 pages**, `MAX_PDF_PAGES` env var)
 
 **Technical Notes:**
 - Use `python-magic` for content type validation
@@ -322,20 +344,22 @@ Given this, the remaining gap between the two UIs (per issue #17/#19) is now nar
 - [ ] User can paste text directly into textarea
 - [ ] Textarea auto-expands to fit content (max height: 400px)
 - [ ] System shows character count (live update)
-- [ ] System accepts up to 50,000 characters
+- [ ] System accepts up to `MAX_INPUT_CHARS` characters (default **50,000**, `src/backend/app/config.py`, env-overridable). The `/infer` endpoint separately caps at 200,000 characters (`schemas.py`) because inference is a lighter-weight signal path that does not run the full rule + LLM pipeline.
+- [ ] On paste, the system strips leading and trailing whitespace, collapses internal runs of repeated whitespace into a single space, and then applies the `MAX_INPUT_CHARS` length check. This preserves paragraph breaks (double newlines) while preventing accidental whitespace bloat from pushing legitimate paste content over the cap.
 - [ ] System preserves paragraph breaks and basic formatting
 - [ ] Paste button is disabled if textarea is empty
 - [ ] System shows warning if text appears incomplete (e.g., <1000 chars)
 
 **Technical Notes:**
-- Use `<textarea>` with `maxlength="50000"`
+- Use `<textarea>` with `maxlength` matching `MAX_INPUT_CHARS`
 - Character counter: `{current}/{max}`
 - Normalize line breaks to `\n`
 - Trim leading/trailing whitespace
 - Preserve internal whitespace structure
+- Server-side truncation happens in `analyzer._truncate_text` at `src/backend/app/services/analyzer.py:142-145`
 
 **Edge Cases:**
-- Text exceeds 50,000 characters → Auto-truncate, show warning: "Text truncated to 50,000 characters"
+- Text exceeds `MAX_INPUT_CHARS` → Auto-truncate, show warning
 - Text includes HTML tags → Display raw (don't render as HTML)
 - Text is very short (<500 chars) → Show warning: "This text appears short. Is this the complete policy?"
 - Empty paste → Disable analyze button, show prompt: "Paste policy text here"
@@ -350,12 +374,12 @@ Given this, the remaining gap between the two UIs (per issue #17/#19) is now nar
 #### F2.1: Jurisdiction Selection
 
 **Acceptance Criteria:**
-- [ ] User can select one or more jurisdictions via checkboxes
-- [ ] Default: US-CA and GDPR selected
+- [x] User can select one or more jurisdictions via checkboxes
+- [x] Default: **empty selection = "no filter"** (global-tool contract shipped in PR #34). No hardcoded US-CA + GDPR fallback. Location dropdowns default to blank (`index=None`).
 - [ ] System shows flag icons for visual recognition
 - [ ] System displays jurisdiction full name on hover
 - [ ] Selection persists across sessions (localStorage)
-- [ ] "Select All" and "Clear All" quick actions available
+- [x] "Select All" and "Clear All" quick actions available
 
 **Supported Jurisdictions (30 — matches `Jurisdiction` Literal in `schemas.py`):**
 
@@ -403,7 +427,7 @@ Given this, the remaining gap between the two UIs (per issue #17/#19) is now nar
 - Different jurisdictions trigger different rule patterns (all 30 codes have `RulePattern` coverage in `rules.py`)
 
 **Edge Cases:**
-- No jurisdiction selected → Default to US-CA + GDPR, show info: "Using default jurisdictions"
+- No jurisdiction selected → Analysis runs with **no jurisdiction filter** (returns findings across all rule patterns). This is the intended global-tool contract, not a fallback state. UI may surface a "Rules applied for: all jurisdictions" chip using `AnalysisPayload.jurisdictions` (empty list echoes back).
 - All jurisdictions selected → May increase analysis time, show warning
 
 **UI Mockup Reference:** `docs/wireframes/reviewer_wireframe_v2.png` - Configuration panel
@@ -456,49 +480,63 @@ Given this, the remaining gap between the two UIs (per issue #17/#19) is now nar
 
 #### F3.1: Risk Scoring
 
-**Status:** the Impact/Likelihood/Safeguards ("IRP") formula below describes a **planned enhancement** — `Finding` has no `impact`/`likelihood`/`safeguards` fields yet and `analyzer.py` does not compute this formula. **Current shipped behavior** is a severity-weighted average (see "Current Implementation" below); update this section's acceptance criteria to reflect IRP once it lands.
+**Status:** IRP (Impact / Likelihood / Safeguards) scoring is **shipped**. Landed in PR #34 (commits `e4fd706` -> `b5ea947`). `Finding` carries `impact`, `likelihood`, `safeguard_score`, and a computed `irp_score` (`src/backend/app/schemas.py:161-164`); the composite is computed by `analyzer.py::_compute_irp` (`src/backend/app/services/analyzer.py:136-139`), seeded per-category by `rules.py::_seed_irp`, and requested from the LLM in `prompts.py`. Hybrid merge takes `impact`/`likelihood` from the rule as baseline and `safeguard_score = max(rule, llm)`. Cross-reference: LIB-RULES §IRP Scoring, LIB-CONTEXT §sort semantics, `.claude/CLAUDE.md` §Identity (Risk Method row).
 
-**Current Implementation (shipped):**
-- [x] System calculates a severity-weighted score: `10 × (Σ weight(severity) / count(findings))`, where `weight = {Low: 0.2, Medium: 0.5, High: 0.8, Critical: 1.0}`
-- [x] System assigns letter grade on a 0–10 scale (higher = worse): A (<3.5), A- (3.5–4.5), B (4.5–5.5), B- (5.5–6.5), C+ (6.5–7.5), C (7.5–8.5), D+ (≥8.5)
-- [x] System displays confidence level for each finding (0-1 scale)
-- [x] Findings with confidence <0.80 are flagged for review
+**IRP Formula (shipped):**
+- **Composite:** `irp_score = 0.5 * (impact / 5) + 0.4 * (likelihood / 5) - 0.3 * (safeguard_score / 5)`, clamped to `[0, 1]` and rounded to 4 decimals.
+- **Per-finding fields:** `impact` (1-5), `likelihood` (1-5), `safeguard_score` (0-5), `irp_score` (0.0-1.0). Defaults when unseeded: `impact=2`, `likelihood=3`, `safeguard_score=0`.
+- **Overall document score:** aggregated on a **0-10 scale (higher = worse)** via severity-weighted average of finding scores (`analyzer.py::calculate_risk_score`). The IRP composite drives per-finding ranking; the 0-10 aggregate drives the letter grade. This is deliberate — LIB-RULES documents the split.
 
-**Planned: IRP Risk Scoring (not yet implemented):**
-- [ ] System calculates IRP score: `0.5×(Impact/5) + 0.4×(Likelihood/5) - 0.3×(Safeguards/5)`
-- [ ] System assigns letter grade: A (IRP <0.30), B (0.30-0.44), C (0.45-0.74), D (0.75-0.84), F (≥0.85)
-- [ ] Score is calculated per finding and overall document
+**Grade Thresholds (shipped, 0-10 scale, `analyzer.py::_grade` at `src/backend/app/services/analyzer.py:426-439`):**
 
-**Impact Scoring (1-5, planned):**
-- **5 - Critical:** Identity theft, financial fraud, major privacy violation
-- **4 - High:** Significant data exposure, major rights waiver
-- **3 - Medium:** Moderate privacy concern, limited data sharing
-- **2 - Low:** Minor inconvenience, standard practice
-- **1 - Minimal:** Informational, no real risk
+| Grade | Risk Score Range | Meaning |
+|-------|------------------|---------|
+| A     | `< 3.5`          | Low risk |
+| A-    | `3.5 - 4.5`      | Low-moderate risk |
+| B     | `4.5 - 5.5`      | Moderate risk |
+| B-    | `5.5 - 6.5`      | Moderate-elevated risk |
+| C+    | `6.5 - 7.5`      | Elevated risk |
+| C     | `7.5 - 8.5`      | High risk |
+| D+    | `>= 8.5`         | Very high risk |
 
-**Likelihood Scoring (1-5, planned):**
-- **5 - Certain:** Clause states practice is current/ongoing
-- **4 - Likely:** Clause allows practice with few limitations
-- **3 - Possible:** Conditional or situational language
-- **2 - Unlikely:** Heavily restricted or rare circumstances
-- **1 - Rare:** Theoretical possibility only
+Note: the shipped scale intentionally does not include `D`, `D-`, or `F` grades — the tool's voice (see LIB-VOICE) avoids alarming language, and the `D+` ceiling was chosen so the worst grade still reads as "worth a closer read" rather than "critical failure." Any request to add lower grades is scope drift per LIB-PRINCIPLES Principle 3 and must be surfaced.
 
-**Safeguards Scoring (1-5, planned):**
-- **5 - Strong:** Multiple protections, user control, transparency, limits
-- **4 - Good:** Some protections and user rights
-- **3 - Moderate:** Basic protections, limited user control
-- **2 - Weak:** Minimal protections, little transparency
-- **1 - None:** No protections, no user recourse
+**Impact Scoring (1-5):**
+- **5 - Catastrophic:** Identity theft, financial fraud, major privacy violation, irreversible harm.
+- **4 - High:** Significant data exposure, major rights waiver, hard-to-reverse consequence.
+- **3 - Medium:** Moderate privacy concern, limited data sharing.
+- **2 - Low (default):** Minor inconvenience, standard industry practice.
+- **1 - Trivial:** Informational, no real risk.
+
+**Likelihood Scoring (1-5):**
+- **5 - Automatic / Routine:** Clause describes an always-on / current practice.
+- **4 - Likely:** Clause allows the practice with few limitations.
+- **3 - Possible (default):** Conditional or situational language.
+- **2 - Unlikely:** Heavily restricted or rare circumstances.
+- **1 - Extremely Rare:** Theoretical possibility only.
+
+**Safeguard Scoring (0-5):**
+- **5 - Full Mitigation:** Multiple protections, explicit user control, transparency, hard limits.
+- **4 - Strong:** Meaningful protections and user rights.
+- **3 - Moderate:** Basic protections, limited user control.
+- **2 - Weak:** Minimal protections, little transparency.
+- **1 - Minimal:** Nominal safeguards only.
+- **0 - None (default):** No protections, no user recourse.
+
+**Sort semantics (shipped):**
+- Findings sort **tier-first**: `(context_weight, irp_score, severity_rank)` all descending — context chip weight leads, IRP breaks ties within a tier, severity is the tiebreaker of last resort. Legacy findings without `irp_score` fall back to severity weight. Full detail: LIB-CONTEXT.
 
 **Technical Notes:**
-- Current: `analyzer.py::calculate_risk_score()` averages per-finding severity weights across all findings (no per-severity multiplier weighting beyond the weight table above)
-- Planned: calculate per-finding IRP, then weighted average for overall score
+- `_compute_irp` at `src/backend/app/services/analyzer.py:136-139` is the single source of truth for the composite.
+- `_seed_irp` in `rules.py` seeds rule-generated findings from `_CATEGORY_IRP_DEFAULTS` (38 categories mapped).
+- LLM prompts request `impact` / `likelihood` / `safeguard_score` per finding; missing values fall back to defaults above.
+- Confidence is a separate signal (see F3.4); it is not part of the IRP composite.
 
 **UI Display:**
-- Overall grade: Large letter with color coding
-- Overall score: Numeric (0.00-10.00), 2 decimal places (current); IRP would use a 0.00–1.00 scale (planned)
-- Risk level label: "Low", "Medium", "High", "Critical"
-- Visual: Risk gauge/meter
+- Overall grade: large letter with color coding derived from the 7-band table above.
+- Overall risk score: numeric (0.00-10.00), 2 decimal places.
+- Per-finding IRP: numeric (0.00-1.00), 4 decimal places (surfaced in the expanded finding card, see F4.2).
+- Risk level label: mapped from grade to the calmer verbal band ("Low" / "Moderate" / "Elevated" / "High") — no "Critical" verbal label to preserve the LIB-VOICE calm-confidence register.
 
 #### F3.2: Risk Categories (9 Core Types — expanded in practice to ~50)
 
@@ -576,6 +614,19 @@ Given this, the remaining gap between the two UIs (per issue #17/#19) is now nar
 - **Icon:** ⚠️ Warning icon
 - **Color:** Orange-red
 
+**Canonical Shipped Category List (`schemas.CATEGORIES`):**
+
+The 9 conceptual buckets above group ~50 canonical category labels shipped in `src/backend/app/schemas.py::CATEGORIES`. This frozenset is the single source of truth: any category-keyed dict in `rules.py`, `analyzer.py`, or `context.py` is validated against it at import time (audit finding LE-013 — see §Implementation Status Note — v2.1 addendum).
+
+The canonical labels are:
+
+- **Data-collection:** `Sensitive Data`, `Sensitive Data / Opt-Out`, `Biometric Data`, `Health Data`, `Financial Data`, `Children's Privacy`, `Collection Notice`, `Minors`
+- **Data-use:** `AI Training`, `AI Training Opt-Out`, `AI Training (Opt-Out)`, `Sale/Share`, `Data Sale / Sharing`, `Third-Party Sharing`, `Tracking / Profiling`, `Tracking & Consent`, `Marketing Communications`, `Purpose Limitation`, `ADM`, `Automated Decision-Making`, `Consequential AI Decisions`, `High-Risk AI`, `Prohibited AI`, `GPAI / Generative AI`, `AI-Generated Content`, `Algorithmic Accountability`, `Human Oversight`, `AI Non-Discrimination`, `Transparency`
+- **Terms-of-use:** `Liability`, `Arbitration / Dispute`, `Intellectual Property`, `In-App Purchases`, `Unilateral Changes`, `Dark Patterns`, `Deceptive Practices`, `Retention`, `Breach Notification`, `Data Security`, `Consent`, `Sub-processors`
+- **Privacy-rights:** `User Rights`, `Data Rights`, `Individual Rights`, `Privacy Rights`, `Cross-Border Transfer`, `Data Transfer`, `COPPA Compliance`, `HIPAA Compliance`, `FERPA Compliance`, `PCI DSS Compliance`, `PIPEDA Consent`, `LGPD Rights`, `APPI Disclosure`, `DPDP Consent`, `POPIA Processing`, `PIPA Processing`, `APP Privacy`, `UK Data Rights`, `Privacy as Human Right`, `Serious Privacy Invasion`
+
+**LE-013 taxonomy alignment (v2.2, 2026-07-03):** the Phase 1 remediation switched `_DOCTYPE_BOOSTS` / `_INDUSTRY_BOOSTS` from case-insensitive substring lookup to exact-category match. That change surfaced nine boost keys that had been firing on unrelated substrings ("Consent" matching "PIPEDA Consent", and so on). Rather than delete them, the following labels are canonical here and expected to be present in `schemas.CATEGORIES`, `_DOCTYPE_BOOSTS`, and `_INDUSTRY_BOOSTS`: `Arbitration / Dispute` (ToS), `Third-Party Sharing` (Privacy Policy / Cookie Policy / DPA), `Sub-processors` (DPA), `Data Transfer` (DPA), `Intellectual Property` (ToS), `Transparency` (AI / Tech Platform), `In-App Purchases` (Gaming). `Data Retention` is aliased to `Retention`, and `Liability Limitation` is aliased to `Liability` — both aliases remain canonical for the boost dicts only, no new schema entry required.
+
 **Technical Notes:**
 - Each category has rule-based regex patterns + LLM semantic detection
 - LLM provides context and explains why clause matches category
@@ -639,14 +690,16 @@ Given this, the remaining gap between the two UIs (per issue #17/#19) is now nar
 #### F4.1: Overview Summary
 
 **Acceptance Criteria:**
-- [ ] Display overall grade (A-F) prominently at top
-- [ ] Show IRP risk score as numeric value
-- [ ] Display risk level label with color coding
-- [ ] Show total findings count
-- [ ] Display breakdown by severity (High/Medium/Low)
-- [ ] Show confidence indicator (% of findings with confidence ≥0.80)
-- [ ] Display "Needs Review" badge if applicable
-- [ ] Show analysis timestamp and jurisdiction(s)
+- [x] Display overall grade (7-band shipped scale: A / A- / B / B- / C+ / C / D+) prominently at top
+- [x] Show overall risk score (0.00-10.00) as numeric value; per-finding IRP (0.00-1.00) surfaced in expanded finding card (F4.2)
+- [x] Display risk level label with color coding derived from grade band
+- [x] Show total findings count
+- [x] Display breakdown by severity (High/Medium/Low; Critical accepted from LLM but folded into High for verbal labels per LIB-VOICE)
+- [x] Show confidence indicator (% of findings with confidence >=0.80)
+- [x] Display "Needs Review" badge when `action_readiness == "Review"` or `review_required == True`
+- [x] Show analysis timestamp and jurisdiction(s) — `AnalysisPayload.jurisdictions` echoes back the filter set
+- [x] Show context-appropriate `verdict_headline` and `verdict_label` chip (see LIB-CONTEXT for verdict copy rotation semantics)
+- [x] Show `completeness` fraction (0.0-1.0) indicating share of expected policy sections detected
 
 **Layout:**
 ```
@@ -897,22 +950,27 @@ uuid1,"Example Privacy Policy",f2,Retention,Medium,0.82,"We keep data...",145,15
 
 #### F6.1: Add to Watchlist
 
-**Acceptance Criteria:**
-- [ ] User can add analyzed document to watchlist
-- [ ] System stores URL and current policy text hash
-- [ ] User can set check frequency (daily, weekly, monthly)
-- [ ] User can add notes/tags to watchlist item
-- [ ] System confirms addition with success message
+**Acceptance Criteria (v2.4, 2026-07-03 — OE-003 merged model):**
+- [ ] User can add a vendor + URL pair to the watchlist (subject is the vendor / URL, not the analysis id). If the user is starting from a completed analysis, the analysis reference lives in the free-text `notes` field or in the response's `last_analysis_id` column — it is not a required request field.
+- [ ] System stores `source_url` and current policy text hash (`last_document_hash`).
+- [ ] User can set a per-item check frequency via the optional `check_frequency` field (seconds; range 300 to 604800, i.e. 5 minutes to 7 days). UI dropdown mapping: daily = 86400, weekly = 604800, monthly = 2592000 (30 days). When the caller omits `check_frequency`, the item stores the ORM default (86400s / 24h) and the background refresh loop falls back to `settings.watchlist_refresh_seconds` at scheduler time via `_effective_check_frequency`.
+- [ ] User can add free-text notes via the optional `notes` field (max 1024 chars).
+- [ ] User can enable / disable an item via the optional `enabled` boolean (default `True`). When `enabled=False`, the background refresh loop skips the item entirely.
+- [ ] System confirms addition with the `WatchlistItemPayload` response, including computed `next_check_at` (equal to `last_checked + check_frequency`; null when disabled).
+
+**Schema (shipped):** `WatchlistCreateRequest` in `src/backend/app/schemas.py` — `vendor: str` (required, min length 1), `source_url: Optional[str]` (http/https only, hostname required, defense-in-depth against `javascript:` schemes), `check_frequency: Optional[int]` (300 to 604800 seconds), `enabled: Optional[bool]` (defaults True), `user_id: Optional[str]` (alphanumeric plus `@._-`, max 255), `notes: Optional[str]` (max 1024).
 
 #### F6.2: Change Detection
 
-**Acceptance Criteria:**
-- [ ] System automatically re-fetches URL on schedule
-- [ ] System compares new text to stored version
-- [ ] System calculates diff (added/removed/changed lines)
-- [ ] System re-analyzes if changes detected
-- [ ] System calculates risk delta (score change)
-- [ ] System sends email notification if significant change (±1.0 risk score or new high-severity finding)
+**Acceptance Criteria (v2.4, 2026-07-03 — per-item cadence, OE-003):**
+- [ ] Background loop (`_watchlist_loop_async` in `main.py`) refreshes only items whose `last_checked + check_frequency` is in the past AND whose `enabled` flag is True. Previously the loop woke on a single global `settings.watchlist_refresh_seconds` interval and refreshed every item every tick; the per-item contract is now honored.
+- [ ] Cadence is per-item, sourced from the `check_frequency` column. The server-side `settings.watchlist_refresh_seconds` remains as a global fallback when an item is inserted with the column left at its default and no override.
+- [ ] System compares new text to stored `last_document_text` / `last_document_hash`.
+- [ ] System calculates diff (added / removed / changed lines) via `diffing.diff_summary`.
+- [ ] System re-analyzes changed policies via `rules.detect_findings(text, [])` — the empty `jurisdictions` list preserves the global-tool contract (LIB-PRINCIPLES Principle 1 — no silent US-CA + GDPR default).
+- [ ] System calculates `risk_delta` (score change vs. `last_risk_score`).
+- [ ] Loop clamps its wakeup interval to `[_WATCHLIST_LOOP_MIN_SLEEP_S, _WATCHLIST_LOOP_MAX_SLEEP_S]` (60s to 3600s) so an empty watchlist or a very-long-cadence backlog does not hang the scheduler.
+- [ ] System sends email notification if significant change (±1.0 risk score or new high-severity finding). **Note:** email dispatch itself is deferred — tracked separately under BRD-ROADMAP-P4-D007.
 
 #### F6.3: Watchlist Dashboard
 
@@ -1040,28 +1098,55 @@ uuid1,"Example Privacy Policy",f2,Retention,Medium,0.82,"We keep data...",145,15
 - Analysis takes >60 seconds → Show "Still analyzing... this is taking longer than usual"
 - No high-risk findings → Congratulatory message: "This policy has relatively low risk!"
 
-### Flow 2: Researcher Bulk Analyzes 50 Policies
+### Flow 2: Researcher Bulk Analyzes Policies (API-only for MVP)
 
-1. **Prepare:** Researcher has CSV with 50 platform URLs
-2. **Batch Upload:** Researcher navigates to "Batch Analysis" (future feature)
-3. **Upload CSV:** Uploads CSV with columns: `name, url, jurisdiction`
-4. **Configure:** Selects jurisdiction for all (GDPR), document type (Privacy Policy)
-5. **Submit:** Clicks "Analyze All" (batch job)
-6. **Progress:** Dashboard shows progress bar (5/50 completed)
-7. **Wait:** Batch completes in ~20 minutes (25 seconds per policy)
-8. **Review:** Researcher views results table:
-   - Sortable by grade, risk score, findings count
-   - Filters by severity, category
-9. **Export:** Clicks "Export All as CSV (Detailed)"
-   - Downloads CSV with all findings (1,000+ rows)
-10. **Analysis:** Imports CSV into R for statistical analysis
-11. **Visualize:** Creates charts (risk distribution, common categories)
-12. **Cite:** References tool methodology in research paper
+**Decision (v2.3, 2026-07-03):** Flow 2 Batch Analysis ships as **API-only** for this release. UI treatment (CSV upload, progress bar, sortable table, "Export All as CSV" button) is a P2 follow-up tracked separately. Rationale: the synchronous `POST /analyze/batch` endpoint cannot survive a real 50-URL run behind HTTP proxies without an async job model, which is a multi-day architecture change, not a UI wire-up. Shipping API-only lets researchers proceed today via scripted access while the async story is scoped independently.
 
-**Edge Cases Handled:**
-- Some URLs fail → Continue with successful ones, log failures
-- Batch takes too long → Option to pause/resume
-- Rate limiting → Throttle requests to avoid IP bans
+**Persona narrative.** The researcher (a compliance analyst, a graduate student, or an in-house counsel building a longitudinal dataset) needs to analyze tens of privacy policies as a batch and get structured JSON back for downstream analysis (R, pandas, Jupyter). They are comfortable with a terminal and can script `curl` calls, so they do not need a UI to be productive. What they need is a documented, stable JSON contract and an endpoint they can hit in a loop.
+
+1. **Prepare:** Researcher assembles a list of policy URLs (or raw text bodies) in whatever format is convenient (CSV, JSON, Python list).
+2. **Author request:** Researcher constructs an `AnalyzeBatchRequest` JSON body targeting `POST /analyze/batch`. Example payload:
+
+    ```json
+    {
+      "items": [
+        {"name": "Acme ToS",    "url": "https://acme.example.com/terms",   "doc_type": "terms_of_service"},
+        {"name": "Acme Policy", "url": "https://acme.example.com/privacy", "doc_type": "privacy_policy"},
+        {"name": "Beta Policy", "url": "https://beta.example.com/privacy", "doc_type": "privacy_policy"}
+      ],
+      "industry": "healthcare",
+      "jurisdictions": ["GDPR"],
+      "mode": "full",
+      "detect_cross_references": true,
+      "context": ["for_work"]
+    }
+    ```
+
+3. **Call the endpoint:** Researcher submits with `curl`:
+
+    ```bash
+    curl -X POST http://localhost:9000/analyze/batch \
+      -H 'Content-Type: application/json' \
+      -d @batch_request.json > batch_result.json
+    ```
+
+    An empty `jurisdictions: []` means "no jurisdiction filter" (global-tool contract, see LIB-CONTEXT). US-CA + GDPR is not applied by default.
+4. **Receive results:** Response is a `BatchAnalysisResult` containing a `batch_id`, per-item `AnalysisPayload` objects (grade, `top_by_domain`, `action_items`, `verdict_headline`, findings), and optional `cross_references` when `detect_cross_references=true`.
+5. **Downstream analysis:** Researcher writes their own script to flatten the JSON into a dataframe, sort/filter, plot distributions, or export to CSV. Progress tracking (which item is done) and export formatting are the researcher's responsibility for this release.
+6. **Cite:** Researcher references tool methodology (IRP scoring, category taxonomy, jurisdiction coverage) in their publication. Backend contract is stable and versioned via the PRD Change History.
+
+**Edge Cases Handled (API surface):**
+- Some URLs fail → per-item error surfaces in that item's `AnalysisPayload`; sibling items still return successfully. Batch does not fail-fast.
+- Individual item text exceeds `MAX_INPUT_CHARS` → that item is rejected at schema-validation time with a 422; other items proceed.
+- LLM unavailable → each item degrades to rule-only findings with reduced confidence (see Hard Requirements).
+- Very large batches → synchronous endpoint means the caller holds the connection open for the full duration. For runs >20 URLs, callers should either split into smaller batches or wait for the async-job successor endpoint (P2).
+
+**Out of Scope for This Release (tracked as P2 follow-ups):**
+- Batch UI wired into the Streamlit v2 view (nav surface, CSV upload widget, progress bar, sortable results table, "Export All as CSV" button).
+- Async job model with pause/resume, background workers, and job-status polling.
+- Rate-limiting / throttling controls on outbound fetches beyond what `ingest.py` already applies per request.
+
+**Optional CLI wrapper.** For researchers who prefer a CSV-in / CSV-out shape without writing their own client, a thin shell helper is available at `src/backend/scripts/batch_analyze.py`. It reads a CSV with columns `name,url,jurisdiction`, calls `POST /analyze/batch` in a single request, and writes summary rows to a result CSV. The helper is a convenience, not the contract; the contract is the JSON endpoint above.
 
 ### Flow 3: Founder Reviews Vendor Agreement Before Signing
 
@@ -1094,9 +1179,9 @@ uuid1,"Example Privacy Policy",f2,Retention,Medium,0.82,"We keep data...",145,15
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│              FRONTEND — two UIs                     │
-│  Streamlit (primary, :8501, app_streamlit.py)       │
-│  Vanilla JS SPA (fallback, :8000, index.html/app.js)│
+│              FRONTEND — Streamlit only              │
+│  Streamlit v2 (:8501, app_streamlit_v2.py)          │
+│  v1 rollback (STREAMLIT_UI=v1, app_streamlit_legacy)│
 │                                                     │
 │  ┌───────────┐  ┌──────────┐  ┌─────────────┐     │
 │  │  Input UI │  │ Results  │  │  Verify     │     │
@@ -1123,8 +1208,8 @@ uuid1,"Example Privacy Policy",f2,Retention,Medium,0.82,"We keep data...",145,15
 │  │                                  │              │
 │  │  - Analysis (incl. result_json)  │              │
 │  │  - ReviewItem                    │              │
-│  │  - WatchlistItem                 │              │
-│  │  - PolicySnapshot / PolicyWatch  │              │
+│  │  - WatchlistItem (OE-003 merged) │              │
+│  │  - PolicySnapshot                 │              │
 │  └──────────────────────────────────┘              │
 └─────────────────────────────────────────────────────┘
                         ↓ HTTP/REST
@@ -1178,18 +1263,27 @@ CREATE TABLE review_items (
 );
 ```
 
-#### Table: `watchlist_items` (model: `WatchlistItem`)
+#### Table: `watchlist_items` (model: `WatchlistItem`) — v2.4 OE-003 merged shape
+
+The four merged columns (`user_id`, `check_frequency`, `enabled`, `created_at`) plus `notes` are the OE-003 fold-in — see PRD Change History v2.4 and `docs/reports/user-decision-brief-2026-07-03.md` A3.
 
 ```sql
 CREATE TABLE watchlist_items (
     id TEXT PRIMARY KEY,
     vendor TEXT NOT NULL,
-    source_url TEXT NOT NULL,
-    status TEXT,
-    last_checked TIMESTAMP,
+    source_url TEXT,
+    status TEXT NOT NULL DEFAULT 'No Changes',
+    -- OE-003 merged columns (previously on the retired ``policy_watches`` table):
+    user_id TEXT,                              -- nullable; opaque user id for multi-tenant deployments
+    check_frequency INTEGER NOT NULL DEFAULT 86400,  -- per-item refresh cadence in seconds, honored by _watchlist_loop_async
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,     -- proper boolean (LE-010 fix — PolicyWatch stored the string "true")
+    notes TEXT,                                -- free-text notes / tags
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    -- Existing diff / risk columns:
+    last_checked TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     changes_since TIMESTAMP,
-    change_count INTEGER DEFAULT 0,
-    risk_delta REAL,
+    change_count INTEGER NOT NULL DEFAULT 0,
+    risk_delta REAL NOT NULL DEFAULT 0.0,
     change_summary TEXT,
     last_document_text TEXT,
     last_document_hash TEXT,
@@ -1199,7 +1293,7 @@ CREATE TABLE watchlist_items (
 );
 ```
 
-#### Tables: `policy_snapshots` / `policy_watches` (models: `PolicySnapshot` / `PolicyWatch`)
+#### Table: `policy_snapshots` (model: `PolicySnapshot`)
 
 ```sql
 CREATE TABLE policy_snapshots (
@@ -1209,17 +1303,9 @@ CREATE TABLE policy_snapshots (
     captured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     raw_text TEXT NOT NULL
 );
-
-CREATE TABLE policy_watches (
-    id TEXT PRIMARY KEY,
-    url TEXT NOT NULL UNIQUE,
-    user_id TEXT,
-    check_frequency INTEGER DEFAULT 86400,
-    last_check TIMESTAMP,
-    enabled TEXT DEFAULT 'true',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
 ```
+
+**Note (v2.4, 2026-07-03):** the legacy `policy_watches` table was retired when its rows were folded into `watchlist_items` under OE-003. Existing deployments run `src/backend/scripts/migrate_policywatch_to_watchlist.py` to migrate rows before dropping the table. The migration is idempotent — matched rows update in place (nullable columns are filled without overwriting diff-side values); orphan rows insert new `watchlist_items` with the URL hostname synthesized as `vendor`.
 
 ### API Endpoints Specification
 
@@ -1227,59 +1313,101 @@ CREATE TABLE policy_watches (
 
 **Description:** Analyze pasted text
 
-**Request:**
+**Request:** `AnalyzeRequest` (see `src/backend/app/schemas.py:167-192`).
+
 ```json
 {
-  "text": "string (required, max 50000 chars)",
-  "name": "string (optional, default: 'Untitled')",
-  "doc_type": "Privacy Policy | Terms of Service | Cookie Policy | DPA | Combined",
-  "jurisdictions": ["US-FED", "US-CA", "GDPR", ...],
-  "industry": "General | Retail | Finance | Healthcare | Gaming | Social Media | AI / Tech Platform | Education"
+  "text": "string (required, min 1 char, server-side truncated to MAX_INPUT_CHARS = 20000 by default)",
+  "name": "string (optional)",
+  "doc_type": "Privacy Policy | Terms of Service | Cookie Policy | Data Processing Agreement | Combined",
+  "industry": "General | Retail | Finance | Healthcare | Gaming | Social Media | AI / Tech Platform | Education",
+  "source_url": "http(s) URL (optional; javascript: / data: / vbscript: schemes rejected at the schema layer)",
+  "jurisdictions": ["US-CA", "GDPR", "..."],
+  "mode": "full | quick",
+  "context": ["want_understand | for_child | for_care | for_work | just_curious"]
 }
 ```
 
-**Response (200 OK):**
+- `jurisdictions=[]` is treated as **no filter** (global-tool contract; no US-CA + GDPR default). Location dropdowns in the intake default to blank.
+- `context` values are validated against `frozenset(get_args(ContextChip))` — the schema-derived allowlist in `main.py`. Invalid chips return 400.
+
+**Response (200 OK):** `AnalysisPayload` (see `src/backend/app/schemas.py:220-262`). Example:
+
 ```json
 {
   "id": "uuid",
-  "status": "completed | processing | failed",
+  "name": "Example Privacy Policy",
+  "doc_type": "Privacy Policy",
+  "industry": "General",
+  "source_url": "https://example.com/privacy",
+  "status": "completed",
   "review_required": false,
   "confidence": 0.85,
   "risk_score": 6.8,
   "grade": "C+",
   "created_at": "2026-02-13T20:49:00Z",
-  "findings_count": {
-    "total": 12,
-    "high": 4,
-    "medium": 5,
-    "low": 3
+  "analysis_mode": "full",
+  "estimated_time": 12.4,
+  "summary": "...",
+  "action_readiness": "Review",
+  "completeness": 0.75,
+  "context": ["want_understand"],
+  "jurisdictions": ["US-CA", "GDPR"],
+  "verdict_headline": "There are a few things here worth a closer read.",
+  "verdict_label": "Worth a closer read",
+  "top_by_domain": {
+    "Data": [ /* up to 2 Finding objects */ ],
+    "Data use": [ /* up to 2 Finding objects */ ],
+    "Terms of use": [ /* up to 2 Finding objects */ ],
+    "Privacy rights": [ /* up to 2 Finding objects */ ]
   },
+  "action_items": [
+    "Consider requesting your data export before signing up.",
+    "This policy allows advertising use — check if you can opt out."
+  ],
   "findings": [
     {
-      "id": "uuid",
-      "category": "Data Sharing",
+      "category": "Sale/Share",
       "severity": "High",
       "confidence": 0.86,
       "excerpt": "We may share personal information...",
       "explanation": "This policy allows...",
       "impact": 4,
       "likelihood": 4,
-      "safeguards": 2,
-      "irp_score": 0.76,
+      "safeguard_score": 2,
+      "irp_score": 0.68,
       "evidence": {
         "line_start": 120,
         "line_end": 126,
         "legal_basis": ["CCPA § 1798.115"]
       },
-      "jurisdictions": ["US-CA"]
+      "jurisdictions": ["US-CA"],
+      "needs_review": false
     }
   ]
 }
 ```
 
+**AnalysisPayload — v2 fields (shipped in PR #34):**
+
+The following 8 fields were added to `AnalysisPayload` alongside the plain-language redesign (issue #19). Type sources: `src/backend/app/schemas.py:220-262`.
+
+| Field | Type | Default | Semantics |
+|-------|------|---------|-----------|
+| `action_readiness` | `Literal["Go", "Review", "Stop"]` | `"Review"` | High-level recommendation. `Go` = low risk + high completeness; `Stop` = high risk; `Review` = everything in between. Feeds the results-view verdict chip and the "Needs Review" badge (F4.1). |
+| `completeness` | `float` in `[0.0, 1.0]` | `0.0` | Fraction of expected policy sections detected. Checklist: user rights, retention, contact, opt-out, ADM, security, third-party, minors. Computed by `analyzer._compute_completeness`. |
+| `context` | `List[ContextChip]` | `[]` | Echo of the reader's context chip selections from the intake (`want_understand`, `for_child`, `for_care`, `for_work`, `just_curious`). Values are validated against `frozenset(get_args(ContextChip))` at request time. See LIB-CONTEXT §Chip taxonomy. |
+| `jurisdictions` | `List[Jurisdiction]` | `[]` | Jurisdiction codes the analysis was filtered against — echoes the request so the UI can display "Rules applied for: ...". Empty list explicitly means "no filter" (global-tool contract). |
+| `verdict_headline` | `Optional[str]` | `None` | Context-appropriate verdict sentence rendered on the results overview. Composed by `services/context.py::verdict_headline(context, action_readiness)`. Rotation semantics: strongest chip in priority order (`for_child` > `for_care` > `for_work` > `want_understand` > `just_curious`) selects the copy variant. LIB-VOICE governs tone (tentative framings, no em-dashes, no directive "you should"). |
+| `verdict_label` | `Optional[str]` | `None` | Short chip label variant of the verdict (e.g. `"Worth a closer read"`, `"Looks manageable"`). Same rotation semantics as `verdict_headline`. Never a letter grade — LIB-VOICE forbids grade-as-label. |
+| `top_by_domain` | `dict[str, list[Finding]]` | `{}` | Top findings grouped into the 4 fixed domains: `"Data"` (collection), `"Data use"`, `"Terms of use"`, `"Privacy rights"`. Max 2 findings per domain, 8 total. Category-to-domain mapping lives in `analyzer._DOMAIN_MAP`. Hardware permissions (camera / mic / contacts / location) are scope caveats only and are never a domain here. |
+| `action_items` | `List[str]` | `[]` | Backend-generated reader-actionable next steps derived from findings + jurisdictions. Backend-side derivation keeps the frontend thin — `app_streamlit_v2.py` renders these verbatim. Copy MUST follow LIB-VOICE (tentative framing, no em-dashes). |
+
+Note: `AnalysisPayload` also carries `document_text` (optional), `line_offsets` (for Verify View coordinate mapping), `summary`, `analysis_mode`, and `estimated_time`. `findings_count` in the JSON example above is derived by the frontend from `findings[]` — it is not a shipped field on the schema.
+
 **Error Responses:**
-- `400 Bad Request`: Invalid input (missing text, invalid jurisdiction)
-- `413 Payload Too Large`: Text exceeds 50,000 characters
+- `400 Bad Request`: Invalid input (missing text, invalid jurisdiction / chip against the schema-derived allowlists)
+- `413 Payload Too Large`: Text exceeds `MAX_INPUT_CHARS` (default 20,000 — see §API Notes on limits)
 - `500 Internal Server Error`: Analysis failed
 - `503 Service Unavailable`: LocalAI unreachable
 
@@ -1287,22 +1415,29 @@ CREATE TABLE policy_watches (
 
 **Description:** Analyze document from URL
 
-**Request:**
+**Request:** `AnalyzeUrlRequest` (see `src/backend/app/schemas.py:195-217`).
+
 ```json
 {
-  "url": "https://example.com/privacy (required, valid HTTP/HTTPS)",
+  "url": "https://example.com/privacy (required, http or https only)",
   "name": "string (optional)",
-  "doc_type": "string (optional, default: 'Privacy Policy')",
-  "jurisdictions": ["array (optional, default: US-CA, GDPR)"]
+  "doc_type": "string (optional)",
+  "industry": "string (optional)",
+  "jurisdictions": ["array (optional; empty = no filter)"],
+  "mode": "full | quick",
+  "context": ["...ContextChip values..."]
 }
 ```
 
-**Response:** Same as `/analyze`
+- No US-CA + GDPR default fallback — an empty `jurisdictions` array means "no filter" (global-tool contract).
+- `javascript:` / `data:` / `vbscript:` schemes are rejected at the schema layer via `_validate_url_scheme`; SSRF-target rejection happens downstream in `ingest._validate_url`.
+
+**Response:** `AnalysisPayload` (same as `/analyze`).
 
 **Error Responses:**
-- `400 Bad Request`: Invalid URL format
+- `400 Bad Request`: Invalid URL format or non-http(s) scheme
 - `404 Not Found`: URL unreachable or returns 404
-- `408 Request Timeout`: URL fetch timeout (>30 seconds)
+- `408 Request Timeout`: URL fetch timeout (see `LM_URL_FETCH_TIMEOUT_S`, default 30 seconds — distinct from `LM_REQUEST_TIMEOUT_S`, which governs LLM inference)
 - `422 Unprocessable Entity`: Unable to extract text from URL
 
 #### POST `/analyze/file`
@@ -1418,52 +1553,80 @@ CREATE TABLE policy_watches (
 
 #### GET `/watchlist`
 
-**Description:** List all watchlist items
+**Description:** List all watchlist items. Returns a JSON array of `WatchlistItemPayload` records (see `POST /watchlist` for the field-by-field response shape). Ordered by `last_checked DESC`.
 
-**Response:**
+**Response (shape per item — v2.4 OE-003 merged model):**
 ```json
-{
-  "total": 15,
-  "items": [
-    {
-      "id": "uuid",
-      "name": "Google Privacy Policy",
-      "url": "https://policies.google.com/privacy",
-      "frequency": "weekly",
-      "last_checked_at": "2026-02-10T12:00:00Z",
-      "next_check_at": "2026-02-17T12:00:00Z",
-      "change_detected": false,
-      "risk_delta": 0.0,
-      "last_analysis": {
-        "grade": "C",
-        "risk_score": 6.5
-      }
-    }
-  ]
-}
+[
+  {
+    "id": "uuid",
+    "vendor": "Google",
+    "source_url": "https://policies.google.com/privacy",
+    "status": "No Changes",
+    "last_checked": "2026-07-03T12:00:00Z",
+    "changes_since": null,
+    "change_count": 0,
+    "risk_delta": 0.0,
+    "change_summary": null,
+    "user_id": "alex@example.com",
+    "check_frequency": 604800,
+    "enabled": true,
+    "notes": "Weekly cadence for the CCPA change tracker.",
+    "created_at": "2026-07-03T12:00:00Z",
+    "next_check_at": "2026-07-10T12:00:00Z"
+  }
+]
 ```
 
 #### POST `/watchlist`
 
-**Description:** Add item to watchlist
+**Description:** Add a vendor + URL to the watchlist. Subject is the vendor and URL (not a prior analysis id). Backed by `WatchlistCreateRequest` in `src/backend/app/schemas.py` — see F6.1 for the full field-by-field acceptance contract.
 
-**Request:**
+**Request (v2.4 shipped shape, OE-003 merged model):**
 ```json
 {
-  "analysis_id": "uuid (required)",
-  "frequency": "daily | weekly | monthly (default: weekly)",
-  "notes": "string (optional)"
+  "vendor": "Google",
+  "source_url": "https://policies.google.com/privacy",
+  "check_frequency": 604800,
+  "enabled": true,
+  "user_id": "alex@example.com",
+  "notes": "Weekly cadence for the CCPA change tracker. See analysis 8f2a-…"
 }
 ```
 
-**Response:**
+Field notes:
+- `vendor` (str, required, min length 1) — display name shown in the watchlist dashboard.
+- `source_url` (Optional[str]) — must use http or https and include a hostname. `javascript:` / `data:` / `vbscript:` schemes are rejected at the schema layer.
+- `check_frequency` (Optional[int], seconds, 300 to 604800) — per-item refresh cadence. UI dropdown mapping: daily = 86400, weekly = 604800, monthly = 2592000. Omit to accept the ORM default (86400s / 24h). Honored by `_watchlist_loop_async` (previously carried on `PolicyWatch` and silently ignored — see OE-003).
+- `enabled` (Optional[bool], default `True`) — when False the background refresh loop skips this item. Boolean, not string (LE-010 fix).
+- `user_id` (Optional[str], max 255, alphanumeric + `@._-`) — opaque user identifier; nullable so single-user deployments do not need to set it.
+- `notes` (Optional[str], max 1024) — free-text notes. Callers who want to link back to a prior analysis include the id here (or set it out-of-band on `WatchlistItem.last_analysis_id` after the first refresh).
+
+**Response:** `WatchlistItemPayload`
+
 ```json
 {
-  "success": true,
-  "watchlist_item_id": "uuid",
-  "next_check_at": "2026-02-20T12:00:00Z"
+  "id": "uuid",
+  "vendor": "Google",
+  "source_url": "https://policies.google.com/privacy",
+  "status": "No Changes",
+  "last_checked": "2026-07-03T12:00:00Z",
+  "changes_since": null,
+  "change_count": 0,
+  "risk_delta": 0.0,
+  "change_summary": null,
+  "user_id": "alex@example.com",
+  "check_frequency": 604800,
+  "enabled": true,
+  "notes": "Weekly cadence for the CCPA change tracker. See analysis 8f2a-…",
+  "created_at": "2026-07-03T12:00:00Z",
+  "next_check_at": "2026-07-10T12:00:00Z"
 }
 ```
+
+`next_check_at` is computed at response-render time as `last_checked + check_frequency` (falls back to the global `settings.watchlist_refresh_seconds` when the item omitted `check_frequency`, per `_effective_check_frequency`). Returns `null` when `enabled=False`.
+
+**Deprecated companion:** the `/policy-watch/*` endpoint family was merged into `/watchlist/*` on 2026-07-03 (OE-003). See the deprecation-shim block below for the 308 / 410 response contract.
 
 #### GET `/exports/analysis/{id}.pdf`
 
@@ -1491,11 +1654,12 @@ CREATE TABLE policy_watches (
 
 These exist in `main.py` and are documented here for completeness (JSON shapes follow the same conventions as the endpoints above):
 
-- `POST /analyze/batch` — analyze multiple documents in one request with cross-reference detection
+- `POST /analyze/batch` — analyze multiple documents in one request with cross-reference detection (`AnalyzeBatchRequest` -> `BatchAnalysisResult`). **API-only for this release:** consumers are expected to script their own progress tracking and export formatting. Batch UI (CSV upload, progress bar, sortable results table, "Export All as CSV" button) is deferred as a P2 follow-up, tracked separately [issue TBD, link once filed]. Optional CSV-in/CSV-out helper at `src/backend/scripts/batch_analyze.py`. See §6.2 Flow 2 for full researcher narrative and sample payload.
+- `POST /infer` — **shipped in PR #34.** Accepts a URL and/or policy text and returns inferred `jurisdictions`, `doc_type`, `industry`, plus `location_needed` (bool) and `detected_signals` (dict). TLD-based jurisdiction inference + statute / regulatory-body / geographic keyword scan. Text capped at 200,000 chars (`schemas.py:339`); `@lru_cache` on hot paths; pre-compiled regexes; observability logging. Request: `InferRequest`; response: `InferResponse` (`src/backend/app/schemas.py:334-358`).
 - `GET /rubric` — aggregate rubric scores across analyses
 - `GET/POST /snapshots`, `GET /snapshots/detail/{id}` — capture/list historical policy snapshots (SHA-256 deduplicated)
 - `GET /diff/{snapshot_id_1}/{snapshot_id_2}` — token-level diff between two snapshots, with keyword-based severity classification
-- `POST/GET /policy-watch`, `DELETE /policy-watch/{id}`, `POST /policy-watch/{id}/snapshot` — scheduled policy-watch configuration (see `docs/ENHANCEMENT_6.md`)
+- `POST/GET /policy-watch`, `DELETE /policy-watch/{id}` — **deprecated (OE-003, 2026-07-03).** Return `308 Permanent Redirect` to `/watchlist`, `/watchlist`, `/watchlist/{id}` respectively, with headers `Deprecation: true`, `Sunset: 2026-10-01`, and `Link: </watchlist>; rel="successor-version"`. 308 (vs 301) preserves the HTTP method and request body — a client POSTing to `/policy-watch` will replay to `/watchlist`, though the field rename (`url` -> `source_url`) means clients that depended on the old field name must update their request payload. `POST /policy-watch/{id}/snapshot` returns `410 Gone` (the id lookup no longer resolves after the merge; a redirect to `/watchlist/{id}/refresh` would 404 in the general case). Migration script for existing `policy_watches` rows: `src/backend/scripts/migrate_policywatch_to_watchlist.py`.
 
 ### LLM Integration Specification
 
@@ -1620,7 +1784,7 @@ Provide findings as JSON array:
 - [ ] User can analyze documents via URL, file upload, or text paste
 - [ ] System supports PDF, DOCX, RTF, HTML, TXT formats
 - [x] System detects the 9 core risk categories (expanded to ~50 in practice) with 80%+ accuracy
-- [x] System calculates a severity-weighted risk score and assigns letter grade (IRP formula is a planned enhancement, not yet built)
+- [x] System calculates a per-finding IRP (Impact / Likelihood / Safeguards) composite score, aggregates to an overall 0-10 risk score, and assigns a letter grade from the 7-band shipped scale (A / A- / B / B- / C+ / C / D+) — shipped in PR #34 (see §F3.1)
 - [ ] System displays findings with excerpts and explanations
 - [ ] User can view findings in Verify view with highlighting
 - [ ] User can export analysis as PDF
@@ -2069,7 +2233,14 @@ Provide findings as JSON array:
 
 ### Appendix D: Glossary
 
-- **IRP Score:** Impact-Risk-Protection score (0-1 scale)
+- **IRP Score:** Impact / Likelihood / Safeguards composite score per finding, `0.5*(impact/5) + 0.4*(likelihood/5) - 0.3*(safeguard/5)`, clamped to `[0, 1]`. See §F3.1.
+- **Overall Risk Score:** Document-level aggregate on a 0-10 scale (higher = worse), rendered as a letter grade via the 7-band table in §F3.1.
+- **Context Chip:** Reader-supplied intake signal (`want_understand`, `for_child`, `for_care`, `for_work`, `just_curious`) that biases which findings surface first and swaps verdict copy. See LIB-CONTEXT.
+- **Verdict Headline / Label:** Context-appropriate sentence + short chip label rendered on the results overview; rotation logic in `services/context.py`, copy conventions in LIB-VOICE.
+- **Action Readiness:** High-level `Go` / `Review` / `Stop` recommendation derived from risk and completeness.
+- **Completeness:** Fraction (0.0-1.0) of expected policy sections detected (rights, retention, contact, opt-out, ADM, security, third-party, minors).
+- **Top-by-Domain:** Top findings grouped into 4 fixed buckets — `Data`, `Data use`, `Terms of use`, `Privacy rights` — capped at 2 per domain and 8 total.
+- **Action Items:** Backend-generated reader-actionable next steps derived from findings + jurisdictions, returned on `AnalysisPayload` so the frontend does not have to know the derivation rules.
 - **Confidence:** How certain the system is about a finding (0-1 scale)
 - **Finding:** A detected risky clause in a policy
 - **Severity:** High, Medium, or Low risk level
@@ -2086,9 +2257,9 @@ Provide findings as JSON array:
 
 ## Approval & Sign-Off
 
-**PRD Prepared By:** [Product Manager Name]  
-**Date:** 2026-06-27  
-**Version:** 2.0
+**PRD Prepared By:** [Product Manager Name]
+**Date:** 2026-07-03
+**Version:** 2.4
 
 **Review & Approval:**
 

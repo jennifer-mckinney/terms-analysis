@@ -7,7 +7,7 @@ import json
 import logging
 import typing
 from contextlib import asynccontextmanager, suppress
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import BytesIO, StringIO
 from typing import get_args
 from uuid import uuid4
@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .database import db_session, get_db, init_db
-from .models import Analysis, PolicySnapshot, PolicyWatch, ReviewItem, WatchlistItem
+from .models import Analysis, PolicySnapshot, ReviewItem, WatchlistItem
 from .schemas import (
     AnalysisPayload,
     AnalysisSummary,
@@ -38,8 +38,6 @@ from .schemas import (
     Jurisdiction,
     PolicySnapshotListItem,
     PolicySnapshotPayload,
-    PolicyWatchCreateRequest,
-    PolicyWatchPayload,
     ReviewItemPayload,
     ReviewUpdate,
     RubricScores,
@@ -110,39 +108,122 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+# OE-003: minimum interval between loop wakeups when no cadence is configured
+# and no items are due. Bounds CPU when the watchlist is empty. Also caps the
+# sleep between per-item cadence checks so a very-long-cadence item does not
+# starve a short-cadence item added later.
+_WATCHLIST_LOOP_MIN_SLEEP_S = 60
+_WATCHLIST_LOOP_MAX_SLEEP_S = 3600
+
+
+def _effective_check_frequency(item: WatchlistItem) -> int:
+    """OE-003 helper: per-item cadence with the global setting as a fallback.
+
+    A user setting ``check_frequency=3600`` on an item now actually gets an
+    hourly refresh — previously ``PolicyWatch.check_frequency`` was written and
+    never consumed (silent user-facing bug).
+    """
+    if item.check_frequency and item.check_frequency > 0:
+        return int(item.check_frequency)
+    if settings.watchlist_refresh_seconds and settings.watchlist_refresh_seconds > 0:
+        return int(settings.watchlist_refresh_seconds)
+    return 0
+
+
+def _compute_next_check_at(item: WatchlistItem) -> datetime | None:
+    """Return the datetime at which this item is next due, or None if disabled."""
+    if not getattr(item, "enabled", True):
+        return None
+    cadence = _effective_check_frequency(item)
+    if cadence <= 0 or item.last_checked is None:
+        return None
+    last = item.last_checked
+    # SQLite drops tzinfo on round-trip; assume UTC when naive to keep math safe.
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return last + timedelta(seconds=cadence)
+
+
 async def _watchlist_loop_async() -> None:
+    """OE-003: per-item cadence scheduler.
+
+    Previously this loop woke on a single global ``watchlist_refresh_seconds``
+    interval and refreshed every item every wakeup. That contract is now
+    per-item: each ``WatchlistItem`` carries its own ``check_frequency``, and
+    the loop refreshes only past-due, enabled items, then sleeps until the
+    next-due wakeup (bounded by ``_WATCHLIST_LOOP_MIN_SLEEP_S`` /
+    ``_WATCHLIST_LOOP_MAX_SLEEP_S`` so an empty watchlist or a
+    very-long-cadence backlog does not hang the loop).
+    """
     while True:
         try:
-            await _refresh_all_watchlist_items()
+            sleep_for = await _refresh_due_watchlist_items()
         except Exception:
-            pass
-        await asyncio.sleep(settings.watchlist_refresh_seconds)
+            # Audit finding LE-003: never swallow the refresh loop error
+            # silently. Log with stack so ops has a signal when the loop
+            # freezes (SQL error, network wedge, etc.).
+            logger.exception(
+                "watchlist refresh loop failed; retrying in %s s",
+                _WATCHLIST_LOOP_MIN_SLEEP_S,
+            )
+            sleep_for = _WATCHLIST_LOOP_MIN_SLEEP_S
+        await asyncio.sleep(sleep_for)
 
 
-async def _refresh_all_watchlist_items() -> None:
+async def _refresh_due_watchlist_items() -> int:
+    """Refresh only items whose ``last_checked + check_frequency`` is in the past
+    and that are enabled. Returns the number of seconds to sleep until the next
+    due item, clamped to ``[_WATCHLIST_LOOP_MIN_SLEEP_S, _WATCHLIST_LOOP_MAX_SLEEP_S]``.
+    """
     with db_session() as db:
-        if settings.watchlist_refresh_seconds <= 0:
-            return
         items = (
             db.query(WatchlistItem)
             .filter(WatchlistItem.source_url.isnot(None))
             .all()
         )
+        # Fast bail-out: if the watchlist is empty and no global cadence is
+        # configured, sleep the max interval so we still tick.
+        if not items:
+            return (
+                settings.watchlist_refresh_seconds
+                if settings.watchlist_refresh_seconds > 0
+                else _WATCHLIST_LOOP_MAX_SLEEP_S
+            )
+        now = datetime.now(timezone.utc)
+        next_wakeup_deltas: list[float] = []
         for item in items:
+            # OE-003: honor the per-item enable flag (LE-010 fix — was string).
+            if not getattr(item, "enabled", True):
+                continue
+            cadence = _effective_check_frequency(item)
+            if cadence <= 0:
+                # No cadence configured (item + global both 0) — skip.
+                continue
+            next_due = _compute_next_check_at(item)
+            if next_due is not None and next_due > now:
+                # Not yet due — record how long until it is.
+                next_wakeup_deltas.append((next_due - now).total_seconds())
+                continue
             try:
                 if item.source_url is None:
                     continue
                 text = await fetch_url_text(item.source_url)
             except Exception:
                 item.status = "Check Failed"
+                item.last_checked = now
+                next_wakeup_deltas.append(cadence)
                 continue
             current_text = text or ""
             new_hash = content_hash(current_text)
             change_count, summary = diff_summary(item.last_document_text or "", current_text)
             changed = item.last_document_hash and item.last_document_hash != new_hash
-            now = datetime.now(timezone.utc)
             item.last_checked = now
-            rule_findings = detect_findings(current_text, ["US-CA", "GDPR"])
+            # Global-tool contract per PR #34 and CLAUDE.md §Session outcomes:
+            # empty jurisdictions list == "no filter". Do not hardcode
+            # ["US-CA", "GDPR"] here — that silently re-scopes every monitored
+            # policy to two jurisdictions regardless of the reader's location.
+            # Audit finding LE-001.
+            rule_findings = detect_findings(current_text, [])
             new_score = calculate_risk_score(rule_findings)
             if item.last_risk_score is not None:
                 item.risk_delta = round(new_score - item.last_risk_score, 2)
@@ -160,7 +241,11 @@ async def _refresh_all_watchlist_items() -> None:
                 item.change_summary = ""
             item.last_document_text = current_text[:50_000]
             item.last_document_hash = new_hash
+            next_wakeup_deltas.append(cadence)
         db.commit()
+    if not next_wakeup_deltas:
+        return _WATCHLIST_LOOP_MAX_SLEEP_S
+    return int(max(_WATCHLIST_LOOP_MIN_SLEEP_S, min(_WATCHLIST_LOOP_MAX_SLEEP_S, min(next_wakeup_deltas))))
 
 
 def _clamp(value: float, lower: float = 0.0, upper: float = 10.0) -> float:
@@ -273,6 +358,9 @@ async def analyze(request: AnalyzeRequest, db: Session = Depends(get_db)):
         request.mode,
     )
     resolved_name = request.name or request.source_url or "Pasted Document"
+    # ``/analyze`` is the paste-body endpoint: strip and collapse whitespace
+    # before the length gate. URL and file endpoints leave whitespace as-is
+    # so structural formatting in legal text survives.
     result = await analyze_text(
         request.text,
         request.jurisdictions,
@@ -282,6 +370,7 @@ async def analyze(request: AnalyzeRequest, db: Session = Depends(get_db)):
         source_url=request.source_url,
         mode=request.mode,
         context=request.context,
+        is_paste_input=True,
     )
     payload = result.payload
     _persist_analysis(
@@ -385,15 +474,15 @@ async def analyze_file(
     # ``jurisdictions`` arrives as a comma-separated list on multipart uploads.
     # Only recognised codes from the schema Literal are kept; unknown values are
     # dropped rather than propagated to the analyzer where they'd short-circuit
-    # the post-LLM jurisdiction filter. Falls back to the same default as the
-    # JSON endpoints when no valid values remain.
+    # the post-LLM jurisdiction filter. When no valid values remain the request
+    # falls through to the global-tool "no filter" contract (empty list), matching
+    # AnalyzeRequest / AnalyzeUrlRequest defaults (schemas.py). Audit finding
+    # LE-002 — do not restore a ["US-CA", "GDPR"] fallback here.
     selected_jurisdictions = (
         [j.strip() for j in jurisdictions.split(",") if j.strip() in _VALID_JURISDICTIONS]
         if jurisdictions
         else []
     )
-    if not selected_jurisdictions:
-        selected_jurisdictions = ["US-CA", "GDPR"]
 
     # ``context`` arrives as a comma-separated list on multipart uploads. Only
     # valid ContextChip values are propagated; anything else is silently dropped
@@ -539,10 +628,64 @@ def get_analysis(analysis_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/exports/analyses.csv")
-def export_analyses_csv(db: Session = Depends(get_db)):
-    records = db.query(Analysis).order_by(Analysis.created_at.desc()).all()
+def export_analyses_csv(
+    ids: str | None = Query(default=None, description="Comma-separated analysis IDs"),
+    detailed: bool = Query(
+        default=False,
+        description="Emit one row per finding instead of one row per analysis",
+    ),
+    db: Session = Depends(get_db),
+):
+    """CSV export honouring PRD §7.3.12 ``ids`` and ``detailed`` params.
+
+    Audit finding GAP-001. Streamlit v2 sends ``?ids={doc_id}&detailed=true``
+    to produce a finding-level sheet for a single analysis. Prior behavior
+    silently ignored both params and emitted a summary of every analysis.
+    """
+    query = db.query(Analysis).order_by(Analysis.created_at.desc())
+    if ids:
+        wanted = [i.strip() for i in ids.split(",") if i.strip()]
+        if wanted:
+            query = query.filter(Analysis.id.in_(wanted))
+    records = query.all()
+
     output = StringIO()
     writer = csv.writer(output)
+
+    if detailed:
+        # Finding-level rows per PRD §5.5.3 column list.
+        writer.writerow([
+            "analysis_id",
+            "document_name",
+            "finding_id",
+            "category",
+            "severity",
+            "confidence",
+            "excerpt",
+            "line_start",
+            "line_end",
+        ])
+        for record in records:
+            try:
+                data = json.loads(record.result_json) if record.result_json else {}
+            except json.JSONDecodeError:
+                data = {}
+            findings = data.get("findings") or []
+            for idx, finding in enumerate(findings):
+                evidence = finding.get("evidence") or {}
+                writer.writerow([
+                    record.id,
+                    record.doc_name or "",
+                    f"{record.id}-{idx}",
+                    finding.get("category", ""),
+                    finding.get("severity", ""),
+                    f"{float(finding.get('confidence', 0.0)):.2f}",
+                    (finding.get("excerpt") or "").replace("\n", " "),
+                    evidence.get("line_start", ""),
+                    evidence.get("line_end", ""),
+                ])
+        return Response(content=output.getvalue(), media_type="text/csv")
+
     writer.writerow([
         "id",
         "name",
@@ -888,38 +1031,14 @@ def update_review(review_id: str, update: ReviewUpdate, db: Session = Depends(ge
     )
 
 
-@app.get("/watchlist", response_model=list[WatchlistItemPayload])
-def list_watchlist(db: Session = Depends(get_db)):
-    items = db.query(WatchlistItem).order_by(WatchlistItem.last_checked.desc()).all()
-    return [
-        WatchlistItemPayload(
-            id=item.id,
-            vendor=item.vendor,
-            source_url=item.source_url,
-            status=item.status,
-            last_checked=item.last_checked,
-            changes_since=item.changes_since,
-            change_count=item.change_count,
-            risk_delta=item.risk_delta,
-            change_summary=item.change_summary,
-        )
-        for item in items
-    ]
+def _watchlist_item_to_payload(item: WatchlistItem) -> WatchlistItemPayload:
+    """Build the response payload for a ``WatchlistItem``.
 
-
-@app.post("/watchlist", response_model=WatchlistItemPayload)
-def add_watchlist(request: WatchlistCreateRequest, db: Session = Depends(get_db)):
-    item = WatchlistItem(
-        id=str(uuid4()),
-        vendor=request.vendor,
-        source_url=request.source_url,
-        status="No Changes",
-        change_count=0,
-        risk_delta=0.0,
-    )
-    db.add(item)
-    db.commit()
-    db.refresh(item)
+    Centralised so every endpoint (list, add, refresh, redirected policy-watch)
+    surfaces the OE-003 merged fields (``check_frequency``, ``enabled``,
+    ``user_id``, ``notes``, ``created_at``, ``next_check_at``) consistently.
+    ``next_check_at`` is computed from ``last_checked + check_frequency``.
+    """
     return WatchlistItemPayload(
         id=item.id,
         vendor=item.vendor,
@@ -930,7 +1049,44 @@ def add_watchlist(request: WatchlistCreateRequest, db: Session = Depends(get_db)
         change_count=item.change_count,
         risk_delta=item.risk_delta,
         change_summary=item.change_summary,
+        user_id=item.user_id,
+        check_frequency=item.check_frequency,
+        enabled=bool(item.enabled) if item.enabled is not None else None,
+        notes=item.notes,
+        created_at=item.created_at,
+        next_check_at=_compute_next_check_at(item),
     )
+
+
+@app.get("/watchlist", response_model=list[WatchlistItemPayload])
+def list_watchlist(db: Session = Depends(get_db)):
+    items = db.query(WatchlistItem).order_by(WatchlistItem.last_checked.desc()).all()
+    return [_watchlist_item_to_payload(item) for item in items]
+
+
+@app.post("/watchlist", response_model=WatchlistItemPayload)
+def add_watchlist(request: WatchlistCreateRequest, db: Session = Depends(get_db)):
+    # OE-003 merged fields — all optional so pre-merge callers keep working.
+    # ``check_frequency`` falls back to ``settings.watchlist_refresh_seconds``
+    # at scheduler time via ``_effective_check_frequency`` when the caller
+    # omits it. Storing ``None`` here (not the global default) keeps the
+    # per-item vs global distinction explicit.
+    item = WatchlistItem(
+        id=str(uuid4()),
+        vendor=request.vendor,
+        source_url=request.source_url,
+        status="No Changes",
+        change_count=0,
+        risk_delta=0.0,
+        user_id=request.user_id,
+        check_frequency=request.check_frequency if request.check_frequency is not None else 86400,
+        enabled=bool(request.enabled) if request.enabled is not None else True,
+        notes=request.notes,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return _watchlist_item_to_payload(item)
 
 
 @app.delete("/watchlist/{item_id}", response_model=dict)
@@ -955,17 +1111,7 @@ async def refresh_watchlist(item_id: str, db: Session = Depends(get_db)):
         item.status = "Check Failed"
         db.commit()
         db.refresh(item)
-        return WatchlistItemPayload(
-            id=item.id,
-            vendor=item.vendor,
-            source_url=item.source_url,
-            status=item.status,
-            last_checked=item.last_checked,
-            changes_since=item.changes_since,
-            change_count=item.change_count,
-            risk_delta=item.risk_delta,
-            change_summary=item.change_summary,
-        )
+        return _watchlist_item_to_payload(item)
 
     current_text = text or ""
     new_hash = content_hash(current_text)
@@ -973,7 +1119,9 @@ async def refresh_watchlist(item_id: str, db: Session = Depends(get_db)):
     changed = item.last_document_hash and item.last_document_hash != new_hash
     now = datetime.now(timezone.utc)
     item.last_checked = now
-    rule_findings = detect_findings(current_text, ["US-CA", "GDPR"])
+    # Global-tool contract per PR #34 and CLAUDE.md §Session outcomes:
+    # empty jurisdictions list == "no filter". Audit finding LE-001.
+    rule_findings = detect_findings(current_text, [])
     new_score = calculate_risk_score(rule_findings)
     if item.last_risk_score is not None:
         item.risk_delta = round(new_score - item.last_risk_score, 2)
@@ -994,17 +1142,7 @@ async def refresh_watchlist(item_id: str, db: Session = Depends(get_db)):
     item.last_document_hash = new_hash
     db.commit()
     db.refresh(item)
-    return WatchlistItemPayload(
-        id=item.id,
-        vendor=item.vendor,
-        source_url=item.source_url,
-        status=item.status,
-        last_checked=item.last_checked,
-        changes_since=item.changes_since,
-        change_count=item.change_count,
-        risk_delta=item.risk_delta,
-        change_summary=item.change_summary,
-    )
+    return _watchlist_item_to_payload(item)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -1165,120 +1303,81 @@ def get_diff(snapshot_id_1: str, snapshot_id_2: str, db: Session = Depends(get_d
     )
 
 
-@app.post("/policy-watch", response_model=PolicyWatchPayload)
-def create_policy_watch(request: PolicyWatchCreateRequest, db: Session = Depends(get_db)):
-    """Create a new policy watch configuration."""
-    # Check if URL is already being watched
-    existing = db.query(PolicyWatch).filter(PolicyWatch.url == request.url).first()
-    if existing:
-        raise HTTPException(status_code=409, detail="URL is already being watched")
-    
-    watch = PolicyWatch(
-        id=str(uuid4()),
-        url=request.url,
-        user_id=request.user_id,
-        check_frequency=request.check_frequency,
-        enabled="true",
-        created_at=datetime.now(timezone.utc),
+# ────────────────────────────────────────────────────────────────────────────
+# OE-003: /policy-watch/* deprecation shims (Sunset: 2026-10-01)
+#
+# The ``PolicyWatch`` model was merged into ``WatchlistItem`` on 2026-07-03.
+# See ``docs/reports/user-decision-brief-2026-07-03.md`` A3 for rationale.
+#
+# Design choice on the shim shape:
+#   * ``POST /policy-watch``, ``GET /policy-watch``, ``DELETE /policy-watch/{id}``
+#     return **308 Permanent Redirect** to the corresponding ``/watchlist/*``
+#     route. 308 (not 301) preserves the HTTP method and request body — a client
+#     POSTing to ``/policy-watch`` will replay the same POST to ``/watchlist``.
+#     The request shapes overlap: ``PolicyWatchCreateRequest.{url, user_id,
+#     check_frequency}`` maps onto ``WatchlistCreateRequest.{source_url,
+#     user_id, check_frequency}`` — however the field rename (``url`` ->
+#     ``source_url``) means a naive replay will fail schema validation. That is
+#     the cost of the shim: we redirect at the URL level, and clients that
+#     depended on the old field name must update. The ``Deprecation`` and
+#     ``Sunset`` headers signal this.
+#   * ``POST /policy-watch/{id}/snapshot`` cannot be shimmed cleanly: the old
+#     handler dereferenced a ``PolicyWatch`` id to look up a URL to fetch, and
+#     no such row exists after the migration. The corresponding
+#     ``/watchlist/{id}/refresh`` takes a ``WatchlistItem`` id, not a
+#     ``PolicyWatch`` id, so a redirect would 404. Return **410 Gone** with a
+#     JSON body pointing at the replacement.
+# ────────────────────────────────────────────────────────────────────────────
+
+_DEPRECATION_HEADERS = {
+    "Deprecation": "true",
+    "Sunset": "2026-10-01",
+    "Link": '</watchlist>; rel="successor-version"',
+    # RFC 7234 Warning header — surfaced by the security reviewer P9 (F3) so
+    # clients that log Warning: on 308 responses see the concrete schema-drift
+    # cost of the rename before their POST replay hits /watchlist and 422s.
+    "Warning": '299 - "field rename: url -> source_url; refer to /watchlist schema"',
+}
+
+
+@app.post("/policy-watch")
+@app.get("/policy-watch")
+def policy_watch_root_deprecated():
+    """OE-003 deprecation shim — redirect to ``/watchlist``."""
+    return Response(
+        status_code=308,
+        headers={"Location": "/watchlist", **_DEPRECATION_HEADERS},
     )
-    db.add(watch)
-    db.commit()
-    db.refresh(watch)
-    
-    return PolicyWatchPayload(
-        id=watch.id,
-        url=watch.url,
-        user_id=watch.user_id,
-        check_frequency=watch.check_frequency,
-        last_check=watch.last_check,
-        enabled=watch.enabled,
-        created_at=watch.created_at,
+
+
+@app.delete("/policy-watch/{watch_id}")
+def policy_watch_delete_deprecated(watch_id: str):
+    """OE-003 deprecation shim — redirect to ``/watchlist/{id}``.
+
+    Note: a client that DELETEd a ``PolicyWatch`` id (a row that no longer
+    exists) will now hit ``/watchlist/{watch_id}`` with the same id and get a
+    404. That is the expected post-migration behavior — the caller must have
+    a valid ``WatchlistItem`` id, which the migration script produces.
+    """
+    return Response(
+        status_code=308,
+        headers={"Location": f"/watchlist/{watch_id}", **_DEPRECATION_HEADERS},
     )
 
 
-@app.get("/policy-watch", response_model=list[PolicyWatchPayload])
-def list_policy_watches(db: Session = Depends(get_db)):
-    """List all policy watches."""
-    watches = db.query(PolicyWatch).order_by(PolicyWatch.created_at.desc()).all()
-    return [
-        PolicyWatchPayload(
-            id=watch.id,
-            url=watch.url,
-            user_id=watch.user_id,
-            check_frequency=watch.check_frequency,
-            last_check=watch.last_check,
-            enabled=watch.enabled,
-            created_at=watch.created_at,
-        )
-        for watch in watches
-    ]
+@app.post("/policy-watch/{watch_id}/snapshot")
+def policy_watch_snapshot_deprecated(watch_id: str):
+    """OE-003 deprecation shim — 410 Gone.
 
-
-@app.delete("/policy-watch/{watch_id}", response_model=dict)
-def delete_policy_watch(watch_id: str, db: Session = Depends(get_db)):
-    """Delete a policy watch configuration."""
-    watch = db.query(PolicyWatch).filter(PolicyWatch.id == watch_id).first()
-    if not watch:
-        raise HTTPException(status_code=404, detail="Policy watch not found")
-    
-    db.delete(watch)
-    db.commit()
-    return {"status": "deleted", "id": watch_id}
-
-
-@app.post("/policy-watch/{watch_id}/snapshot", response_model=PolicySnapshotPayload)
-async def capture_watch_snapshot(watch_id: str, db: Session = Depends(get_db)):
-    """Capture a new snapshot for a watched policy."""
-    watch = db.query(PolicyWatch).filter(PolicyWatch.id == watch_id).first()
-    if not watch:
-        raise HTTPException(status_code=404, detail="Policy watch not found")
-    
-    try:
-        text = await fetch_url_text(watch.url)
-    except Exception as e:
-        logger.warning("Policy-watch URL fetch failed for %s: %s", watch.url, e)
-        raise HTTPException(status_code=400, detail="Failed to fetch the requested URL.")
-    
-    if not text:
-        raise HTTPException(status_code=400, detail="URL content is empty")
-    
-    # Check if this content already exists
-    content_hash_val = content_hash(text)
-    existing = (
-        db.query(PolicySnapshot)
-        .filter(PolicySnapshot.url == watch.url, PolicySnapshot.content_hash == content_hash_val)
-        .first()
-    )
-    
-    if existing:
-        # Update last_check time
-        watch.last_check = datetime.now(timezone.utc)
-        db.commit()
-        return PolicySnapshotPayload(
-            id=existing.id,
-            url=existing.url,
-            content_hash=existing.content_hash,
-            captured_at=existing.captured_at,
-            raw_text=None,
-        )
-    
-    # Create new snapshot
-    snapshot = PolicySnapshot(
-        id=str(uuid4()),
-        url=watch.url,
-        content_hash=content_hash_val,
-        captured_at=datetime.now(timezone.utc),
-        raw_text=text,
-    )
-    db.add(snapshot)
-    watch.last_check = datetime.now(timezone.utc)
-    db.commit()
-    db.refresh(snapshot)
-    
-    return PolicySnapshotPayload(
-        id=snapshot.id,
-        url=snapshot.url,
-        content_hash=snapshot.content_hash,
-        captured_at=snapshot.captured_at,
-        raw_text=snapshot.raw_text,
+    A redirect to ``/watchlist/{id}/refresh`` would only work if ``watch_id``
+    happened to also exist in ``watchlist_items`` under the same UUID. It does
+    not, in the general case. Return 410 with pointer.
+    """
+    return JSONResponse(
+        status_code=410,
+        headers=_DEPRECATION_HEADERS,
+        content={
+            "detail": "The /policy-watch/* endpoints were merged into /watchlist/* on 2026-07-03. Use POST /watchlist/{id}/refresh with your WatchlistItem id instead.",
+            "successor": "/watchlist/{id}/refresh",
+        },
     )

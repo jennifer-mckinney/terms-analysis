@@ -101,7 +101,7 @@ User Input (text/URL/file)
     - Review items auto-created when confidence < threshold
     |
     v
-Output to User (via SPA or API)
+Output to User (via Streamlit UI or API)
 ```
 
 ### 2.2 Integrity Checkpoints — What EXISTS Today

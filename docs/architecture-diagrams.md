@@ -18,8 +18,7 @@ graph TB
     USER["👤 User\n(browser)"]:::user
 
     subgraph LOCAL ["Local Machine — all data stays here"]
-        FE1["Streamlit UI — primary\n:8501"]:::frontend
-        FE2["Vanilla JS SPA — fallback\n:8000"]:::frontend
+        FE1["Streamlit UI\n:8501"]:::frontend
         BE["FastAPI Backend\n:9000\n24 endpoints + /health"]:::backend
 
         subgraph AI ["AI / ML Layer"]
@@ -34,10 +33,8 @@ graph TB
 
     EXT["External URLs\n(policy pages, legal-corpus sources)"]:::ext
 
-    USER -->|"HTTP :8501 (primary)"| FE1
-    USER -->|"HTTP :8000 (fallback)"| FE2
+    USER -->|"HTTP :8501"| FE1
     FE1  -->|"REST :9000"| BE
-    FE2  -->|"REST :9000"| BE
     BE   -->|orchestrates| AI
     BE   <-->|read / write| DB
     BE   -->|"HTTP (SSRF-validated)"| EXT
@@ -62,15 +59,11 @@ graph TB
     classDef db       fill:#fdf2f2,stroke:#8b3a3a,color:#5a1a1a
     classDef dead     fill:#f5f5f5,stroke:#aaa,color:#666,stroke-dasharray: 5 5
 
-    subgraph FE1 ["Streamlit UI — primary  :8501"]
+    subgraph FE1 ["Streamlit UI  :8501"]
         TA["Analyze tab"]:::tab
         TF["Findings tab"]:::tab
         TC["Compare tab"]:::tab
         TE["Export tab"]:::tab
-    end
-
-    subgraph FE2 ["Vanilla JS SPA — fallback  :8000"]
-        SPA["index.html / app.js"]:::tab
     end
 
     subgraph API ["FastAPI  :9000"]
@@ -140,7 +133,6 @@ graph TB
     TF -->|GET| EP6
     TE -->|GET| EP8
     TE -->|GET| EP9
-    SPA -->|POST/GET| EP1
 
     %% API → Services
     EP1 & EP2 & EP3 & EP4 --> ING
@@ -259,12 +251,12 @@ flowchart TD
 
 ## User Journey — Swim Lane
 
-End-to-end journey across all actors from first visit to export, using the primary Streamlit UI (the vanilla JS SPA fallback follows the same backend contract via direct `fetch()` calls to the same endpoints).
+End-to-end journey across all actors from first visit to export, using the Streamlit UI.
 
 ```mermaid
 sequenceDiagram
     actor User
-    participant UI   as Streamlit UI (primary)<br/>:8501
+    participant UI   as Streamlit UI<br/>:8501
     participant API  as FastAPI<br/>:9000
     participant SVC  as Analysis Engine<br/>services/
     participant LKB  as Legal KB<br/>legal_kb.py

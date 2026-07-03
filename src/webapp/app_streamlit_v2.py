@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import html
 import os
+import re
 from typing import Optional
 
 import requests
@@ -168,6 +169,25 @@ html, body, [class*="css"] {
 .pr-finding-plain { font-size: 0.82rem; color: var(--ink-soft); line-height: 1.55; margin-top: 0.3rem; }
 .pr-finding-basis { margin-top: 0.3rem; font-size: 0.75rem; color: var(--teal); }
 .pr-irp-row { display: flex; gap: 1rem; margin-top: 0.35rem; font-size: 0.72rem; color: var(--ink-muted); }
+
+/* Verify view: split-pane audit surface. Left pane = document text with
+   highlighted verbatim quotes matching each finding. Right pane = scrollable
+   findings list with category, jurisdiction, IRP breakdown, rule pattern id.
+   No em-dashes in any user-facing label per LIB-VOICE. */
+.pr-verify-pane-head { font-size: 0.78rem; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--ink-muted); margin: 0 0 0.5rem; }
+.pr-verify-doc { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 6px; padding: 0.85rem 1rem; font-size: 0.82rem; line-height: 1.6; color: var(--ink-soft); max-height: 480px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Cascadia Mono", monospace; }
+.pr-verify-doc-empty { background: var(--scope-bg); border: 1px dashed #cbd5e0; border-radius: 6px; padding: 0.85rem 1rem; font-size: 0.8rem; font-style: italic; color: var(--ink-muted); }
+/* Highlight applied to each verbatim finding excerpt inside the document
+   pane. Light-teal background per v2 palette; keeps contrast with the ink
+   colour and does not depend on JavaScript. */
+.pr-verify-hl { background: #d5f0ee; color: var(--ink); padding: 0.05rem 0.15rem; border-radius: 3px; box-shadow: 0 0 0 1px rgba(15, 118, 110, 0.15); }
+.pr-verify-list { max-height: 480px; overflow-y: auto; padding-right: 0.25rem; }
+.pr-verify { border: 1px solid #e2e8f0; border-radius: 6px; padding: 0.85rem 1rem; margin-bottom: 0.75rem; background: #ffffff; }
+.pr-verify-cat { font-weight: 600; color: var(--ink); font-size: 0.85rem; margin-bottom: 0.4rem; }
+.pr-verify-quote { background: var(--scope-bg); border-left: 3px solid var(--teal); padding: 0.5rem 0.75rem; font-size: 0.8rem; color: var(--ink-soft); margin: 0.4rem 0 0.6rem; line-height: 1.55; font-style: italic; }
+.pr-verify-row { display: flex; justify-content: space-between; gap: 0.5rem; font-size: 0.75rem; color: var(--ink-muted); padding: 0.2rem 0; border-bottom: 1px dashed #edf2f7; }
+.pr-verify-row:last-child { border-bottom: none; }
+.pr-verify-row strong { color: var(--ink); font-weight: 600; }
 
 /* Action list */
 .pr-action-head { font-size: 0.78rem; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--ink-muted); margin: 1.5rem 0 0.75rem; }
@@ -622,6 +642,202 @@ def _selected_context_labels() -> list[str]:
     return result
 
 
+def _highlight_document_with_findings(document_text: str, findings: list[dict]) -> str:
+    """Return document text with every finding excerpt occurrence wrapped in a highlight span.
+
+    Uses ``re.finditer`` on the HTML-escaped document to find every match of
+    each finding's HTML-escaped excerpt, then splices in ``<span class=
+    "pr-verify-hl">...</span>`` around each non-overlapping match. HTML-escape
+    happens once on the document body and once on each excerpt so nothing
+    user-controlled leaks into rendered HTML.
+
+    Reviewer P9 (grumpy F8): the prior implementation deduplicated on the
+    excerpt string via a ``seen: set``. Two findings pointing at the same
+    quote (e.g. an arbitration clause cited by both a "class action waiver"
+    and a "mandatory arbitration" rule) would only get one highlight, so
+    the Verify view under-reports coverage. We now wrap every occurrence of
+    every excerpt, tracking already-wrapped char ranges so overlapping
+    matches don't nest spans.
+
+    An empty excerpt is skipped rather than rendered.
+    """
+    escaped_doc = html.escape(document_text)
+    open_tag_prefix = '<span class="pr-verify-hl">'
+    close_tag = "</span>"
+
+    # Sort matches longest-first so a long quote wraps before a shorter
+    # substring of it wraps mid-quote. Ties broken by original finding order.
+    ranked: list[tuple[int, int, str]] = []  # (neg_len, order, escaped_excerpt)
+    for order, f in enumerate(findings):
+        excerpt = str(f.get("excerpt") or "").strip()
+        if not excerpt:
+            continue
+        escaped_excerpt = html.escape(excerpt)
+        if not escaped_excerpt:
+            continue
+        ranked.append((-len(escaped_excerpt), order, escaped_excerpt))
+    ranked.sort()
+
+    # Range-tracking list holds already-wrapped [start, end) intervals in
+    # `escaped_doc`. A new match that overlaps any existing range is skipped
+    # so we never nest a highlight span inside another.
+    wrapped_ranges: list[tuple[int, int]] = []
+
+    def _overlaps(start: int, end: int) -> bool:
+        for (rs, re_) in wrapped_ranges:
+            # Intervals overlap iff start < re_ and rs < end.
+            if start < re_ and rs < end:
+                return True
+        return False
+
+    # Do the wraps back-to-front on the string so earlier offsets remain
+    # valid as we splice. Collect all (start, end) matches first, filter by
+    # overlap, then apply in descending order.
+    pending: list[tuple[int, int]] = []
+    for _neg_len, _order, escaped_excerpt in ranked:
+        for m in re.finditer(re.escape(escaped_excerpt), escaped_doc):
+            start, end = m.start(), m.end()
+            if _overlaps(start, end):
+                continue
+            wrapped_ranges.append((start, end))
+            pending.append((start, end))
+
+    # Apply splices in descending order of start so index arithmetic holds.
+    pending.sort(key=lambda x: x[0], reverse=True)
+    for start, end in pending:
+        escaped_doc = (
+            escaped_doc[:start]
+            + open_tag_prefix
+            + escaped_doc[start:end]
+            + close_tag
+            + escaped_doc[end:]
+        )
+    return escaped_doc
+
+
+def _render_verify_split_pane(result: dict, findings: list[dict]) -> None:
+    """Render the Verify view as a two-column split pane.
+
+    Left column: full document text with each finding's verbatim excerpt
+    highlighted using a subtle light-teal background span (no JavaScript,
+    inline CSS class). Right column: scrollable list of findings with
+    category, jurisdiction, IRP breakdown (impact / likelihood / safeguards /
+    composite), rule pattern id when the payload carries one.
+
+    Per PRD F4.3: split-pane layout, highlight matches, per-finding audit
+    fields. Streamlit-native ``st.columns`` provides the pane structure;
+    max-height plus overflow-y on each pane keeps them side by side without
+    forcing the outer page to scroll unnaturally.
+
+    LIB-VOICE: no em-dashes in any label. Pane heads use plain "Document"
+    and "Findings" copy.
+    """
+    total = len(findings)
+    # Use a 55/45 split for slight document-pane bias so long quotes wrap
+    # less. Ratio is small enough that either pane still reads on standard
+    # laptop widths.
+    left, right = st.columns([0.55, 0.45])
+    with left:
+        st.markdown(
+            '<div class="pr-verify-pane-head">Document</div>',
+            unsafe_allow_html=True,
+        )
+        document_text = str(result.get("document_text") or "")
+        if document_text:
+            highlighted = _highlight_document_with_findings(document_text, findings)
+            st.markdown(
+                f'<div class="pr-verify-doc">{highlighted}</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div class="pr-verify-doc-empty">Full document text was not '
+                'included in this analysis payload. Verbatim quotes for each '
+                'finding remain visible on the right.</div>',
+                unsafe_allow_html=True,
+            )
+    with right:
+        # Pane head uses the "Verify view / N findings" label pattern shipped
+        # elsewhere in v2 (LIB-VOICE: slash separator, no em-dash).
+        st.markdown(
+            f'<div class="pr-verify-pane-head">{f"Verify view / {total} findings"}</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown('<div class="pr-verify-list">', unsafe_allow_html=True)
+        for f in findings:
+            cat = html.escape(str(f.get("category", "-")))
+            verbatim = html.escape(str(f.get("excerpt", "")))
+            juris = f.get("jurisdictions") or []
+            juris_str = html.escape(", ".join(str(j) for j in juris)) or "not specified"
+            impact = f.get("impact", 0) or 0
+            likelihood = f.get("likelihood", 0) or 0
+            safeguard = f.get("safeguard_score", 0) or 0
+            irp = f.get("irp_score")
+            irp_str = f"{irp:.2f}" if isinstance(irp, (int, float)) else "n/a"
+            # rule_pattern_id is not on the Finding schema; some payloads carry
+            # it opportunistically under either key. Continue reading both.
+            rule_id = f.get("rule_pattern_id") or f.get("pattern_id")
+            rule_line = (
+                f"<div class='pr-verify-row'><span>Rule pattern</span>"
+                f"<strong>{html.escape(str(rule_id))}</strong></div>"
+                if rule_id
+                else ""
+            )
+            evidence = f.get("evidence") or {}
+            lstart = evidence.get("line_start")
+            lend = evidence.get("line_end")
+            line_ref = (
+                f"Lines {lstart} to {lend}" if lstart and lend else "no line reference"
+            )
+            # Caption above each verbatim quote block; LIB-VOICE plain copy.
+            quote_caption = "Verbatim quote from the document"
+            st.markdown(
+                f"<div class='pr-verify'>"
+                f"<div class='pr-verify-cat'>{cat}</div>"
+                f"<div class='pr-verify-quote-caption'>{quote_caption}</div>"
+                f"<div class='pr-verify-quote'>&quot;{verbatim}&quot;</div>"
+                f"<div class='pr-verify-row'><span>Jurisdiction</span>"
+                f"<strong>{juris_str}</strong></div>"
+                f"<div class='pr-verify-row'><span>Location</span>"
+                f"<strong>{html.escape(line_ref)}</strong></div>"
+                f"<div class='pr-verify-row'><span>Impact</span>"
+                f"<strong>{impact}/5</strong></div>"
+                f"<div class='pr-verify-row'><span>Likelihood</span>"
+                f"<strong>{likelihood}/5</strong></div>"
+                f"<div class='pr-verify-row'><span>Safeguards</span>"
+                f"<strong>{safeguard}/5</strong></div>"
+                f"<div class='pr-verify-row'><span>IRP composite</span>"
+                f"<strong>{irp_str}</strong></div>"
+                f"{rule_line}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        st.markdown('</div>', unsafe_allow_html=True)
+
+
+def _render_review_required_banner(result: dict) -> None:
+    """Render an observational banner when the backend flagged review_required.
+
+    The backend flags analyses where overall confidence fell below the
+    review threshold (see settings.review_threshold, default 0.80). Copy is
+    third-person observational per LIB-VOICE: no "you", no "we", tentative
+    framing. Audit finding LE-017.
+    """
+    # Two signals mean the same thing; check both for compatibility with older
+    # payloads that only carried status.
+    flagged = bool(result.get("review_required")) or result.get("status") == "needs_review"
+    if not flagged:
+        return
+    st.markdown(
+        '<div style="background:#FEF3C7;border:1px solid #F59E0B;border-radius:8px;'
+        'padding:0.85rem 1rem;margin:0 0 1rem 0;font-size:0.88rem;color:#78350F;">'
+        '<strong>This analysis fell below the tool\'s confidence threshold.</strong> '
+        'A second reader may want to confirm the findings before relying on them.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def render_results() -> None:
     """Render the verdict-first results screen (mockup view #2)."""
     result = st.session_state.analysis_result
@@ -725,6 +941,11 @@ def render_results() -> None:
         f"</div>",
         unsafe_allow_html=True,
     )
+
+    # Review-required banner: surfaces the backend's confidence < 0.80 flag so
+    # the reader sees when the tool itself is uncertain. Copy stays tentative
+    # and observational per LIB-VOICE. Audit finding LE-017.
+    _render_review_required_banner(result)
 
     # Score cards — grade and IRP shown as context, not headline (decision #6).
     findings = result.get("findings", []) or []
@@ -846,6 +1067,24 @@ def render_results() -> None:
                 f"</div>",
                 unsafe_allow_html=True,
             )
+
+    # Verify view: split-pane layout per PRD F4.3 (document left, findings
+    # right). Replaces the prior expander approach after user decision to
+    # prioritise auditability. Split pane is scoped to Verify view only — the
+    # rest of v2 still uses the collapsed "Legal details / N issues" pattern.
+    st.markdown(
+        "<div class='pr-action-head' style='margin-top:1.75rem;'>Verify</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<div style='font-size:0.78rem;color:var(--ink-muted);"
+        "margin-bottom:0.75rem;'>Full document on the left with highlighted "
+        "quotes. Findings on the right show category, jurisdiction, IRP "
+        "breakdown, and rule pattern id. Use this to audit any surfaced item "
+        "against the source text.</div>",
+        unsafe_allow_html=True,
+    )
+    _render_verify_split_pane(result, findings)
 
     # Suggestions — tentative language per decision #2.
     # Sourced from the backend response (AnalysisPayload.action_items) so the SPA

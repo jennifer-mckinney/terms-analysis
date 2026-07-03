@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Governance-tier pre-commit hook.
+#
+# Enforces three invariants:
+#   1. .gitignore contains every required pattern from
+#      .claude/governance/required-gitignore.txt (single source of truth,
+#      reviewer P9 grumpy F9).
+#   2. No staged file matches a graveyard path (ignore/, .venv/, venv/,
+#      .pip-cache/).
+#   3. No staged file is a case-insensitive .env variant that is not on the
+#      .env.example allowlist (reviewer P9 security F6).
+#
+# Install with: scripts/install-hooks.sh
+# Governance policy: to change the required list, edit
+# .claude/governance/required-gitignore.txt (both this hook and
+# .github/workflows/gitignore-enforcement.yml read from it).
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+GITIGNORE="${REPO_ROOT}/.gitignore"
+REQUIRED_LIST_FILE="${REPO_ROOT}/.claude/governance/required-gitignore.txt"
+
+# Load required patterns from SSoT (skip comments + blank lines).
+if [[ ! -f "${REQUIRED_LIST_FILE}" ]]; then
+    printf 'pre-commit: required-gitignore SSoT missing: %s\n' "${REQUIRED_LIST_FILE}" >&2
+    exit 1
+fi
+REQUIRED_GITIGNORE_PATTERNS=()
+while IFS= read -r line; do
+    # Strip leading/trailing whitespace, skip comments and empties.
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    [[ -z "${trimmed}" ]] && continue
+    [[ "${trimmed:0:1}" == "#" ]] && continue
+    REQUIRED_GITIGNORE_PATTERNS+=("${trimmed}")
+done < "${REQUIRED_LIST_FILE}"
+
+# Path prefixes / globs that must never be staged.
+GRAVEYARD_PATTERNS=(
+    "ignore/"
+    ".venv/"
+    "venv/"
+    ".pip-cache/"
+)
+
+# Allowlist of legitimate .env-style files (case-sensitive, exact basename).
+ENV_ALLOWLIST=(
+    ".env.example"
+    ".env.sample"
+    ".env.template"
+)
+
+fail() {
+    printf 'pre-commit: %s\n' "$1" >&2
+    exit 1
+}
+
+# --- Check 1: required .gitignore entries -----------------------------------
+if [[ ! -f "${GITIGNORE}" ]]; then
+    fail ".gitignore is missing from repo root. This file is required."
+fi
+
+for pattern in "${REQUIRED_GITIGNORE_PATTERNS[@]}"; do
+    # Exact-line match against .gitignore. Comments and inline whitespace on the
+    # pattern line are not accepted -- must be a clean line-for-line match.
+    if ! grep -Fxq "${pattern}" "${GITIGNORE}"; then
+        fail ".gitignore is missing required pattern: \`${pattern}\`. This entry is protected -- see .claude/governance/required-gitignore.txt."
+    fi
+done
+
+# --- Check 2: no graveyard files in the staged tree -------------------------
+STAGED="$(git diff --cached --name-only --diff-filter=ACMR || true)"
+if [[ -n "${STAGED}" ]]; then
+    while IFS= read -r path; do
+        [[ -z "${path}" ]] && continue
+        for prefix in "${GRAVEYARD_PATTERNS[@]}"; do
+            if [[ "${path}" == "${prefix}"* ]]; then
+                fail "Refusing to stage graveyard file: ${path}. See .gitignore policy."
+            fi
+        done
+    done <<< "${STAGED}"
+fi
+
+# --- Check 3: no case-insensitive .env variants unless whitelisted ----------
+# Matches basenames like .env, .ENV, .Env, .env.local, .ENV.prod, etc.
+# Reviewer P9 security F6: prior policy only listed literal lowercase ".env"
+# so .ENV or .Env would smuggle secrets past both the hook and gitignore.
+if [[ -n "${STAGED}" ]]; then
+    while IFS= read -r path; do
+        [[ -z "${path}" ]] && continue
+        base="$(basename "${path}")"
+        # Case-insensitive regex: .env or .env.<suffix>
+        if [[ "${base}" =~ ^\.[Ee][Nn][Vv](\..*)?$ ]]; then
+            allowed=0
+            for allowed_name in "${ENV_ALLOWLIST[@]}"; do
+                if [[ "${base}" == "${allowed_name}" ]]; then
+                    allowed=1
+                    break
+                fi
+            done
+            if [[ "${allowed}" -eq 0 ]]; then
+                fail "Refusing to stage .env-style file: ${path}. Matches case-insensitive .env pattern and is not on .env.example allowlist."
+            fi
+        fi
+    done <<< "${STAGED}"
+fi
+
+exit 0

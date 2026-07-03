@@ -63,6 +63,8 @@ CATEGORIES: frozenset[str] = frozenset({
     "AI Training (Opt-Out)",  # alias used by ``_CATEGORY_IRP_DEFAULTS``
     "Sale/Share",
     "Data Sale / Sharing",  # LLM alias
+    "Third-Party Sharing",  # dormant (Option Z drift-1) — reserved for future rules
+    "Sub-processors",  # dormant (Option Z drift-1) — DPA-specific processor chain
     "Tracking / Profiling",
     "Tracking & Consent",
     "Marketing Communications",
@@ -77,21 +79,26 @@ CATEGORIES: frozenset[str] = frozenset({
     "Algorithmic Accountability",
     "Human Oversight",
     "AI Non-Discrimination",
+    "Transparency",  # dormant (Option Z drift-1) — AI/tech platform disclosure duty
     # Terms-of-use categories
     "Liability",
     "Unilateral Changes",
+    "Arbitration / Dispute",
     "Dark Patterns",
     "Deceptive Practices",
     "Retention",
     "Breach Notification",
     "Data Security",
     "Consent",
+    "Intellectual Property",  # dormant (Option Z drift-1) — ToS IP/license clauses
+    "In-App Purchases",  # dormant (Option Z drift-1) — gaming/microtransaction clauses
     # Privacy-rights categories
     "User Rights",
     "Data Rights",
     "Individual Rights",
     "Privacy Rights",
     "Cross-Border Transfer",
+    "Data Transfer",  # dormant (Option Z drift-1) — DPA-specific transfer mechanism
     "COPPA Compliance",
     "HIPAA Compliance",
     "FERPA Compliance",
@@ -302,6 +309,9 @@ class AnalysisSummary(BaseModel):
 
 
 class WatchlistItemPayload(BaseModel):
+    """Watchlist item response. ``user_id`` / ``check_frequency`` / ``enabled`` /
+    ``notes`` / ``next_check_at`` are the OE-003 merged fields — see
+    ``docs/reports/user-decision-brief-2026-07-03.md`` A3."""
     id: str
     vendor: str
     source_url: Optional[str] = None
@@ -311,11 +321,53 @@ class WatchlistItemPayload(BaseModel):
     change_count: int
     risk_delta: Optional[StrictFloat] = None
     change_summary: Optional[str] = None
+    # OE-003 merged fields (all optional on the response so old clients continue to parse):
+    user_id: Optional[str] = None
+    check_frequency: Optional[int] = Field(
+        default=None,
+        description="Per-item refresh cadence in seconds. Honored by ``_watchlist_loop_async``.",
+    )
+    enabled: Optional[bool] = Field(
+        default=None,
+        description="When False the background refresh loop skips this item. Boolean, not string (LE-010 fix).",
+    )
+    notes: Optional[str] = None
+    created_at: Optional[datetime] = None
+    next_check_at: Optional[datetime] = Field(
+        default=None,
+        description="Computed: last_checked + check_frequency. Null when the item is disabled.",
+    )
 
 
 class WatchlistCreateRequest(BaseModel):
+    """Create a watchlist entry. Subject is ``vendor`` + ``source_url`` (not
+    ``analysis_id``). Optional fields land from the OE-003 merge — see
+    ``docs/reports/user-decision-brief-2026-07-03.md`` A3.
+    """
     vendor: str = Field(..., min_length=1)
     source_url: Optional[str] = None
+    # OE-003 merged optional fields (all default-backward-compatible so old callers keep working):
+    user_id: Optional[str] = Field(
+        default=None,
+        max_length=255,
+        pattern=r"^[a-zA-Z0-9@._\-]+$",
+        description="Opaque user identifier; alphanumeric, @, ., _, - only. Nullable.",
+    )
+    check_frequency: Optional[int] = Field(
+        default=None,
+        ge=300,
+        le=604800,
+        description="Per-item refresh cadence in seconds (5 minutes to 7 days). When omitted, ``_watchlist_loop_async`` falls back to ``settings.watchlist_refresh_seconds``.",
+    )
+    enabled: Optional[bool] = Field(
+        default=True,
+        description="When False the background refresh loop skips this item.",
+    )
+    notes: Optional[str] = Field(
+        default=None,
+        max_length=1024,
+        description="Free-text notes / tags (e.g. reference to a prior analysis id). Optional.",
+    )
 
     @field_validator("source_url")
     @classmethod
@@ -438,24 +490,8 @@ class DiffResult(BaseModel):
     severity_summary: dict = Field(default_factory=lambda: {"high": 0, "medium": 0, "low": 0})
 
 
-class PolicyWatchPayload(BaseModel):
-    """Policy watch configuration."""
-    id: str
-    url: str
-    user_id: Optional[str] = None
-    check_frequency: int
-    last_check: Optional[datetime] = None
-    enabled: str
-    created_at: datetime
-
-
-class PolicyWatchCreateRequest(BaseModel):
-    """Request to create a new policy watch."""
-    url: str = Field(..., min_length=4)
-    user_id: Optional[str] = Field(
-        default=None,
-        max_length=255,
-        pattern=r"^[a-zA-Z0-9@._\-]+$",
-        description="Opaque user identifier; alphanumeric, @, ., _, - only",
-    )
-    check_frequency: int = Field(default=86400, ge=300, le=604800)  # 5 minutes to 7 days
+# OE-003 (2026-07-03): ``PolicyWatchPayload`` and ``PolicyWatchCreateRequest``
+# were deleted when ``PolicyWatch`` was merged into ``WatchlistItem``. Callers
+# should use ``WatchlistItemPayload`` / ``WatchlistCreateRequest`` instead. The
+# legacy ``/policy-watch/*`` HTTP paths return 308 redirects to ``/watchlist/*``
+# for one deprecation cycle (Sunset: 2026-10-01) — see main.py.

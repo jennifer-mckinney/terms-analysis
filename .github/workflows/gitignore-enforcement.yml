@@ -1,0 +1,108 @@
+name: enforce-gitignore-invariants
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  enforce-gitignore-invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Load required patterns from SSoT
+        id: load_required
+        run: |
+          set -euo pipefail
+          SSOT=".claude/governance/required-gitignore.txt"
+          if [[ ! -f "${SSOT}" ]]; then
+            echo "::error::required-gitignore SSoT missing: ${SSOT}"
+            exit 1
+          fi
+          # Emit newline-delimited list, stripping comments and blanks.
+          REQUIRED_LIST="$(grep -v '^[[:space:]]*#' "${SSOT}" | grep -v '^[[:space:]]*$' || true)"
+          {
+            echo "required<<EOF"
+            echo "${REQUIRED_LIST}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Assert required .gitignore patterns are present
+        env:
+          REQUIRED: ${{ steps.load_required.outputs.required }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r p; do
+            [[ -z "${p}" ]] && continue
+            if ! grep -Fxq "${p}" .gitignore; then
+              echo "::error::.gitignore is missing required pattern: \`${p}\`"
+              exit 1
+            fi
+          done <<< "${REQUIRED}"
+
+      - name: Assert no protected pattern was removed vs base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          REQUIRED: ${{ steps.load_required.outputs.required }}
+        run: |
+          set -euo pipefail
+          git fetch origin "${BASE_REF}" --depth=1 || true
+          REMOVED="$(git diff "origin/${BASE_REF}" -- .gitignore | grep -E '^-[^-]' | sed 's/^-//' || true)"
+          while IFS= read -r p; do
+            [[ -z "${p}" ]] && continue
+            if echo "${REMOVED}" | grep -Fxq "${p}"; then
+              echo "::error::PR removes protected .gitignore pattern: \`${p}\`"
+              exit 1
+            fi
+          done <<< "${REQUIRED}"
+
+      - name: Assert no graveyard files exist in tree
+        run: |
+          set -euo pipefail
+          OFFENDERS="$(find . \( -path './ignore/*' -o -path './.venv/*' -o -path './venv/*' -o -path './.pip-cache/*' \) -not -path './.git/*' -print)"
+          if [[ -n "${OFFENDERS}" ]]; then
+            echo "::error::Graveyard files present in tree:"
+            echo "${OFFENDERS}"
+            exit 1
+          fi
+
+      - name: Assert no case-insensitive .env variants in PR tree
+        # Reviewer P9 security F6: prior policy only checked literal ".env".
+        # ".ENV", ".Env", ".env.production" (etc.) would slip through both the
+        # local pre-commit hook and this workflow, so a rogue file with the
+        # wrong case could leak secrets on next commit.
+        run: |
+          set -euo pipefail
+          # Whitelist of safe .env-style files (exact basenames).
+          ALLOWLIST=(".env.example" ".env.sample" ".env.template")
+          OFFENDERS=()
+          while IFS= read -r -d '' path; do
+            base="$(basename "${path}")"
+            # Case-insensitive match on .env or .env.<suffix>
+            shopt -s nocasematch
+            if [[ "${base}" =~ ^\.env(\..*)?$ ]]; then
+              shopt -u nocasematch
+              allowed=0
+              for allowed_name in "${ALLOWLIST[@]}"; do
+                if [[ "${base}" == "${allowed_name}" ]]; then
+                  allowed=1
+                  break
+                fi
+              done
+              if [[ "${allowed}" -eq 0 ]]; then
+                OFFENDERS+=("${path}")
+              fi
+            else
+              shopt -u nocasematch
+            fi
+          done < <(find . -type f -not -path './.git/*' -print0)
+          if [[ ${#OFFENDERS[@]} -gt 0 ]]; then
+            echo "::error::PR tree contains .env-style file(s) not on allowlist:"
+            printf '%s\n' "${OFFENDERS[@]}"
+            exit 1
+          fi

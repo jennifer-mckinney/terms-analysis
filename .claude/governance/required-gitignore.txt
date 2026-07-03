@@ -1,0 +1,32 @@
+# required-gitignore.txt: SSoT for governance-required .gitignore patterns.
+#
+# Reviewer P9 (grumpy F9): the pre-commit hook and the gitignore-enforcement
+# GitHub workflow used to keep parallel copies of the required-pattern list.
+# Any drift between the two was a silent policy failure. Both callers now read
+# from this file; the pattern list is versioned in one place.
+#
+# Format:
+#   * One pattern per line.
+#   * Lines starting with `#` are comments.
+#   * Blank lines are ignored.
+#   * Patterns are matched line-for-line (exact) against .gitignore entries.
+#
+# To add a new required pattern: edit this file. The pre-commit hook and the
+# gitignore-enforcement workflow pick it up automatically on the next run.
+
+ignore/
+.env
+.env.local
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+.pip-cache/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+node_modules/
+.DS_Store
+*.db-journal
+*.db

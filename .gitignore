@@ -110,3 +110,13 @@ Desktop.ini
 notes.txt
 TODO.txt
 .scratch/
+
+# Invariant-protected patterns (enforced by .githooks/pre-commit and
+# .github/workflows/gitignore-enforcement.yml — do not remove without a
+# governance-tier PR that also updates the enforcement lists).
+ignore/
+.pip-cache/
+*.db-journal
+
+# Agent-sweep backups (Doer/Critic diff record for .claude/ rewrites; not committed)
+.claude/_pre-agent-sweep-backup/
