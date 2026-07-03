@@ -51,7 +51,7 @@ The script will:
 2. Install dependencies
 3. Initialize the SQLite database
 4. Start the FastAPI backend on `http://localhost:9000`
-5. Start the Streamlit UI (primary) on `http://localhost:8501` and the vanilla JS SPA (fallback) on `http://localhost:8000`
+5. Start the Streamlit UI on `http://localhost:8501`
 
 ### Configuration
 
@@ -75,10 +75,9 @@ cp .env.example .env
 ```
 terms-analysis/
 ├── src/
-│   ├── webapp/              # Frontend (HTML/CSS/JS)
-│   │   ├── index.html
-│   │   ├── app.js
-│   │   └── style.css
+│   ├── webapp/              # Streamlit UI
+│   │   ├── app_streamlit_v2.py     # Primary UI (issue #19 redesign)
+│   │   └── app_streamlit_legacy.py # Legacy fallback (STREAMLIT_UI=v1)
 │   ├── backend/             # FastAPI backend
 │   │   ├── app/
 │   │   │   ├── main.py      # API endpoints
@@ -107,7 +106,7 @@ terms-analysis/
 | `POST` | `/watchlist` | Add document to watchlist |
 | `GET` | `/exports/analysis/{id}.pdf` | Export as PDF |
 
-Full API documentation available at `http://localhost:8000/docs` when running.
+Full API documentation available at `http://localhost:9000/docs` when running.
 
 ## Risk Scoring
 
@@ -135,10 +134,6 @@ Test against the gold dataset:
 ```bash
 python src/backend/scripts/evaluate.py
 ```
-
-### Frontend Only
-
-Open `src/webapp/index.html` directly in a browser for the UI without the backend (uses sample data).
 
 ## Limitations
 

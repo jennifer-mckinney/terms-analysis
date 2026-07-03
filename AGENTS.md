@@ -1,16 +1,16 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `src/webapp/`: main static app (`index.html`, `style.css`, `app.js`).
+- `src/webapp/`: Streamlit UI (`app_streamlit_v2.py` is the sole UI; `app_streamlit_legacy.py` is the v1 rollback path via `STREAMLIT_UI=v1`).
 - `src/demos/`: demo/prototype HTML files (multiple versions).
 - `docs/specs/`: requirements, rubric, and technical specs.
 - `docs/wireframes/`: UI references.
 - `archive/`: historical versions; avoid editing unless archiving older files.
 
 ## Build, Test, and Development Commands
-- `./run.sh`: serves `src/webapp` on `http://localhost:8000` (installs Python via Homebrew if missing).
-- `cd src/webapp && python3 -m http.server 8000`: manual static server alternative.
-- No build step or bundler is used; the app is plain HTML/CSS/JS.
+- `./run.sh`: launches the FastAPI backend on `http://localhost:9000` and the Streamlit UI on `http://localhost:8501`.
+- `cd src/webapp && streamlit run app_streamlit_v2.py --server.port 8501 --server.headless true`: launch UI standalone.
+- No build step or bundler is used; the UI is Streamlit Python.
 
 ## Coding Style & Naming Conventions
 - Follow existing indentation: HTML/JS use 4 spaces; CSS uses 2 spaces.
@@ -21,7 +21,7 @@
 
 ## Testing Guidelines
 - No automated test framework is configured.
-- Do manual smoke checks in the browser after changes (load `src/webapp/index.html`).
+- Do manual smoke checks in the browser after changes (load `http://localhost:8501` after `./run.sh`).
 - Some demos include self-test/validation buttons (e.g., v6/v7 demos); use them for quick checks.
 
 ## Commit & Pull Request Guidelines

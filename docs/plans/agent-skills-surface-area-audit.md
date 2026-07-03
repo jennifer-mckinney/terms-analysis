@@ -6,6 +6,8 @@
 **Scope:** Complete inventory of Claude Code skills, agent capabilities, tool requirements, and recommendations
 **Reference:** SRS AI Systems agent teams analysis (sunny-humming-hearth.md)
 
+> **Historical audit note (2026-07-03):** the `src/webapp/` inventory below (index.html / app.js / style.css) reflects the pre-Phase-4 state. Those files were deleted when the vanilla-JS SPA was retired; current UI is Streamlit only (`app_streamlit_v2.py` + `app_streamlit_legacy.py`).
+
 ---
 
 ## 1. EXECUTIVE SUMMARY

@@ -1,11 +1,9 @@
 %%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#4a9d9a', 'primaryTextColor': '#fff', 'primaryBorderColor': '#357a77', 'lineColor': '#5c4d3d', 'secondaryColor': '#f5f0e8', 'tertiaryColor': '#fff'}}}%%
 
 flowchart TB
-    subgraph Client["Browser (Client-Side)"]
-        UI["Web UI<br/>index.html"]
-        JS["Application Logic<br/>app.js"]
-        CSS["Styling<br/>style.css"]
-        LS[("localStorage<br/>Persistence")]
+    subgraph Client["Browser (localhost:8501)"]
+        UI["Streamlit UI<br/>app_streamlit_v2.py"]
+        LEG["Legacy UI (rollback)<br/>app_streamlit_legacy.py"]
     end
 
     subgraph Backend["FastAPI Backend (localhost:9000)"]
@@ -37,13 +35,9 @@ flowchart TB
         DOC["DOCX/RTF"]
     end
 
-    %% Client connections
-    UI --> JS
-    JS --> CSS
-    JS <--> LS
-
     %% API connections
-    JS -->|"HTTP REST"| API
+    UI -->|"HTTP REST"| API
+    LEG -->|"HTTP REST (STREAMLIT_UI=v1)"| API
     API --> ING
     API --> VAL
 

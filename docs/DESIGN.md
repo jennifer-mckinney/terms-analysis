@@ -6,7 +6,7 @@
 - Human-in-the-loop review for confidence < 0.80.
 
 ## Architecture
-- `src/webapp/`: Streamlit UI (primary, port 8501) + static vanilla JS SPA (fallback, port 8000), both served locally.
+- `src/webapp/`: Streamlit UI (port 8501), served locally. `app_streamlit_v2.py` is the sole UI; `app_streamlit_legacy.py` is retained as the v1 rollback path via `STREAMLIT_UI=v1`.
 - `src/backend/`: FastAPI backend on port 9000 for ingestion, analysis, legal-KB retrieval, and storage.
 - LocalAI (Apache 2.0, zero VC): local LLM inference at `LOCALAI_BASE_URL` (default `http://localhost:8080/v1`).
   - **Apertus 8B Instruct** (Swiss AI Initiative — EPFL/ETH Zurich/CSCS): world model, 1,000+ languages.

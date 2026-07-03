@@ -328,7 +328,7 @@ The hover help text is the appropriate channel for reviewer context — visible 
 1. **Codify teal as primary** in the shared design system, deprecating PRD-specified `#2563EB`. Requires design-system update.
 2. **Verify View split-pane design** — mockup has entry points ("See in policy →" links) but the target view is TBD. Options: modal overlay, in-page expansion, right-drawer.
 3. **Advanced override on results page** — how does a power user override the inferred jurisdiction / doc type / industry? Likely a small "Adjust" link on the results page opening a settings panel.
-4. **JS SPA fallback feature parity** — SPA drops PDF export, watchlist, batch analysis. What does the SPA show when a user tries to reach a Streamlit-only feature? A banner? A modal?
+4. **JS SPA fallback feature parity** — RESOLVED 2026-07-03: SPA retired in Phase 4 of the issue #19 remediation. Streamlit v2 is the sole UI.
 5. **Dark mode** — PRD lists as "should have." Post-MVP for this pass but the palette needs a dark variant if pursued.
 6. **Verify View modal contents** — line-numbered source doc with the finding excerpt highlighted, or full document with all findings highlighted at once?
 
@@ -344,11 +344,8 @@ The hover help text is the appropriate channel for reviewer context — visible 
 5. Feature flag `STREAMLIT_UI=v2` in `run.sh` (default `v2` after acceptance)
 6. Keep old `app_streamlit.py` as `app_streamlit_legacy.py` for one release cycle (rollback path)
 
-**Phase 2: JS SPA fallback update**
-1. Health-check on load with 3s timeout to `/health`
-2. Reduced-mode banner if backend unreachable
-3. Match verdict / scope-box / top-things structure to Streamlit for design consistency
-4. Drop features the SPA can't support cleanly (PDF, watchlist, batch)
+**Phase 2: JS SPA fallback update — SUPERSEDED**
+Superseded 2026-07-03 by Phase 4 (SPA retirement). No parity work performed; SPA files (`index.html`, `app.js`, `style.css`) were deleted and `run.sh` reduced to backend + Streamlit only.
 
 **Phase 3: Backend enhancements to support the design**
 1. `AnalysisPayload.top_things_plain_language: List[str]` — 4 LLM-generated plain-language bullets, context-lens aware

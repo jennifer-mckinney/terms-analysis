@@ -15,13 +15,12 @@ Active demonstration implementations of the AI Terms Reviewer:
 **Purpose**: Working prototypes and demonstrations of the tool's functionality.
 
 ### `/src/webapp/`
-Complete production-ready web application:
+Streamlit UI (sole UI post-issue #19 redesign):
 
-- `index.html` - Main application HTML
-- `style.css` - Application stylesheets
-- `app.js` - Application JavaScript logic
+- `app_streamlit_v2.py` - Primary UI (plain-language redesign, `STREAMLIT_UI=v2`, default)
+- `app_streamlit_legacy.py` - v1 rollback path (`STREAMLIT_UI=v1`)
 
-**Purpose**: Full-featured web application implementation.
+**Purpose**: Streamlit UI, launched by `run.sh` on port 8501.
 
 ### `/docs/wireframes/`
 UI/UX design wireframes:
