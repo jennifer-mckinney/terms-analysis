@@ -13,6 +13,7 @@ Design patterns applied:
 """
 from __future__ import annotations
 
+import html
 import os
 import re
 import streamlit as st
@@ -242,9 +243,19 @@ for _k, _v in {
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def highlight_excerpt(paragraph: str, excerpt: str) -> str:
-    if not excerpt or excerpt not in paragraph:
-        return paragraph
-    return paragraph.replace(excerpt, f"<mark>{excerpt}</mark>")
+    """Return HTML-escaped paragraph text with the excerpt wrapped in <mark>.
+
+    Both paragraph and excerpt originate from the analyzed document, which is
+    untrusted third-party text — always escape before this is interpolated
+    into unsafe_allow_html=True markup, never render raw document text as HTML.
+    """
+    escaped_paragraph = html.escape(paragraph)
+    if not excerpt:
+        return escaped_paragraph
+    escaped_excerpt = html.escape(excerpt)
+    if escaped_excerpt not in escaped_paragraph:
+        return escaped_paragraph
+    return escaped_paragraph.replace(escaped_excerpt, f"<mark>{escaped_excerpt}</mark>")
 
 
 def action_suggestions(finding: Dict) -> List[str]:
@@ -428,7 +439,7 @@ def render_finding_detail(finding: Dict) -> None:
         )
     elif excerpt:
         st.markdown(
-            f'<div class="excerpt">"{excerpt}"</div>',
+            f'<div class="excerpt">"{html.escape(excerpt)}"</div>',
             unsafe_allow_html=True,
         )
 
@@ -454,7 +465,7 @@ def render_finding_detail(finding: Dict) -> None:
                 "available legal remedies."
             )
 
-    st.markdown(f"<p style='font-size:0.9375rem;line-height:1.7;color:#4a4a4a;margin:0.5rem 0 1rem;'>{explanation}</p>",
+    st.markdown(f"<p style='font-size:0.9375rem;line-height:1.7;color:#4a4a4a;margin:0.5rem 0 1rem;'>{html.escape(explanation)}</p>",
                 unsafe_allow_html=True)
 
     # Actions in a popover — keeps the card clean

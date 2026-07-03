@@ -70,6 +70,10 @@
   --color-error-rgb: 199, 95, 84;
   --color-warning-rgb: 217, 139, 95;
   --color-info-rgb: 2, 73, 80;
+  --color-critical-rgb: 199, 95, 84;
+  --color-high-rgb: 217, 139, 95;
+  --color-medium-rgb: 232, 192, 104;
+  --color-low-rgb: 126, 202, 196;
 
   /* Typography */
   --font-family-base: "FKGroteskNeue", "Geist", "Inter", -apple-system,
@@ -190,6 +194,10 @@
     --color-error-rgb: 224, 122, 111;
     --color-warning-rgb: 232, 168, 120;
     --color-info-rgb: 159, 201, 206;
+    --color-critical-rgb: 224, 122, 111;
+    --color-high-rgb: 232, 168, 120;
+    --color-medium-rgb: 240, 208, 144;
+    --color-low-rgb: 126, 202, 196;
   }
 }
 
@@ -248,6 +256,10 @@
   --color-error-rgb: 224, 122, 111;
   --color-warning-rgb: 232, 168, 120;
   --color-info-rgb: 159, 201, 206;
+  --color-critical-rgb: 224, 122, 111;
+  --color-high-rgb: 232, 168, 120;
+  --color-medium-rgb: 240, 208, 144;
+  --color-low-rgb: 126, 202, 196;
 }
 
 [data-color-scheme="light"] {
@@ -258,7 +270,7 @@
 
   --color-text: #003135;
   --color-text-secondary: #024950;
-  --color-text-hint: #6b9ea5;
+  --color-text-hint: #3d6d74;
 
   --color-primary: #0fa4af;
   --color-primary-hover: #0d8a94;
@@ -284,17 +296,21 @@
   --color-card-border: #d4e9ec;
   --color-card-border-inner: #e5f4f6;
 
-  --color-btn-primary-text: #ffffff;
+  --color-btn-primary-text: #003135;
   --color-secondary: #e5f4f6;
   --color-secondary-hover: #d4e9ec;
   --color-secondary-active: #c5eef2;
   --color-focus-ring: rgba(15, 164, 175, 0.2);
   --color-select-caret: rgba(0, 49, 53, 0.8);
 
-  --color-success-rgb: 33, 128, 141;
-  --color-error-rgb: 192, 21, 47;
-  --color-warning-rgb: 168, 75, 47;
-  --color-info-rgb: 98, 108, 113;
+  --color-success-rgb: 92, 179, 167;
+  --color-error-rgb: 199, 95, 84;
+  --color-warning-rgb: 217, 139, 95;
+  --color-info-rgb: 2, 73, 80;
+  --color-critical-rgb: 199, 95, 84;
+  --color-high-rgb: 217, 139, 95;
+  --color-medium-rgb: 232, 192, 104;
+  --color-low-rgb: 126, 202, 196;
 }
 
 /* Base styles */
@@ -903,8 +919,8 @@ select.form-control {
 }
 
 .stat-icon.risk-high {
-  background: rgba(217, 139, 95, 0.16);
-  color: #a85a35;
+  background: rgba(var(--color-high-rgb), 0.16);
+  color: var(--color-high);
 }
 
 .stat-number {
@@ -982,18 +998,18 @@ select.form-control {
 }
 
 .risk-badge.high {
-  background: rgba(217, 139, 95, 0.16);
-  color: #a85a35;
+  background: rgba(var(--color-high-rgb), 0.16);
+  color: var(--color-high);
 }
 
 .risk-badge.medium {
-  background: rgba(232, 192, 104, 0.2);
-  color: #8a6a1a;
+  background: rgba(var(--color-medium-rgb), 0.2);
+  color: var(--color-medium);
 }
 
 .risk-badge.low {
-  background: rgba(126, 202, 196, 0.16);
-  color: #1f6e68;
+  background: rgba(var(--color-low-rgb), 0.16);
+  color: var(--color-low);
 }
 
 /* Document Review Styles */
@@ -1226,23 +1242,23 @@ select.form-control {
  * .critical and .high were byte-for-byte identical (both #dc2626 on the
  * same tint), making the two severities visually indistinguishable. */
 .finding-severity.critical {
-  background: rgba(199, 95, 84, 0.14);
-  color: #8b3a30;
+  background: rgba(var(--color-critical-rgb), 0.14);
+  color: var(--color-critical);
 }
 
 .finding-severity.high {
-  background: rgba(217, 139, 95, 0.16);
-  color: #a85a35;
+  background: rgba(var(--color-high-rgb), 0.16);
+  color: var(--color-high);
 }
 
 .finding-severity.medium {
-  background: rgba(232, 192, 104, 0.2);
-  color: #8a6a1a;
+  background: rgba(var(--color-medium-rgb), 0.2);
+  color: var(--color-medium);
 }
 
 .finding-severity.low {
-  background: rgba(126, 202, 196, 0.16);
-  color: #1f6e68;
+  background: rgba(var(--color-low-rgb), 0.16);
+  color: var(--color-low);
 }
 
 .finding-excerpt {
@@ -1397,13 +1413,13 @@ select.form-control {
 }
 
 .status-badge.updated {
-  background: rgba(217, 139, 95, 0.16);
-  color: #a85a35;
+  background: rgba(var(--color-warning-rgb), 0.16);
+  color: var(--color-warning);
 }
 
 .status-badge.no-changes {
-  background: rgba(92, 179, 167, 0.18);
-  color: #2e7a6d;
+  background: rgba(var(--color-success-rgb), 0.18);
+  color: var(--color-success);
 }
 
 .watchlist-meta {

@@ -78,8 +78,11 @@ function setupNavigation() {
 
     // Quick action buttons
     document.addEventListener('click', (e) => {
-        const action = e.target.closest('[data-action]')?.getAttribute('data-action');
-        if (action) {
+        const target = e.target.closest('[data-action]');
+        const action = target?.getAttribute('data-action');
+        if (action === 'show-finding-details') {
+            showFindingDetails(target.getAttribute('data-category'));
+        } else if (action) {
             handleQuickAction(action);
         }
     });
@@ -684,7 +687,7 @@ function displayAnalysisResults(doc, mode) {
     const reviewLabel = doc.review_required ? 'Needs Review' : 'Completed';
     const analysisId = doc.id || 'unknown';
     const summaryHtml = doc.summary
-        ? `<div class="mt-16"><h4>Summary</h4><p class="text-secondary">${doc.summary}</p></div>`
+        ? `<div class="mt-16"><h4>Summary</h4><p class="text-secondary">${escapeHtml(doc.summary)}</p></div>`
         : '';
 
     const findingsHtml = doc.findings.length
@@ -742,12 +745,12 @@ function setResultsPlaceholder(message) {
 function createFindingHTML(finding) {
     const confidence = formatConfidence(finding.confidence);
     return `
-        <div class="finding-item" onclick="showFindingDetails('${finding.category}')">
+        <div class="finding-item" data-action="show-finding-details" data-category="${escapeHtml(finding.category)}">
             <div class="finding-header">
-                <div class="finding-category">${finding.category}</div>
-                <div class="finding-severity ${finding.severity.toLowerCase()}">${finding.severity}</div>
+                <div class="finding-category">${escapeHtml(finding.category)}</div>
+                <div class="finding-severity ${finding.severity.toLowerCase()}">${escapeHtml(finding.severity)}</div>
             </div>
-            <div class="finding-excerpt">"${finding.excerpt}"</div>
+            <div class="finding-excerpt">"${escapeHtml(finding.excerpt)}"</div>
             <div class="finding-confidence">
                 <span>Confidence:</span>
                 <div class="confidence-bar">
@@ -775,27 +778,27 @@ function showFindingDetails(category) {
     const content = `
         <div class="finding-details">
             <div class="mb-16">
-                <div class="finding-severity ${finding.severity.toLowerCase()}">${finding.severity} Risk</div>
+                <div class="finding-severity ${finding.severity.toLowerCase()}">${escapeHtml(finding.severity)} Risk</div>
                 <div class="text-secondary">Confidence: ${formatConfidence(finding.confidence)}%</div>
             </div>
-            
+
             <h4>Evidence</h4>
-            <div class="finding-excerpt mb-16">"${finding.excerpt}"</div>
-            
+            <div class="finding-excerpt mb-16">"${escapeHtml(finding.excerpt)}"</div>
+
             <h4>Explanation</h4>
-            <p class="mb-16">${finding.explanation}</p>
-            
+            <p class="mb-16">${escapeHtml(finding.explanation)}</p>
+
             <h4>Location</h4>
-            <p class="text-secondary">Lines ${evidence.line_start}-${evidence.line_end}</p>
+            <p class="text-secondary">Lines ${escapeHtml(String(evidence.line_start))}-${escapeHtml(String(evidence.line_end))}</p>
 
             <h4>Legal Basis</h4>
             <div class="mt-8">
-                ${(evidence.legal_basis || []).map(basis => `<span class="status status--info">${basis}</span>`).join(' ') || '<span class="text-secondary">Not provided</span>'}
+                ${(evidence.legal_basis || []).map(basis => `<span class="status status--info">${escapeHtml(basis)}</span>`).join(' ') || '<span class="text-secondary">Not provided</span>'}
             </div>
-            
+
             <h4>Jurisdictions</h4>
             <div class="mt-8">
-                ${(finding.jurisdictions || []).map(j => `<span class="status status--info">${j}</span>`).join(' ')}
+                ${(finding.jurisdictions || []).map(j => `<span class="status status--info">${escapeHtml(j)}</span>`).join(' ')}
             </div>
         </div>
     `;
