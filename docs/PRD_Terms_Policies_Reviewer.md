@@ -3,7 +3,7 @@
 **Version:** 2.0  
 **Date:** 2026-06-27  
 **Status:** Draft for Development  
-**Change Notes (v2.0):** AI Law Analysis (F8), expanded jurisdiction coverage (26 codes), multilingual analysis (1,000+ languages), LocalAI inference stack.
+**Change Notes (v2.0):** AI Law Analysis (F8), expanded jurisdiction coverage (30 codes), multilingual analysis (1,000+ languages), LocalAI inference stack.
 **Product Manager:** [Name]  
 **Engineering Lead:** [Name]  
 **Project Location:** `/Users/jennifermckinney/Documents/_AUTOMATION/Claude_Projects/terms-analysis`  
@@ -239,14 +239,14 @@ Build a privacy-first web application that empowers individuals and small organi
 
 An independent UI/UX validation pass (live Playwright run against both shipped UIs) found several feature-requirement gaps between this spec and the actual running app, summarized here rather than annotated inline on every checkbox below:
 
-- **F1.3 (character count, short-text warning)**: not implemented in either UI — both use a plain `<textarea>` with no live counter.
-- **F2.1 (30-code jurisdiction multi-select with flags/Select-All/Clear-All)**: Streamlit exposes a single-select dropdown with 10 codes; the JS SPA exposes only 2 (US-CA, GDPR) as pre-checked cards. The rule engine itself supports all 30 — this is a UI-surface gap, not a detection-capability gap.
-- **F3.1/F4.1 (grade/score display)**: correctly implemented in the JS SPA; **not implemented at all in Streamlit** (no grade, score, or gauge anywhere in `app_streamlit.py`) despite the backend returning both correctly.
-- **F4.3 (Verify View)**: implemented as a modal in the JS SPA (line-numbered text, highlighted matches, no prev/next navigation); **not implemented in Streamlit**.
-- **F5.1 (PDF export)**: was broken in both UIs by a backend route-ordering bug (fixed, see issue #16); the JS SPA's primary "Export Report" button downloads JSON rather than PDF (still open, issue #17).
-- **Dark mode**: JS SPA has a non-functional toggle (saves a preference, applies no styling); Streamlit has none.
+- **F1.3 (character count, short-text warning)**: **resolved.** Both UIs now show a live character counter with a short-text warning (JS SPA: `#documentTextCounter`; Streamlit: computed in `app_streamlit.py`).
+- **F2.1 (30-code jurisdiction multi-select with flags/Select-All/Clear-All)**: **resolved.** Both UIs now expose all 30 jurisdiction codes with Select-All/Clear-All controls (Streamlit: `st.multiselect`; JS SPA: a scrollable 30-checkbox list).
+- **F3.1/F4.1 (grade/score display)**: **resolved.** `render_grade_summary()` now shows grade/risk-score/confidence in Streamlit, mirroring the JS SPA's results header.
+- **F4.3 (Verify View)**: **resolved.** Streamlit now has a "View in full document" Verify View expander alongside the JS SPA's modal implementation.
+- **F5.1 (PDF export)**: was broken in both UIs by a backend route-ordering bug (fixed, see issue #16). The JS SPA's export button was relabeled "Export JSON" to accurately describe what it downloads, rather than being mislabeled as a PDF export (issue #17, resolved).
+- **Dark mode**: JS SPA toggle is now functional (`applyTheme()` sets `data-color-scheme`, all three theming blocks in `style.css` corrected); Streamlit follows the OS/browser theme automatically per Streamlit's own theming model, with no in-app toggle.
 
-Given this, **Streamlit's "primary UI" designation reflects an intentional product decision, not current feature completeness** — the JS SPA fallback is presently more complete on several P0 acceptance criteria. See issue #17 for the tracked backlog to close this gap.
+Given this, the remaining gap between the two UIs (per issue #17/#19) is now narrow: both surface the same core findings, grade, and Verify View. See issue #19 for the planned guided-intake redesign that will make Streamlit the fully-featured flagship UI.
 
 ## Feature Requirements
 

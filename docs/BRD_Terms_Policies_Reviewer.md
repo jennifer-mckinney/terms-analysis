@@ -1153,7 +1153,7 @@ terms-analysis/
 │   │   └── style.css
 │   ├── backend/                  # FastAPI backend
 │   │   ├── app/
-│   │   │   ├── main.py           # API routes (23 endpoints + /health)
+│   │   │   ├── main.py           # API routes (24 endpoints + /health)
 │   │   │   ├── services/
 │   │   │   │   ├── analyzer.py   # Orchestration, risk scoring
 │   │   │   │   ├── ingest.py     # Document extraction, SSRF-guarded URL fetch

@@ -471,7 +471,7 @@ function populateWatchlistAlerts() {
         return `
             <div class="analysis-item">
                 <div class="analysis-meta">
-                    <div class="analysis-name">${item.vendor}</div>
+                    <div class="analysis-name">${escapeHtml(item.vendor)}</div>
                     <div class="analysis-date">${item.change_count} changes detected</div>
                 </div>
                 <div class="risk-badge medium">+${item.risk_delta}</div>
@@ -980,14 +980,14 @@ function populateWatchlist() {
         return `
             <div class="watchlist-card">
                 <div class="watchlist-header">
-                    <div class="vendor-name">${item.vendor}</div>
-                    <div class="status-badge ${statusClass}">${item.status}</div>
+                    <div class="vendor-name">${escapeHtml(item.vendor)}</div>
+                    <div class="status-badge ${statusClass}">${escapeHtml(item.status)}</div>
                 </div>
                 <div class="watchlist-meta">
                     <div>Last checked: ${lastChecked}</div>
                     <div>Changes: ${item.change_count}</div>
                     <div>Risk delta: ${item.risk_delta}</div>
-                    ${item.change_summary ? `<div>Summary: ${item.change_summary}</div>` : ''}
+                    ${item.change_summary ? `<div>Summary: ${escapeHtml(item.change_summary)}</div>` : ''}
                 </div>
                 <div class="action-buttons mt-16">
                     <button class="btn btn--sm btn--secondary" onclick="viewChanges('${item.id}')">
@@ -1070,8 +1070,8 @@ function viewChanges(itemId) {
 
     const content = `
         <div class="change-history">
-            <h4>Recent Changes for ${item.vendor}</h4>
-            ${item.change_summary ? `<pre>${item.change_summary}</pre>` : '<p class="text-secondary">No change summary available.</p>'}
+            <h4>Recent Changes for ${escapeHtml(item.vendor)}</h4>
+            ${item.change_summary ? `<pre>${escapeHtml(item.change_summary)}</pre>` : '<p class="text-secondary">No change summary available.</p>'}
         </div>
     `;
 
@@ -1131,8 +1131,8 @@ function filterWatchlist() {
         return `
             <div class="watchlist-card">
                 <div class="watchlist-header">
-                    <div class="vendor-name">${item.vendor}</div>
-                    <div class="status-badge ${statusClass}">${item.status}</div>
+                    <div class="vendor-name">${escapeHtml(item.vendor)}</div>
+                    <div class="status-badge ${statusClass}">${escapeHtml(item.status)}</div>
                 </div>
                 <div class="watchlist-meta">
                     <div>Last checked: ${lastChecked}</div>

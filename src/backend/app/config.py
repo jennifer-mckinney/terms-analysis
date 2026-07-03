@@ -87,7 +87,7 @@ class Settings:
     allowed_origins: List[str] = field(
         default_factory=lambda: _split_env_list(
             "ALLOWED_ORIGINS",
-            "http://localhost:8000,http://127.0.0.1:8000,null",
+            "http://localhost:8000,http://127.0.0.1:8000",
         )
     )
     watchlist_refresh_seconds: int = int(os.getenv("WATCHLIST_REFRESH_SECONDS", "0"))

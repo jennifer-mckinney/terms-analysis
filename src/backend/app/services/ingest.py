@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import socket
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -162,17 +162,27 @@ def _validate_url(url: str) -> None:
             raise ValueError("URL is not allowed")
 
 
-async def fetch_url_text(url: str) -> str:
-    try:
-        _validate_url(url)
-    except ValueError:
-        raise
+_MAX_REDIRECTS = 5
 
+
+async def fetch_url_text(url: str) -> str:
     timeout = settings.request_timeout_s
+    current_url = url
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.get(url, follow_redirects=True)
-        response.raise_for_status()
-        content_type = response.headers.get("content-type", "")
-        data = response.content
-    filename = Path(url).name or "document"
+        for _ in range(_MAX_REDIRECTS + 1):
+            _validate_url(current_url)
+            response = await client.get(current_url, follow_redirects=False)
+            if response.is_redirect:
+                next_url = response.headers.get("location")
+                if not next_url:
+                    raise ValueError("URL is not allowed")
+                current_url = urljoin(current_url, next_url)
+                continue
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "")
+            data = response.content
+            break
+        else:
+            raise ValueError("Too many redirects")
+    filename = Path(current_url).name or "document"
     return extract_text_from_bytes(filename, content_type, data)
