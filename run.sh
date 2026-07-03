@@ -19,6 +19,16 @@ PORT="${PORT:-8000}"
 STREAMLIT_PORT="${STREAMLIT_PORT:-8501}"
 BACKEND_PORT="${BACKEND_PORT:-9000}"
 BACKEND_HOST="${BACKEND_HOST:-0.0.0.0}"
+# Streamlit UI feature flag: v2 (default, issue #19 plain-language redesign) or v1 (legacy)
+STREAMLIT_UI="${STREAMLIT_UI:-v2}"
+case "$STREAMLIT_UI" in
+  v2) STREAMLIT_ENTRY="app_streamlit_v2.py" ;;
+  v1) STREAMLIT_ENTRY="app_streamlit_legacy.py" ;;
+  *)
+    echo "error: STREAMLIT_UI must be 'v1' or 'v2' (got: $STREAMLIT_UI)" >&2
+    exit 1
+    ;;
+esac
 # LocalAI (Apache 2.0, zero VC) — https://localai.io
 # Default port: 8080. Override with LOCALAI_BASE_URL env var.
 LOCALAI_BASE_URL="${LOCALAI_BASE_URL:-http://localhost:8080/v1}"
@@ -53,7 +63,7 @@ export ALLOWED_ORIGINS
 export API_BASE_URL
 
 echo "Starting Terms & Policies Reviewer..."
-echo "Primary UI (Streamlit): http://localhost:$STREAMLIT_PORT"
+echo "Primary UI (Streamlit $STREAMLIT_UI -> $STREAMLIT_ENTRY): http://localhost:$STREAMLIT_PORT"
 echo "Fallback UI (vanilla JS SPA): http://localhost:$PORT"
 echo "Backend dir: $BACKEND_DIR"
 echo "Backend URL: http://localhost:$BACKEND_PORT"
@@ -78,8 +88,8 @@ echo "Starting fallback UI (vanilla JS SPA)..."
 (cd "$APP_DIR" && "$VENV_PATH/bin/python" -m http.server "$PORT") &
 FALLBACK_PID=$!
 
-echo "Starting primary UI (Streamlit)..."
-(cd "$APP_DIR" && "$VENV_PATH/bin/python" -m streamlit run app_streamlit.py \
+echo "Starting primary UI (Streamlit $STREAMLIT_UI: $STREAMLIT_ENTRY)..."
+(cd "$APP_DIR" && "$VENV_PATH/bin/python" -m streamlit run "$STREAMLIT_ENTRY" \
   --server.port "$STREAMLIT_PORT" \
   --server.headless true) &
 STREAMLIT_PID=$!

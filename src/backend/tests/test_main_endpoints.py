@@ -1246,3 +1246,136 @@ class TestSecurityApiKeyAuth:
             mock_settings.api_key = ""
             response = app_client.get("/health")
         assert response.status_code == 200
+
+
+# ===========================================================================
+# POST /infer  (Phase 1 backend — Streamlit v2 intake)
+# ===========================================================================
+
+
+class TestInferEndpoint:
+    def test_main_infer_400_when_neither_url_nor_text(self, app_client):
+        response = app_client.post("/infer", json={})
+        assert response.status_code == 400
+        assert "at least one" in response.json()["detail"].lower()
+
+    def test_main_infer_with_url_only_returns_tld_jurisdiction(self, app_client):
+        response = app_client.post("/infer", json={"url": "https://example.co.uk/privacy"})
+        assert response.status_code == 200
+        body = response.json()
+        assert "UK-GDPR" in body["jurisdictions"]
+        assert body["doc_type"] == "Privacy Policy"
+        assert body["location_needed"] is False
+        assert body["detected_signals"].get("tld")
+
+    def test_main_infer_with_text_only_returns_statute_jurisdiction(self, app_client):
+        response = app_client.post(
+            "/infer",
+            json={"text": "This policy complies with GDPR and CCPA obligations."},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert "GDPR" in body["jurisdictions"]
+        assert "US-CA" in body["jurisdictions"]
+        assert body["location_needed"] is False
+
+    def test_main_infer_with_both_populates_all_fields(self, app_client):
+        response = app_client.post(
+            "/infer",
+            json={
+                "url": "https://facebook.com/privacy",
+                "text": "California residents may opt out of the sale of personal information.",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["industry"] == "Social Media"
+        assert body["doc_type"] == "Privacy Policy"
+        assert "US-CA" in body["jurisdictions"]
+        assert body["location_needed"] is False
+
+    def test_main_infer_location_needed_true_when_no_signals(self, app_client):
+        response = app_client.post(
+            "/infer",
+            json={"text": "generic policy paragraph without any statute cues"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["location_needed"] is True
+        # Fallback jurisdictions are populated so the caller still has usable defaults.
+        assert "US-CA" in body["jurisdictions"]
+        assert "GDPR" in body["jurisdictions"]
+
+    def test_main_infer_context_field_accepted_but_not_required(self, app_client):
+        response = app_client.post(
+            "/infer",
+            json={"url": "https://example.com/privacy", "context": ["for_child"]},
+        )
+        assert response.status_code == 200
+
+
+# ===========================================================================
+# POST /analyze with context — verdict_headline / verdict_label populated
+# ===========================================================================
+
+
+class TestAnalyzeWithContext:
+    def test_main_analyze_with_context_populates_verdict_fields(self, app_client, db_session, monkeypatch):
+        """When context is supplied, the analyzer must populate verdict copy."""
+        payload = _make_analysis_payload()
+
+        async def fake_analyze(*args, **kwargs):
+            # The endpoint must forward the ``context`` kwarg to analyze_text.
+            assert kwargs.get("context") == ["for_child"]
+            # Simulate analyze_text populating context-derived fields on the payload.
+            from app.services.context import verdict_headline, verdict_label
+            payload_with_context = payload.model_copy(update={
+                "context": kwargs["context"],
+                "verdict_headline": verdict_headline(kwargs["context"], payload.action_readiness),
+                "verdict_label": verdict_label(kwargs["context"], payload.action_readiness),
+            })
+            return AnalysisResult(payload=payload_with_context, issues=[])
+
+        monkeypatch.setattr("app.main.analyze_text", fake_analyze)
+
+        response = app_client.post(
+            "/analyze",
+            json={
+                "text": "Sample policy text.",
+                "jurisdictions": ["US-CA"],
+                "context": ["for_child"],
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["context"] == ["for_child"]
+        assert body["verdict_headline"]
+        assert body["verdict_label"]
+        # Child-specific copy should mention "child".
+        assert "child" in body["verdict_headline"].lower() or "child" in body["verdict_label"].lower()
+
+    def test_main_analyze_without_context_still_populates_verdict(self, app_client, monkeypatch):
+        """Analyze with no context supplied still gets the default-verdict copy."""
+        payload = _make_analysis_payload()
+
+        async def fake_analyze(*args, **kwargs):
+            from app.services.context import verdict_headline, verdict_label
+            ctx = kwargs.get("context") or []
+            payload_with_context = payload.model_copy(update={
+                "context": ctx,
+                "verdict_headline": verdict_headline(ctx, payload.action_readiness),
+                "verdict_label": verdict_label(ctx, payload.action_readiness),
+            })
+            return AnalysisResult(payload=payload_with_context, issues=[])
+
+        monkeypatch.setattr("app.main.analyze_text", fake_analyze)
+
+        response = app_client.post(
+            "/analyze",
+            json={"text": "Sample policy text.", "jurisdictions": ["US-CA"]},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["context"] == []
+        assert body["verdict_headline"]
+        assert body["verdict_label"]

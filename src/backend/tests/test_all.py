@@ -108,7 +108,7 @@ def test_analyze_file_accepts_small_valid_upload(
 ):
     captured = {}
 
-    async def fake_analyze(text, jurisdictions, name=None, doc_type=None, industry=None, source_url=None, mode=None):
+    async def fake_analyze(text, jurisdictions, name=None, doc_type=None, industry=None, source_url=None, mode=None, **kwargs):
         captured.update(
             {
                 "text": text,

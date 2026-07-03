@@ -75,4 +75,47 @@ def _grade(score):  # score is 0-10, higher = worse
     return "A"
 ```
 
-An Impact/Likelihood/Safeguards ("IRP") formula — `IRP = 0.5*(Impact/5) + 0.4*(Likelihood/5) - 0.3*(Safeguards/5)` — is a **planned, not-yet-implemented enhancement** (see `docs/plans/2026-06-24-open-source-rag-pipeline.md` Task 7). It is not wired into any current code path; do not describe it as current behavior.
+## IRP Scoring (active as of 2026-07-03)
+
+An Impact/Likelihood/Safeguards formula is **fully implemented** across the pipeline:
+
+```
+irp_score = clamp(0.5*(impact/5) + 0.4*(likelihood/5) - 0.3*(safeguard_score/5), 0, 1)
+```
+
+### Per-finding IRP fields (in `Finding` schema)
+
+| Field | Type | Default | Range | Meaning |
+|-------|------|---------|-------|---------|
+| `impact` | int | 2 | 1-5 | Harm if clause enforced (1=trivial, 5=catastrophic) |
+| `likelihood` | int | 3 | 1-5 | How automatic/probable clause activation is |
+| `safeguard_score` | int | 0 | 0-5 | Existing mitigations in the document |
+| `irp_score` | float? | None | 0-1 | Composite IRP score |
+
+### Score range
+
+- Max risk (impact=5, likelihood=5, safeguard=0): **0.90**
+- Fully mitigated (impact=1, likelihood=1, safeguard=5): **0.0** (clamped from -0.12)
+- Typical Sale/Share (impact=4, likelihood=5, safeguard=0): **0.80**
+- Prohibited AI (impact=5, likelihood=1, safeguard=0): **0.58** (high harm, rare)
+
+### Where IRP is seeded
+
+- **Rule-based findings** (`rules.py::detect_findings` and `detect_high_severity_findings`): seeded automatically from `_CATEGORY_IRP_DEFAULTS` (38 categories mapped) via `_seed_irp(category)`. `safeguard_score=0` at detection time (no mitigations assumed).
+- **LLM findings**: the LLM prompt now requests `impact`, `likelihood`, `safeguard_score` per finding. `irp_score` is computed from these fields after parsing.
+- **Hybrid findings**: rule `impact`/`likelihood` used as baseline; `safeguard_score = max(rule, llm)` (benefit of the doubt for user protections); `irp_score` recomputed.
+
+### Risk score update
+
+`calculate_risk_score()` now uses `irp_score` when present, falls back to severity weight for findings without IRP (e.g., legacy stored findings):
+
+```python
+scores = [
+    f.irp_score if f.irp_score is not None
+    else severity_weights.get(f.severity, 0.5)
+    for f in findings
+]
+risk_score = round((sum(scores) / len(scores)) * 10, 2)  # 0-10 scale
+```
+
+Grade thresholds are unchanged (A < 3.5, ... D+ >= 8.5).

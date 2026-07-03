@@ -31,6 +31,8 @@ from .schemas import (
     DiffToken,
     DocType,
     IndustryProfile,
+    InferRequest,
+    InferResponse,
     PolicySnapshotListItem,
     PolicySnapshotPayload,
     PolicyWatchCreateRequest,
@@ -47,6 +49,7 @@ from .services.analyzer import (
     calculate_risk_score,
 )
 from .services.diffing import content_hash, diff_summary, diff_tokens
+from .services.inference import infer_all
 from .services.ingest import extract_text_from_bytes, fetch_url_text
 from .services.rules import detect_findings
 
@@ -238,6 +241,18 @@ def _compute_rubric_scores(records: list[Analysis]) -> RubricScores:
     )
 
 
+@app.post("/infer", response_model=InferResponse)
+async def infer(request: InferRequest) -> InferResponse:
+    """Infer jurisdictions, doc_type, and industry from URL and/or text.
+
+    Feeds the Streamlit v2 intake: the UI shows what was auto-detected and only
+    prompts the user for a location when ``location_needed`` is True.
+    """
+    if not request.url and not request.text:
+        raise HTTPException(status_code=400, detail="Provide at least one of url or text")
+    return infer_all(request.url, request.text)
+
+
 @app.post("/analyze", response_model=AnalysisPayload)
 async def analyze(request: AnalyzeRequest, db: Session = Depends(get_db)):
     logger.info(
@@ -255,6 +270,7 @@ async def analyze(request: AnalyzeRequest, db: Session = Depends(get_db)):
         industry=request.industry,
         source_url=request.source_url,
         mode=request.mode,
+        context=request.context,
     )
     payload = result.payload
     _persist_analysis(
@@ -296,6 +312,7 @@ async def analyze_url(request: AnalyzeUrlRequest, db: Session = Depends(get_db))
         industry=request.industry,
         source_url=request.url,
         mode=request.mode,
+        context=request.context,
     )
     payload = result.payload
     _persist_analysis(
@@ -317,6 +334,7 @@ async def analyze_file(
     industry: str | None = Form(default=None),
     jurisdictions: str | None = Form(default=None),
     mode: str | None = Form(default="full"),
+    context: str | None = Form(default=None),
     db: Session = Depends(get_db),
 ):
     logger.info(
@@ -359,6 +377,16 @@ async def analyze_file(
         else ["US-CA", "GDPR"]
     )
 
+    # ``context`` arrives as a comma-separated list on multipart uploads. Only
+    # valid ContextChip values are propagated; anything else is silently dropped
+    # so the form endpoint stays tolerant.
+    _valid_chips = {"want_understand", "for_child", "for_care", "just_curious"}
+    selected_context = (
+        [c.strip() for c in context.split(",") if c.strip() in _valid_chips]
+        if context
+        else []
+    )
+
     resolved_name = name or file.filename
     result = await analyze_text(
         text,
@@ -368,6 +396,7 @@ async def analyze_file(
         industry=industry,
         source_url=None,
         mode=mode,
+        context=selected_context,
     )
     payload = result.payload
     _persist_analysis(
@@ -406,13 +435,15 @@ async def analyze_batch(request: AnalyzeBatchRequest, db: Session = Depends(get_
     if not documents:
         raise HTTPException(status_code=400, detail="No valid documents to analyze")
     
-    # Analyze documents in batch
+    # Analyze documents in batch. ``context`` may be absent on legacy request
+    # shims (SimpleNamespace fixtures in older tests) — default to [].
     results, cross_refs = await analyze_batch_documents(
         documents,
         batch_req.industry,
         batch_req.jurisdictions,
         batch_req.mode,
         batch_req.detect_cross_references,
+        context=getattr(batch_req, "context", None) or [],
     )
     
     # Persist analyses

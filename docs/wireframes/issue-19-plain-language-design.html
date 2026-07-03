@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Issue #19 Design Mockup — Plain Language UI (Facebook Privacy Policy)</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --ink: #1a1f2e; --ink-soft: #4a5568; --ink-muted: #718096;
+    --border: #e2e8f0; --bg: #f8f9fb; --bg-card: #ffffff;
+    --teal: #0d6e8a; --teal-soft: #e6f4f8;
+    --amber: #b45309; --amber-bg: #fffbeb; --amber-bdr: #fcd34d;
+    --green: #166534; --green-bg: #f0fdf4;
+    --red: #991b1b; --red-bg: #fff5f5;
+    --scope-bg: #f1f5f9;
+    --radius: 10px;
+    --shadow: 0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.05);
+    --shadow-md: 0 4px 12px rgba(0,0,0,.09);
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  body { font-family: var(--font); background: var(--bg); color: var(--ink); line-height: 1.6; min-height: 100vh; }
+
+  .view-bar { background: var(--ink); display: flex; align-items: center; padding: 0 1.5rem; position: sticky; top: 0; z-index: 100; }
+  .view-bar .label { font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #94a3b8; margin-right: 1.25rem; }
+  .view-btn { background: none; border: none; border-bottom: 2px solid transparent; color: #94a3b8; cursor: pointer; font: inherit; font-size: 0.8rem; font-weight: 500; padding: 0.85rem 1rem; transition: color 0.15s, border-color 0.15s; }
+  .view-btn.active { color: #fff; border-bottom-color: #38bdf8; }
+  .view-btn:hover { color: #e2e8f0; }
+  .view-note { margin-left: auto; font-size: 0.7rem; color: #64748b; font-style: italic; }
+
+  .view { display: none; }
+  .view.active { display: block; }
+  .shell { max-width: 680px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+
+  .app-head { display: flex; align-items: baseline; gap: 0.75rem; margin-bottom: 2rem; }
+  .app-head .wordmark { font-size: 0.9rem; font-weight: 600; color: var(--teal); letter-spacing: -0.01em; }
+  .app-head .tagline { font-size: 0.82rem; color: var(--ink-muted); }
+
+  .intake-headline { font-size: 1.6rem; font-weight: 700; line-height: 1.25; color: var(--ink); margin-bottom: 0.4rem; letter-spacing: -0.02em; }
+  .intake-sub { font-size: 0.95rem; color: var(--ink-soft); margin-bottom: 1.75rem; }
+
+  .input-box { background: var(--bg-card); border: 1.5px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; margin-bottom: 1.25rem; }
+  .input-tabs { display: flex; border-bottom: 1px solid var(--border); background: #f8f9fb; }
+  .input-tab { background: none; border: none; border-bottom: 2px solid transparent; color: var(--ink-muted); cursor: pointer; font: inherit; font-size: 0.8rem; font-weight: 500; padding: 0.65rem 1.1rem; }
+  .input-tab.active { color: var(--teal); border-bottom-color: var(--teal); background: var(--bg-card); }
+  .input-inner { padding: 1rem 1.125rem; }
+  .input-inner input[type="text"], .input-inner textarea { width: 100%; border: none; outline: none; font: inherit; font-size: 0.9rem; color: var(--ink); background: transparent; line-height: 1.65; }
+  .input-inner textarea { resize: vertical; min-height: 130px; font-family: var(--font); }
+  .input-inner input::placeholder, .input-inner textarea::placeholder { color: #a0aec0; }
+  .file-drop { display: block; width: 100%; border: 1.5px dashed #cbd5e0; border-radius: 8px; padding: 1.75rem 1rem; text-align: center; color: var(--ink-muted); cursor: pointer; transition: border-color 0.15s, background 0.15s, color 0.15s; }
+  .file-drop:hover { border-color: var(--teal); background: var(--teal-soft); color: var(--teal); }
+  .file-drop .file-primary { font-size: 0.9rem; margin: 0 0 0.25rem 0; color: var(--ink); font-weight: 500; }
+  .file-drop:hover .file-primary { color: var(--teal); }
+  .file-drop .file-hint { font-size: 0.78rem; font-style: italic; margin: 0; color: var(--ink-muted); }
+  .input-footer { display: flex; justify-content: space-between; align-items: center; padding: 0.6rem 1.125rem; border-top: 1px solid var(--border); background: #f8f9fb; }
+  .char-hint { font-size: 0.75rem; color: var(--ink-muted); }
+
+  .optional-section { margin-bottom: 1.25rem; }
+  .optional-label { font-size: 0.8rem; font-weight: 600; letter-spacing: 0.03em; color: var(--ink-muted); text-transform: uppercase; margin-bottom: 0.75rem; }
+  .optional-label .optional-hint { font-weight: 400; font-size: 0.78rem; text-transform: none; letter-spacing: 0; color: var(--ink-muted); }
+
+  .option-list { display: flex; flex-direction: column; gap: 0.5rem; }
+  .option-card { border: 1.5px solid var(--border); border-radius: 10px; padding: 0.75rem 1rem; cursor: pointer; background: var(--bg-card); transition: border-color 0.12s, background 0.12s; }
+  .option-card:hover { border-color: #b0c4cc; }
+  .option-card.selected { border-color: var(--teal); background: var(--teal-soft); }
+  .option-card .card-label { font-size: 0.9rem; font-weight: 500; color: var(--ink); margin-bottom: 0.15rem; }
+  .option-card.selected .card-label { color: var(--teal); }
+  .option-card .card-sub { font-size: 0.78rem; font-style: italic; color: var(--ink-muted); line-height: 1.45; }
+
+  .conditional-section { background: var(--bg-card); border: 1.5px dashed #cbd5e0; border-radius: var(--radius); padding: 1rem 1.125rem; margin-bottom: 1.25rem; }
+  .conditional-section .q-label { font-size: 0.9rem; font-weight: 500; color: var(--ink); margin-bottom: 0.15rem; }
+  .conditional-section .q-sub { font-size: 0.78rem; font-style: italic; color: var(--ink-muted); line-height: 1.45; margin-bottom: 0.75rem; }
+  .loc-row { display: flex; gap: 0.75rem; }
+  .loc-select { flex: 1; border: 1.5px solid var(--border); border-radius: 6px; padding: 0.5rem 0.75rem; font: inherit; font-size: 0.85rem; color: var(--ink); background: var(--bg-card); appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23718096' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 0.75rem center; padding-right: 2rem; cursor: pointer; }
+
+  .analyze-btn { width: 100%; background: var(--teal); color: #fff; border: none; border-radius: var(--radius); font: inherit; font-size: 1rem; font-weight: 600; padding: 0.875rem 1.5rem; cursor: pointer; letter-spacing: -0.01em; }
+  .analyze-btn:hover { background: #0a5870; }
+  .privacy-note { text-align: center; font-size: 0.75rem; color: var(--ink-muted); margin-top: 0.75rem; }
+
+  .crumb { font-size: 0.78rem; color: var(--ink-muted); margin-bottom: 1rem; display: flex; align-items: center; gap: 0.4rem; }
+  .crumb a { color: var(--teal); text-decoration: none; cursor: pointer; }
+  .crumb a:hover { text-decoration: underline; }
+  .context-chip { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.75rem; background: var(--teal-soft); border: 1px solid #b8dae4; border-radius: 999px; margin-bottom: 1.25rem; font-size: 0.78rem; color: var(--ink-soft); }
+  .context-chip .context-label { color: var(--ink-muted); font-weight: 500; }
+  .context-chip .context-value { color: var(--teal); font-weight: 600; }
+
+  .verdict { border-radius: var(--radius); padding: 1.375rem 1.5rem; margin-bottom: 1rem; border: 1.5px solid; }
+  .verdict.caution { background: var(--amber-bg); border-color: var(--amber-bdr); }
+  .verdict-top { display: flex; align-items: center; gap: 0.625rem; margin-bottom: 0.5rem; }
+  .verdict-icon { font-size: 1.4rem; line-height: 1; }
+  .verdict-label { font-size: 0.7rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--amber); }
+  .verdict-headline { font-size: 1.1rem; font-weight: 700; line-height: 1.3; color: var(--ink); margin-bottom: 0.375rem; letter-spacing: -0.01em; }
+  .verdict-sub { font-size: 0.88rem; color: var(--ink-soft); line-height: 1.55; }
+
+  .scope-box { background: var(--scope-bg); border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 1.25rem; font-size: 0.84rem; color: var(--ink-soft); line-height: 1.6; }
+  .scope-box strong { color: var(--ink); font-weight: 600; }
+
+  .top-things-head { font-size: 0.78rem; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--ink-muted); margin-bottom: 0.75rem; }
+  .top-things { list-style: none; display: flex; flex-direction: column; gap: 0.625rem; margin-bottom: 1.5rem; }
+  .pr-domain-head-wrap { margin-bottom: 1.25rem; }
+  .pr-domain-head { margin: 1.25rem 0 0.5rem; font-size: 0.85rem; }
+  .pr-domain-name { font-weight: 700; color: var(--ink); letter-spacing: -0.01em; }
+  .pr-domain-desc { color: var(--ink-muted); font-weight: 400; font-style: italic; margin-left: 0.4rem; font-size: 0.8rem; }
+  .top-thing { display: flex; gap: 0.875rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 0.875rem 1rem; font-size: 0.9rem; color: var(--ink); line-height: 1.5; box-shadow: var(--shadow); }
+  .thing-num { flex-shrink: 0; width: 24px; height: 24px; background: var(--teal-soft); color: var(--teal); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.75rem; font-weight: 700; margin-top: 0.05rem; }
+
+  .legal-details { border: 1.5px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-bottom: 1.5rem; background: var(--bg-card); }
+  .legal-summary { display: flex; justify-content: space-between; align-items: center; padding: 0.9rem 1.125rem; cursor: pointer; font-size: 0.88rem; font-weight: 600; color: var(--ink); background: var(--bg-card); }
+  .legal-summary:hover { background: var(--bg); }
+  .legal-summary .count { font-size: 0.78rem; color: var(--ink-muted); font-weight: 500; }
+  .legal-summary .chevron { color: var(--ink-muted); transition: transform 0.2s; }
+  details[open] .legal-summary .chevron { transform: rotate(180deg); }
+
+  .finding-list { border-top: 1px solid var(--border); }
+  .finding-item { padding: 0.875rem 1.125rem; border-bottom: 1px solid var(--border); font-size: 0.84rem; }
+  .finding-item:last-child { border-bottom: none; }
+  .finding-meta { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.3rem; flex-wrap: wrap; }
+  .sev-tag { font-size: 0.67rem; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; padding: 0.15rem 0.5rem; border-radius: 3px; }
+  .sev-high { background: #fef3c7; color: #92400e; }
+  .sev-medium { background: #fffbeb; color: #78350f; }
+  .finding-cat { font-weight: 600; color: var(--ink); font-size: 0.84rem; }
+  .irp-badge { margin-left: auto; font-size: 0.7rem; color: var(--ink-muted); background: var(--scope-bg); padding: 0.1rem 0.45rem; border-radius: 4px; }
+  .finding-excerpt { background: var(--scope-bg); border-left: 3px solid #cbd5e0; padding: 0.5rem 0.75rem; font-size: 0.8rem; color: var(--ink-soft); margin: 0.4rem 0; line-height: 1.55; font-style: italic; }
+  .finding-plain { font-size: 0.82rem; color: var(--ink-soft); line-height: 1.55; margin-top: 0.3rem; }
+  .finding-basis { margin-top: 0.3rem; font-size: 0.75rem; color: var(--teal); }
+  .irp-row { display: flex; gap: 1rem; margin-top: 0.35rem; font-size: 0.72rem; color: var(--ink-muted); }
+  .finding-loc { font-size: 0.72rem; color: var(--ink-muted); margin-top: 0.3rem; }
+  .finding-verify { display: inline-block; margin-top: 0.35rem; font-size: 0.75rem; color: var(--teal); text-decoration: none; cursor: pointer; }
+  .finding-verify:hover { text-decoration: underline; }
+
+  .score-row { display: flex; gap: 1rem; margin-bottom: 1.25rem; }
+  .score-card { flex: 1; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem 1rem; box-shadow: var(--shadow); }
+  .sc-label { font-size: 0.67rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-muted); margin-bottom: 0.2rem; }
+  .sc-val { font-size: 1.45rem; font-weight: 300; color: var(--ink); letter-spacing: -0.02em; line-height: 1.1; }
+  .sc-val.bad { color: #c05621; }
+  .sc-val.ok { color: #d97706; }
+  .sc-sub { font-size: 0.73rem; color: var(--ink-muted); margin-top: 0.1rem; }
+  .risk-bar-wrap { background: var(--scope-bg); border-radius: 4px; height: 6px; margin-top: 0.4rem; position: relative; }
+  .risk-bar-fill { height: 100%; border-radius: 4px; background: linear-gradient(90deg, #16a34a 0%, #ca8a04 50%, #dc2626 100%); }
+  .risk-marker-dot { position: absolute; top: -3px; width: 12px; height: 12px; background: var(--ink); border: 2px solid #fff; border-radius: 50%; box-shadow: 0 1px 3px rgba(0,0,0,.2); transform: translateX(-50%); left: 78%; }
+
+  .action-footer { background: var(--bg-card); border: 1.5px solid var(--border); border-radius: var(--radius); padding: 1.125rem 1.25rem; margin-bottom: 1.5rem; }
+  .action-footer-head { font-size: 0.78rem; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--ink-muted); margin-bottom: 0.75rem; }
+  .action-list { list-style: none; display: flex; flex-direction: column; gap: 0.5rem; font-size: 0.86rem; color: var(--ink-soft); line-height: 1.55; }
+  .action-list li::before { content: "→ "; color: var(--teal); font-weight: 600; }
+
+  .export-bar { display: flex; gap: 0.5rem; padding: 0.75rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 1.5rem; box-shadow: var(--shadow); }
+  .export-btn { flex: 1; background: none; border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.75rem; font: inherit; font-size: 0.82rem; color: var(--ink-soft); cursor: pointer; }
+  .export-btn:hover { border-color: var(--teal); color: var(--teal); }
+
+  .section-help { position: fixed; right: 2rem; top: 50%; transform: translateY(-50%); max-width: 220px; color: var(--ink-muted); font-size: 0.82rem; line-height: 1.6; font-style: italic; opacity: 0; transition: opacity 0.5s ease; pointer-events: none; z-index: 10; }
+  .section-help.visible { opacity: 1; }
+  .section-help::before { content: ""; display: block; width: 24px; height: 1px; background: var(--ink-muted); opacity: 0.4; margin-bottom: 0.85rem; }
+  .section-help .help-body { margin: 0; }
+
+  @media (max-width: 1100px) { .section-help { display: none; } }
+</style>
+</head>
+<body>
+
+<div class="view-bar">
+  <span class="label">Mockup</span>
+  <button class="view-btn active" onclick="switchView('intake')">Intake screen</button>
+  <button class="view-btn" onclick="switchView('results')">Results screen</button>
+  <span class="view-note">Issue #19 — Facebook Privacy Policy simulation</span>
+</div>
+
+<aside class="section-help" id="section-help"><p class="help-body"></p></aside>
+
+<div id="view-intake" class="view active">
+  <div class="shell">
+    <div class="app-head">
+      <span class="wordmark">Policy Reviewer</span>
+      <span class="tagline">Plain-language privacy &amp; terms analysis</span>
+    </div>
+
+    <h1 class="intake-headline">What's on<br>your mind?</h1>
+    <p class="intake-sub">Privacy policies are confusing on purpose. We're here to help make sense of one.</p>
+
+    <div class="input-box" data-help="Any URL, pasted text, or file. Processed locally. No upload.">
+      <div class="input-tabs">
+        <button class="input-tab active" data-panel="link">Paste link</button>
+        <button class="input-tab" data-panel="text">Paste text</button>
+        <button class="input-tab" data-panel="file">Upload file</button>
+      </div>
+
+      <div class="input-inner" data-input-panel="link">
+        <input type="text" value="https://www.facebook.com/privacy/policy/" placeholder="Paste a privacy policy or terms of service link">
+      </div>
+      <div class="input-inner" data-input-panel="text" style="display:none;">
+        <textarea placeholder="Paste the policy text here."></textarea>
+      </div>
+      <div class="input-inner" data-input-panel="file" style="display:none;">
+        <label class="file-drop" for="file-input-mockup">
+          <p class="file-primary">Drop a file here, or click to browse.</p>
+          <p class="file-hint">PDF, DOCX, RTF, HTML, or TXT. Up to 10MB.</p>
+          <input type="file" id="file-input-mockup" accept=".pdf,.docx,.rtf,.html,.txt" style="display:none;">
+        </label>
+      </div>
+
+      <div class="input-footer" data-panel-footer="link">
+        <span class="char-hint">Any URL that leads to a privacy policy or terms of service page works here.</span>
+      </div>
+      <div class="input-footer" data-panel-footer="text" style="display:none;">
+        <span class="char-hint">Up to 50,000 characters. Text stays on this machine.</span>
+      </div>
+      <div class="input-footer" data-panel-footer="file" style="display:none;">
+        <span class="char-hint">Text is extracted locally. Nothing leaves the browser.</span>
+      </div>
+    </div>
+
+    <div class="optional-section" data-help="Pick anything that fits. Or skip entirely. Both work.">
+      <div class="optional-label">A little context <span class="optional-hint">(optional, choose any that fit)</span></div>
+      <div class="option-list">
+        <div class="option-card">
+          <div class="card-label">I want to understand what I'm agreeing to</div>
+          <div class="card-sub">Nice to know before you tap "I agree." No judgment if you already did.</div>
+        </div>
+        <div class="option-card selected">
+          <div class="card-label">Something my child wants to use</div>
+          <div class="card-sub">Games, apps, social platforms. We'll help you see what matters.</div>
+        </div>
+        <div class="option-card">
+          <div class="card-label">Helping someone I care about with this</div>
+          <div class="card-sub">A family member, extended family, and/or a friend.</div>
+        </div>
+        <div class="option-card">
+          <div class="card-label">For work or a vendor pick</div>
+          <div class="card-sub">A tool the team might use, or an agreement to sign.</div>
+        </div>
+        <div class="option-card">
+          <div class="card-label">Just curious</div>
+          <div class="card-sub">Sometimes it's good to just know. No pressure either way.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="conditional-section" data-help="Only appears when jurisdiction can't be inferred. Country defaults from browser location. Left blank if a VPN is detected.">
+      <div class="q-label">Where are you located?</div>
+      <div class="q-sub">Different regions offer different protections.</div>
+      <div class="loc-row">
+        <select class="loc-select"><option selected>United States</option><option>European Union</option><option>Canada</option><option>United Kingdom</option><option>Brazil</option><option>India</option><option>Australia</option><option>Japan</option><option>Other</option></select>
+        <select class="loc-select"><option selected>California</option><option>Texas</option><option>New York</option><option>Virginia</option><option>Colorado</option><option>Illinois</option><option>Other state</option></select>
+      </div>
+    </div>
+
+    <button class="analyze-btn" onclick="switchView('results')">Take a look →</button>
+    <p class="privacy-note">Processed locally. Policy text is not stored. No account required.</p>
+  </div>
+
+</div>
+
+<div id="view-results" class="view">
+  <div class="shell">
+    <div class="app-head">
+      <span class="wordmark">Policy Reviewer</span>
+      <span class="tagline">Plain-language privacy &amp; terms analysis</span>
+    </div>
+    <div class="crumb">
+      <span>Reviewed:</span>
+      <a href="https://www.facebook.com/privacy/policy/" target="_blank" rel="noopener">facebook.com/privacy/policy</a>
+      <span>·</span>
+      <span>Facebook Privacy Policy</span>
+      <span>·</span>
+      <a onclick="switchView('intake')">← Review another</a>
+    </div>
+
+    <div class="context-chip">Tuned for: <span class="context-value">Something my child wants to use</span>, For work or a vendor pick</div>
+
+    <div class="verdict caution" data-help="The plain-language finding, first. Not a grade, not a code.">
+      <div class="verdict-top"><span class="verdict-icon">👀</span><span class="verdict-label">Worth a closer read for a child</span></div>
+      <div class="verdict-headline">For a child, a few things here may be worth understanding first.</div>
+      <div class="verdict-sub">This service is officially for users 13 and older. For any child using it, several parts of the policy reach into apps and websites the child may not know are connected, in ways that are difficult to undo.</div>
+    </div>
+
+    <div class="score-row" data-help="Grade and IRP shown as context, not as the headline.">
+      <div class="score-card">
+        <div class="sc-label">Risk level</div>
+        <div class="sc-val bad">7.8 <span style="font-size:0.9rem;font-weight:400;color:#a0aec0;">/ 10</span></div>
+        <div class="risk-bar-wrap"><div class="risk-bar-fill"></div><div class="risk-marker-dot"></div></div>
+        <div class="sc-sub" style="margin-top:0.5rem;">Grade C. Higher risk.</div>
+      </div>
+      <div class="score-card">
+        <div class="sc-label">Policy coverage</div>
+        <div class="sc-val ok">6 / 8</div>
+        <div class="sc-sub">sections found.<br>Missing: AI training opt-out, ADM rights.</div>
+      </div>
+      <div class="score-card">
+        <div class="sc-label">Issues found</div>
+        <div class="sc-val bad">8</div>
+        <div class="sc-sub">3 high · 4 medium · 1 low</div>
+      </div>
+    </div>
+
+    <div class="scope-box" data-help="Always visible. Never collapsed. Sets honest expectations about what was and wasn't checked.">
+      <strong>What was checked:</strong> The words in this policy. How it describes data collection, sharing, tracking, AI/automated decisions, and rights under California (CCPA/CPRA) and EU (GDPR) rules.<br><br>
+      <strong>What wasn't checked:</strong>
+      <ul style="margin: 0.5rem 0 0 1.25rem; padding: 0; list-style: disc;">
+        <li>What permissions the Facebook app actually requests on a phone (camera, microphone, contacts, location). Those live in <em>Settings → Apps → Facebook → Permissions</em>.</li>
+        <li>Whether Facebook's real-world practices match what this policy says. Only the document itself was analyzed.</li>
+      </ul>
+    </div>
+
+    <div class="pr-domain-head-wrap">
+      <div class="pr-domain-head"><span class="pr-domain-name">Data</span> <span class="pr-domain-desc">what's collected</span></div>
+      <ol class="top-things">
+        <li class="top-thing"><div class="thing-num">1</div><div>The policy indicates photos, posts, and messages are collected, including from third-party apps and websites connected via Meta business tools.</div></li>
+        <li class="top-thing"><div class="thing-num">2</div><div>For a child on the platform, biometric-adjacent signals (face-shape data used in photo tagging) may be collected under separate settings.</div></li>
+      </ol>
+    </div>
+
+    <div class="pr-domain-head-wrap">
+      <div class="pr-domain-head"><span class="pr-domain-name">Data use</span> <span class="pr-domain-desc">how it's used</span></div>
+      <ol class="top-things">
+        <li class="top-thing"><div class="thing-num">1</div><div>Photos, posts, and activity may be used to train Facebook's AI systems. A full opt-out is not offered while the account remains active.</div></li>
+        <li class="top-thing"><div class="thing-num">2</div><div>Data flows automatically between Facebook, Instagram, and WhatsApp for advertising and personalization, regardless of whether a child has signed up for all three.</div></li>
+      </ol>
+    </div>
+
+    <div class="pr-domain-head-wrap">
+      <div class="pr-domain-head"><span class="pr-domain-name">Terms of use</span> <span class="pr-domain-desc">the agreement itself</span></div>
+      <ol class="top-things">
+        <li class="top-thing"><div class="thing-num">1</div><div>By using the service, agreement to this policy is treated as given. No explicit opt-in step is described.</div></li>
+        <li class="top-thing"><div class="thing-num">2</div><div>Account deletion is available, though the policy notes some data may be retained for "safety and security" reasons with no defined time limit.</div></li>
+      </ol>
+    </div>
+
+    <div class="pr-domain-head-wrap">
+      <div class="pr-domain-head"><span class="pr-domain-name">Privacy rights</span> <span class="pr-domain-desc">what can still be exercised</span></div>
+      <ol class="top-things">
+        <li class="top-thing"><div class="thing-num">1</div><div>California residents can opt out of data sale/share. An equivalent right is not described for other regions.</div></li>
+        <li class="top-thing"><div class="thing-num">2</div><div>Data download and deletion requests can be filed through account Settings. Response timelines are not specified.</div></li>
+      </ol>
+    </div>
+
+    <div class="legal-details" data-help="Collapsed by default. Citations, IRP scores, and evidence live inside for anyone who wants them.">
+      <details>
+        <summary class="legal-summary">
+          <span>Legal details</span>
+          <span style="display:flex;align-items:center;gap:0.75rem;">
+            <span class="count">8 issues · CCPA/CPRA + GDPR + EU AI Act</span>
+            <svg class="chevron" width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 5l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </span>
+        </summary>
+        <div class="finding-list">
+          <div class="finding-item">
+            <div class="finding-meta"><span class="sev-tag sev-high">High</span><span class="finding-cat">AI Training</span><span class="irp-badge">IRP 0.58</span></div>
+            <div class="finding-excerpt">"We use the information we collect — including information about your interactions with Meta Products — to develop, improve, research, and test our Products, systems, and technology."</div>
+            <div class="finding-plain">Content and activity are used to train Facebook's AI systems. Opt-out may require product-level settings that aren't described in this policy.</div>
+            <div class="finding-basis">GDPR Art. 6(f) · EU AI Act Art. 50 · CPRA § 1798.100</div>
+            <div class="finding-loc">Lines 47 to 52 in the source policy. <a href="#verify-1" class="finding-verify">See in policy →</a></div>
+            <div class="irp-row"><span>Impact <strong>3</strong>/5</span><span>Likelihood <strong>4</strong>/5</span><span>Safeguards <strong>1</strong>/5</span><span>Confidence <strong>92%</strong></span></div>
+          </div>
+          <div class="finding-item">
+            <div class="finding-meta"><span class="sev-tag sev-high">High</span><span class="finding-cat">Data Sale / Sharing</span><span class="irp-badge">IRP 0.80</span></div>
+            <div class="finding-excerpt">"We share information within the Meta Companies — companies owned or operated by Meta Platforms, Inc."</div>
+            <div class="finding-plain">Data flows automatically to Instagram and WhatsApp under the Meta umbrella. California residents have an opt-out right. An equivalent right isn't described for other regions.</div>
+            <div class="finding-basis">CCPA/CPRA opt-out (Sale/Share) · GDPR Art. 6</div>
+            <div class="finding-loc">Lines 89 to 94 in the source policy. <a href="#verify-2" class="finding-verify">See in policy →</a></div>
+            <div class="irp-row"><span>Impact <strong>4</strong>/5</span><span>Likelihood <strong>5</strong>/5</span><span>Safeguards <strong>0</strong>/5</span><span>Confidence <strong>94%</strong></span></div>
+          </div>
+          <div class="finding-item">
+            <div class="finding-meta"><span class="sev-tag sev-high">High</span><span class="finding-cat">Tracking / Profiling</span><span class="irp-badge">IRP 0.52</span></div>
+            <div class="finding-excerpt">"We receive information about your visits to websites and apps that use Meta's business tools, even if you're not logged in."</div>
+            <div class="finding-plain">The policy describes building a profile of activity across the internet, not just within Facebook.</div>
+            <div class="finding-basis">GDPR Art. 5(1)(b) · CCPA/CPRA §1798.140(v)</div>
+            <div class="finding-loc">Lines 118 to 121 in the source policy. <a href="#verify-3" class="finding-verify">See in policy →</a></div>
+            <div class="irp-row"><span>Impact <strong>3</strong>/5</span><span>Likelihood <strong>5</strong>/5</span><span>Safeguards <strong>1</strong>/5</span><span>Confidence <strong>88%</strong></span></div>
+          </div>
+          <div class="finding-item">
+            <div class="finding-meta"><span class="sev-tag sev-medium">Medium</span><span class="finding-cat">Dark Patterns</span><span class="irp-badge">IRP 0.46</span></div>
+            <div class="finding-excerpt">"By using or accessing our Products, you agree to this Policy."</div>
+            <div class="finding-plain">Consent is treated as given simply by using the service. No explicit opt-in step is described. EU regulators have challenged this approach.</div>
+            <div class="finding-basis">GDPR consent validity · CPRA consent requirements</div>
+            <div class="finding-loc">Lines 12 to 14 in the source policy. <a href="#verify-4" class="finding-verify">See in policy →</a></div>
+            <div class="irp-row"><span>Impact <strong>3</strong>/5</span><span>Likelihood <strong>4</strong>/5</span><span>Safeguards <strong>0</strong>/5</span><span>Confidence <strong>90%</strong></span></div>
+          </div>
+          <div class="finding-item" style="font-size:0.8rem;color:var(--ink-muted);padding:0.75rem 1.125rem;background:var(--bg);">+ 4 more issues (Retention, Automated Decision-Making, Children's Privacy, Cross-Border Transfer). Each includes evidence, citations, and IRP scores.</div>
+        </div>
+      </details>
+    </div>
+
+    <div class="action-footer" data-help="Concrete options, tentative language. Suggests. Doesn't direct.">
+      <div class="action-footer-head">Some things worth considering for a child</div>
+      <ul class="action-list">
+        <li>Facebook's <a href="https://about.meta.com/actions/safety/audiences/youth/family-center/" target="_blank" rel="noopener" style="color:var(--teal);">Family Center</a> offers supervision tools for parents managing a teen's account.</li>
+        <li>For accounts of children under 13, a report can be filed via <a href="https://www.facebook.com/help/contact/1408156889442791" target="_blank" rel="noopener" style="color:var(--teal);">Facebook's underage account form</a> and separately with the FTC under COPPA.</li>
+        <li>The Teen Privacy Checkup inside Facebook settings walks through recommendations for stricter defaults on ad targeting and off-Facebook activity.</li>
+        <li>Turning off cross-app data sharing between Facebook, Instagram, and WhatsApp is available in the Meta Accounts Center under Personal Details.</li>
+      </ul>
+    </div>
+
+    <div class="export-bar">
+      <button class="export-btn">Save PDF report</button>
+      <button class="export-btn">Download JSON</button>
+      <button class="export-btn">Download CSV</button>
+      <button class="export-btn">Share summary</button>
+    </div>
+
+    <p style="font-size:0.73rem;color:var(--ink-muted);line-height:1.6;border-top:1px solid var(--border);padding-top:1rem;">This analysis is automated and informational only. Not legal advice. Review by qualified legal counsel is recommended before making decisions that affect legal rights or obligations. Processed locally. No data retained.</p>
+  </div>
+
+</div>
+
+<script>
+function switchView(name) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('view-' + name).classList.add('active');
+  document.querySelectorAll('.view-btn').forEach(b => { if (b.textContent.toLowerCase().includes(name)) b.classList.add('active'); });
+  window.scrollTo(0, 0);
+}
+document.querySelectorAll('.option-card').forEach(card => { card.addEventListener('click', () => { card.classList.toggle('selected'); }); });
+document.querySelectorAll('.input-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    const box = tab.closest('.input-box');
+    const panel = tab.dataset.panel;
+    box.querySelectorAll('.input-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    box.querySelectorAll('[data-input-panel]').forEach(p => { p.style.display = p.dataset.inputPanel === panel ? '' : 'none'; });
+    box.querySelectorAll('[data-panel-footer]').forEach(f => { f.style.display = f.dataset.panelFooter === panel ? '' : 'none'; });
+  });
+});
+
+const helpEl = document.getElementById('section-help');
+const helpBody = helpEl.querySelector('.help-body');
+let helpTimer = null;
+
+function showHelp(text, targetEl) {
+  clearTimeout(helpTimer);
+  const rect = targetEl.getBoundingClientRect();
+  const desiredTop = rect.top + (rect.height / 2);
+  const clampedTop = Math.max(120, Math.min(window.innerHeight - 120, desiredTop));
+  helpEl.style.top = clampedTop + 'px';
+  helpEl.style.transform = 'translateY(-50%)';
+  if (helpBody.textContent !== text) {
+    helpEl.classList.remove('visible');
+    helpTimer = setTimeout(() => { helpBody.textContent = text; helpEl.classList.add('visible'); }, 150);
+  } else {
+    helpEl.classList.add('visible');
+  }
+}
+
+function hideHelp() {
+  clearTimeout(helpTimer);
+  helpTimer = setTimeout(() => { helpEl.classList.remove('visible'); }, 100);
+}
+
+document.querySelectorAll('[data-help]').forEach(el => {
+  el.addEventListener('mouseenter', () => showHelp(el.dataset.help, el));
+  el.addEventListener('mouseleave', hideHelp);
+});
+
+// Reset help state when switching views
+const originalSwitchView = window.switchView || switchView;
+window.switchView = function(name) {
+  originalSwitchView(name);
+  helpEl.classList.remove('visible');
+  helpBody.textContent = '';
+};
+</script>
+</body>
+</html>

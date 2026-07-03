@@ -895,6 +895,62 @@ PATTERNS: List[RulePattern] = [
 ]
 
 
+# Default IRP seeds by category: (impact 1-5, likelihood 1-5)
+# impact = potential harm if clause is enforced; likelihood = how automatic/probable
+_CATEGORY_IRP_DEFAULTS: dict[str, tuple[int, int]] = {
+    "Sale/Share": (4, 5),
+    "ADM": (5, 3),
+    "Dark Patterns": (3, 4),
+    "Retention": (3, 4),
+    "User Rights": (3, 3),
+    "Minors": (5, 2),
+    "Children's Privacy": (5, 3),
+    "COPPA Compliance": (5, 3),
+    "Sensitive Data": (4, 3),
+    "Health Data": (5, 2),
+    "Financial Data": (4, 3),
+    "Biometric Data": (5, 2),
+    "Tracking / Profiling": (3, 5),
+    "Tracking & Consent": (3, 5),
+    "Liability Limitation": (4, 4),
+    "Unilateral Changes": (3, 4),
+    "Arbitration / Dispute": (4, 4),
+    "Automated Decision-Making": (5, 3),
+    "Consequential AI Decisions": (5, 3),
+    "AI Training": (3, 4),
+    "AI Training (Opt-Out)": (3, 4),
+    "High-Risk AI": (5, 2),
+    "Prohibited AI": (5, 1),
+    "Data Security": (4, 2),
+    "Breach Notification": (3, 2),
+    "Cross-Border Transfer": (3, 3),
+    "Deceptive Practices": (4, 4),
+    "HIPAA Compliance": (5, 3),
+    "FERPA Compliance": (4, 3),
+    "PCI DSS Compliance": (4, 3),
+    "Individual Rights": (3, 3),
+    "Data Rights": (3, 3),
+    "Privacy Rights": (3, 3),
+    "Privacy as Human Right": (4, 3),
+    "Collection Notice": (2, 4),
+    "Purpose Limitation": (3, 3),
+    "Marketing Communications": (2, 4),
+    "Consent": (3, 3),
+}
+_IRP_DEFAULT: tuple[int, int] = (2, 3)  # unknown categories
+
+
+def _seed_irp(category: str, safeguard_score: int = 0) -> tuple[int, int, int, float]:
+    """Return (impact, likelihood, safeguard_score, irp_score) for a category.
+
+    IRP = 0.5*(impact/5) + 0.4*(likelihood/5) - 0.3*(safeguard/5), clamped to [0, 1].
+    """
+    impact, likelihood = _CATEGORY_IRP_DEFAULTS.get(category, _IRP_DEFAULT)
+    raw = 0.5 * (impact / 5) + 0.4 * (likelihood / 5) - 0.3 * (safeguard_score / 5)
+    irp = max(0.0, min(1.0, round(raw, 4)))
+    return impact, likelihood, safeguard_score, irp
+
+
 SEVERITY_BASE = {
     "Low": 0.45,
     "Medium": 0.6,
@@ -1001,7 +1057,10 @@ def detect_findings(text: str, jurisdictions: List[Jurisdiction]) -> List[Findin
         
         # Flag for review if confidence < 0.6
         needs_review = confidence < 0.6
-        
+
+        # Seed IRP fields from category defaults (safeguard_score=0 at detection time)
+        irp_impact, irp_likelihood, irp_safeguard, irp_score = _seed_irp(rule.category)
+
         findings.append(
             Finding(
                 category=rule.category,
@@ -1020,6 +1079,10 @@ def detect_findings(text: str, jurisdictions: List[Jurisdiction]) -> List[Findin
                     context_after=context_after,
                 ),
                 needs_review=needs_review,
+                impact=irp_impact,
+                likelihood=irp_likelihood,
+                safeguard_score=irp_safeguard,
+                irp_score=irp_score,
             )
         )
     return findings
