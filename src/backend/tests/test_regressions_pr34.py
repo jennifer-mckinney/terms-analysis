@@ -28,7 +28,6 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 from typing import get_args
-from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -43,7 +42,6 @@ from app.schemas import (
     Jurisdiction,
 )
 from app.services.analyzer import AnalysisResult
-
 
 # ---------------------------------------------------------------------------
 # Helpers — kept intentionally local so we don't collide with helpers the
@@ -631,7 +629,6 @@ class TestJurisdictionFilterBoundary:
         self, app_client, monkeypatch
     ):
         """LLM emits a finding tagged with no jurisdictions → must be dropped."""
-        from app.services.rules import detect_findings
 
         # Rule pipeline: return nothing so we only see the LLM contribution.
         monkeypatch.setattr(
@@ -798,3 +795,130 @@ class TestJurisdictionFilterBoundary:
             "LLM finding whose jurisdictions intersect the request was "
             "incorrectly dropped by the filter"
         )
+
+
+# ===========================================================================
+# Category H — Schema URL-validator edge branches (coverage delta)
+# ===========================================================================
+
+
+class TestCategoryHSchemaValidatorEdges:
+    """Cover the early-return / hostname-missing branches on every URL-accepting
+    schema. These branches are cheap to hit but easy to miss when the happy-path
+    tests only pass ``https://...`` URLs."""
+
+    def test_analyze_request_source_url_none_passes_through(self):
+        """``AnalyzeRequest.source_url=None`` returns early (schemas.py:185)."""
+        from app.schemas import AnalyzeRequest
+
+        req = AnalyzeRequest(text="hello", source_url=None)
+        assert req.source_url is None
+
+    def test_analyze_request_source_url_empty_string_passes_through(self):
+        """Empty-string source_url takes the same early-return branch."""
+        from app.schemas import AnalyzeRequest
+
+        req = AnalyzeRequest(text="hello", source_url="")
+        assert req.source_url == ""
+
+    def test_analyze_request_source_url_missing_hostname_rejected(self):
+        """``http:///path`` parses but has no hostname (schemas.py:191)."""
+        import pytest
+        from pydantic import ValidationError
+
+        from app.schemas import AnalyzeRequest
+
+        with pytest.raises(ValidationError, match="hostname"):
+            AnalyzeRequest(text="hello", source_url="http:///no-host")
+
+    def test_analyze_url_request_missing_hostname_rejected(self):
+        """``AnalyzeUrlRequest.url`` no-hostname branch (schemas.py:216)."""
+        import pytest
+        from pydantic import ValidationError
+
+        from app.schemas import AnalyzeUrlRequest
+
+        with pytest.raises(ValidationError, match="hostname"):
+            AnalyzeUrlRequest(url="http:///no-host")
+
+    def test_watchlist_create_request_source_url_none_passes_through(self):
+        """``WatchlistCreateRequest.source_url=None`` early return (schemas.py:324)."""
+        from app.schemas import WatchlistCreateRequest
+
+        req = WatchlistCreateRequest(vendor="Acme", source_url=None)
+        assert req.source_url is None
+
+    def test_infer_request_whitespace_only_text_collapses_to_none(self):
+        """Whitespace-only text is coerced to None by the validator (schemas.py:348)."""
+        from app.schemas import InferRequest
+
+        req = InferRequest(text="   \n\t ")
+        assert req.text is None
+
+    def test_batch_item_url_none_and_empty_pass_through(self):
+        """``BatchItem.url`` None/empty take the early-return branch (schemas.py:373)."""
+        from app.schemas import BatchItem
+
+        assert BatchItem(url=None).url is None
+        assert BatchItem(url="").url == ""
+
+    def test_batch_item_url_rejects_non_http_scheme(self):
+        """BatchItem rejects ``javascript:`` (schemas.py:377)."""
+        import pytest
+        from pydantic import ValidationError
+
+        from app.schemas import BatchItem
+
+        with pytest.raises(ValidationError, match="http or https"):
+            BatchItem(url="javascript:alert(1)")
+
+    def test_batch_item_url_rejects_missing_hostname(self):
+        """BatchItem rejects http:///no-host (schemas.py:379)."""
+        import pytest
+        from pydantic import ValidationError
+
+        from app.schemas import BatchItem
+
+        with pytest.raises(ValidationError, match="hostname"):
+            BatchItem(url="http:///no-host")
+
+
+# ===========================================================================
+# Category I — Inference edge branches (coverage delta)
+# ===========================================================================
+
+
+class TestCategoryIInferenceEdges:
+    """Cover the exception fall-throughs in ``_extract_hostname`` /
+    ``_extract_path`` and the industry-inference keyword branches not hit by
+    the domain-based happy-path tests."""
+
+    def test_extract_hostname_returns_none_when_urlparse_raises(self, monkeypatch):
+        """Force ``urlparse`` to raise so the ``except Exception`` branch runs
+        (inference.py:275-276)."""
+        from app.services import inference
+
+        def boom(*_args, **_kwargs):
+            raise ValueError("synthetic urlparse failure")
+
+        monkeypatch.setattr(inference, "urlparse", boom)
+        assert inference._extract_hostname("https://example.com/x") is None
+
+    def test_extract_path_returns_empty_when_urlparse_raises(self, monkeypatch):
+        """Force ``urlparse`` to raise so ``_extract_path`` returns "" via the
+        exception branch (inference.py:289-290)."""
+        from app.services import inference
+
+        def boom(*_args, **_kwargs):
+            raise ValueError("synthetic urlparse failure")
+
+        monkeypatch.setattr(inference, "urlparse", boom)
+        assert inference._extract_path("https://example.com/x") == ""
+
+    def test_infer_industry_ai_keyword_via_url_path(self):
+        """URL path contains 'ai' outside a known AI domain — hits the keyword
+        branch (inference.py:467) rather than the domain-based one at line 438."""
+        from app.services.inference import infer_industry
+
+        # example.com is not in _AI_TECH_DOMAINS but URL contains "ai" keyword.
+        assert infer_industry("https://example.com/ai/policy", None) == "AI / Tech Platform"

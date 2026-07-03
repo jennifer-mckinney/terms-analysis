@@ -22,7 +22,7 @@ from ..schemas import (
 from .context import apply_category_weights, verdict_headline, verdict_label
 from .legal_kb import get_legal_kb
 from .localai import LocalAIClient
-from .rules import detect_findings, _seed_irp
+from .rules import _seed_irp, detect_findings
 from .validation import validate_findings
 
 

@@ -29,7 +29,6 @@ from __future__ import annotations
 
 from ..schemas import CATEGORIES, ContextChip, Finding
 
-
 # Weight tier scale: 1.0 baseline · 2.0 boosted · 2.5 priority · 3.0 signature
 # Category weights per context chip. Keys are matched exactly against
 # ``finding.category``; multi-context selections are merged via
