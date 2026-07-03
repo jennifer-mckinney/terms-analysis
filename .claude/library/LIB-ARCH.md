@@ -34,7 +34,7 @@ User Input → Ingestion (normalize text — HTML/PDF/DOCX/RTF/TXT/OCR)
            → UI (render results — Streamlit primary, JS SPA fallback)
 ```
 
-An Impact/Likelihood/Safeguards ("IRP") scoring formula remains a planned, not-yet-implemented enhancement; current scoring is the severity-weighted average shown above. The RAG pipeline described here (BM25 + dense embed + RRF fusion, legal corpus chunking) is no longer "planned" — it shipped as `services/legal_kb.py` and is wired into `analyze_text()`; see the System Components table above.
+The Impact/Likelihood/Safeguards ("IRP") scoring formula is **shipped** (PR #34, 2026-07-03) — `impact` / `likelihood` / `safeguard_score` / `irp_score` fields live on `Finding`, seeded by rule category via `rules.py::_seed_irp`, requested from the LLM in the prompt template, and merged with `safeguard_score = max(rule, llm)` in `_merge_findings`. `calculate_risk_score()` uses `irp_score` when present and falls back to severity weight for legacy findings without it. Sort is tier-first (context weight leads); see LIB-RULES §Sort and LIB-CONTEXT for details. The RAG pipeline described here (BM25 + dense embed + RRF fusion, legal corpus chunking) is also live as `services/legal_kb.py` wired into `analyze_text()`; see the System Components table above.
 
 ## Failure Modes
 

@@ -119,3 +119,36 @@ risk_score = round((sum(scores) / len(scores)) * 10, 2)  # 0-10 scale
 ```
 
 Grade thresholds are unchanged (A < 3.5, ... D+ >= 8.5).
+
+## Sort: tier-first (`context.py::apply_category_weights`)
+
+Findings surface in a **tier-first** order once a context chip is selected. Sort key is `(weight, irp_score, severity_rank)`, all descending:
+
+```python
+def sort_key(f: Finding) -> tuple[float, float, int]:
+    weight = merged.get(f.category, 1.0)
+    irp = f.irp_score if f.irp_score is not None else _severity_fallback(f.severity)
+    return (weight, irp, _SEVERITY_RANK.get(f.severity, 0))
+```
+
+1. **Context weight leads.** A category weighted 3.0 for the reader's context always outranks a category weighted 2.0, regardless of IRP. The reader told the tool what mattered; the tool honors that first.
+2. **IRP breaks ties within a weight tier.** Among two `for_child`-tagged Children's Privacy findings, the higher-IRP one surfaces first.
+3. **Severity rank is the final tie-breaker.**
+
+Baseline chips (`want_understand`, `just_curious`) collapse all categories to weight 1.0, so IRP alone drives the sort. See LIB-CONTEXT for the full weight table and multi-chip merge semantics.
+
+## Category taxonomy: pinned via `schemas.CATEGORIES` frozenset
+
+The canonical finding-category strings live as `CATEGORIES: frozenset[str]` in `src/backend/app/schemas.py`. `services/context.py::CATEGORY_WEIGHTS` and `services/analyzer.py::_CATEGORY_IRP_DEFAULTS` both validate their keys against this frozenset at module load — any drift raises `RuntimeError` before the server starts.
+
+If a category is added to the rule engine, it must also be added to `schemas.CATEGORIES` and, if it belongs in an IRP-defaults map or a context weight map, added there too. Otherwise the backend refuses to import.
+
+## Global-tool contract: empty jurisdictions = "no filter"
+
+`jurisdictions=[]` (empty list) is treated as **"no filter"** across the entire pipeline:
+
+- `rules.py::detect_findings` evaluates every rule if the requested jurisdictions list is empty.
+- LLM post-filter passes every finding through when the list is empty.
+- Streamlit resolves an empty selection to "no filter" rather than substituting a US-CA + GDPR default.
+
+There is **no default jurisdiction fallback anywhere** in the code. The old behavior (silently substituting US-CA + GDPR when the reader didn't pick) was removed in PR #34 — global tool, blank defaults, reader specifies (or doesn't).
