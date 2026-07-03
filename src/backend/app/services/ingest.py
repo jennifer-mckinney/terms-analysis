@@ -201,7 +201,8 @@ async def fetch_url_text(url: str) -> str:
     max_bytes = settings.max_upload_bytes
 
     async def _on_request(request: httpx.Request) -> None:
-        """Validate each URL before every request, including redirects."""
+        """Validate each URL before every request, including redirects — closes
+        the SSRF bypass where an allowed URL 302s to a blocked address."""
         _validate_url(str(request.url))
 
     _BLOCKED_STATUSES = {401, 403, 407, 429, 503}

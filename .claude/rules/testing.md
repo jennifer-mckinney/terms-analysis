@@ -8,13 +8,12 @@ paths:
 
 ## Python Backend (pytest)
 
-- Use `pytest` + `pytest-asyncio` for all backend tests
+- Use `pytest` for all backend tests. **`pytest-asyncio` is NOT installed** in `src/backend/.venv` — do not add `@pytest.mark.asyncio`, it silently no-ops the test (`PytestUnknownMarkWarning`) rather than failing. For async functions under test, call them from a regular (non-`async def`) test via `asyncio.run(...)` — see `test_legal_kb.py`/`test_ingest.py` for the pattern.
 - Place tests in `src/backend/tests/` mirroring source structure
 - Shared fixtures go in `conftest.py` (db session, TestClient, Finding factory, mock LLM)
-- Use `@pytest.mark.asyncio` for async test functions
 - Use `@pytest.mark.parametrize` for multi-case coverage (rule categories, grade boundaries)
-- Mock LM Studio with `unittest.mock.AsyncMock` — never call real LLM in tests
-- Mock httpx with `respx` or `monkeypatch` for URL fetch tests
+- Mock LocalAI (`services/localai.py::LocalAIClient`) with `unittest.mock`/hand-written fakes — never call a real LocalAI endpoint in tests
+- **`respx` is NOT installed** either — mock `httpx` by patching `httpx.AsyncClient.__init__` with `monkeypatch` to inject an `httpx.MockTransport`, per `test_ingest.py`'s `_patch_transport()` helper
 - Use in-memory SQLite (`sqlite:///:memory:`) for database isolation
 - Use `app.dependency_overrides[get_db]` for API endpoint tests
 - Naming: `test_<module>_<function>_<scenario>` (e.g., `test_rules_detect_findings_sale_share`)
@@ -32,7 +31,7 @@ paths:
 |--------|--------|
 | Line coverage | >= 85% |
 | Branch coverage | >= 75% |
-| All 9 rule categories tested | Yes |
+| Core rule categories tested (~50 categories/64 patterns exist; not all require individual tests) | Yes |
 | Validation penalty paths tested | Yes |
 | LLM failure/fallback tested | Yes |
 | API endpoint happy + error paths | Yes |

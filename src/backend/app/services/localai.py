@@ -70,6 +70,7 @@ class LLMClient(Protocol):
         numbered_text: str,
         jurisdictions: List[str],
         rule_findings: List[dict],
+        legal_context: Optional[List[dict]] = None,
     ) -> Optional[Dict[str, Any]]: ...
 
 
@@ -98,6 +99,7 @@ class LocalAIClient:
         numbered_text: str,
         jurisdictions: List[str],
         rule_findings: List[dict],
+        legal_context: Optional[List[dict]] = None,
     ) -> Optional[Dict[str, Any]]:
         model = _select_model(numbered_text)
         messages = [
@@ -108,6 +110,7 @@ class LocalAIClient:
                     numbered_text=numbered_text,
                     jurisdictions=jurisdictions,
                     rule_findings=rule_findings,
+                    legal_context=legal_context,
                 ),
             },
         ]

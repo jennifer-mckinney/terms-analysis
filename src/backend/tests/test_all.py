@@ -214,6 +214,37 @@ def test_export_analyses_csv_quotes_commas_and_newlines(app_client, db_session):
     assert all(len(row) == 9 for row in parsed)
 
 
+def test_export_pdf_route_is_not_shadowed_by_json_export_route(app_client, db_session):
+    # Regression test: /exports/analysis/{id}.pdf was previously shadowed by
+    # /exports/analysis/{id} (registered earlier), since {analysis_id} greedily
+    # matches "<id>.pdf" too — both frontends' PDF export silently hit the JSON
+    # route and got a 404 (found by independent UI/UX review).
+    db_session.add(
+        AnalysisModel(
+            id="pdf-route-test",
+            doc_name="PDF Route Test",
+            doc_type="Privacy Policy",
+            source_type="text",
+            status="completed",
+            confidence=0.9,
+            risk_score=5.0,
+            grade="B",
+            document_text="text",
+            result_json='{"findings": []}',
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    db_session.commit()
+
+    pdf_response = app_client.get("/exports/analysis/pdf-route-test.pdf")
+    assert pdf_response.status_code == 200
+    assert pdf_response.headers["content-type"] == "application/pdf"
+
+    json_response = app_client.get("/exports/analysis/pdf-route-test")
+    assert json_response.status_code == 200
+    assert json_response.headers["content-type"].startswith("application/json")
+
+
 def test_user_rights_generic_access_does_not_trigger():
     findings = detect_findings("Users can access services through the dashboard.", ["GDPR"])
     assert "User Rights" not in {finding.category for finding in findings}

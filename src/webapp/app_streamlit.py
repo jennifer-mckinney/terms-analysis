@@ -13,6 +13,8 @@ Design patterns applied:
 """
 from __future__ import annotations
 
+import html
+import os
 import re
 import streamlit as st
 import requests
@@ -180,29 +182,50 @@ st.markdown("""
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-API_BASE = "http://localhost:8000"
+API_BASE = os.environ.get("API_BASE_URL", "http://localhost:9000")
 
 JURISDICTIONS = {
-    "US-CA":   "California — CCPA / CPRA",
-    "GDPR":    "European Union — GDPR",
-    "US-NY":   "New York — SHIELD Act",
-    "US-VA":   "Virginia — VCDPA",
-    "US-CO":   "Colorado — CPA",
-    "US-CT":   "Connecticut — CTDPA",
-    "US-TX":   "Texas — TDPSA",
-    "US-FED":  "United States — Federal",
-    "UK-GDPR": "United Kingdom — UK GDPR",
-    "PIPEDA":  "Canada — PIPEDA / Quebec Law 25",
+    "US-FED":    "United States — Federal (COPPA, HIPAA, GLBA, FTC §5, CAN-SPAM)",
+    "US-CA":     "California — CCPA / CPRA",
+    "US-TX":     "Texas — TDPSA",
+    "US-VA":     "Virginia — VCDPA",
+    "US-CO":     "Colorado — CPA + AI Act SB 205",
+    "US-CT":     "Connecticut — CTDPA",
+    "US-IL":     "Illinois — BIPA + AEIA",
+    "US-NY":     "New York — SHIELD Act",
+    "US-NJ":     "New Jersey — NJDPA",
+    "US-MN":     "Minnesota — MCDPA",
+    "US-OR":     "Oregon — OCPA",
+    "GDPR":      "European Union — GDPR",
+    "UK-GDPR":   "United Kingdom — UK GDPR + DPA 2018",
+    "LGPD":      "Brazil — LGPD",
+    "PIPEDA":    "Canada — PIPEDA",
+    "CA-QC":     "Quebec — Law 25",
+    "POPIA":     "South Africa — POPIA",
+    "PDPA-KE":   "Kenya — PDPA 2019",
+    "DPDP":      "India — DPDP Act 2023",
+    "APPI":      "Japan — APPI",
+    "PIPA":      "South Korea — PIPA",
+    "APP":       "Australia — Privacy Act / APPs",
+    "PDPA-TH":   "Thailand — PDPA",
+    "NDPR":      "Nigeria — NDPR",
+    "ICCPR-17":  "UN ICCPR Article 17",
+    "COE-108":   "Council of Europe — Convention 108+",
     "EU-AI-ACT": "EU AI Act",
+    "COE-AI-225": "Council of Europe — CETS 225 (AI Framework Convention)",
+    "OECD-AI":   "OECD AI Principles",
+    "UNESCO-AI": "UNESCO Recommendation on Ethics of AI",
 }
 
 INDUSTRIES = {
-    "General":    "General commercial",
-    "Healthcare": "Healthcare — HIPAA",
-    "Financial":  "Financial services — GLBA",
-    "Education":  "Education — FERPA",
-    "Children":   "Children's services — COPPA",
-    "AI":         "AI / Machine learning",
+    "General":            "General commercial",
+    "Healthcare":         "Healthcare — HIPAA",
+    "Finance":            "Finance — GLBA",
+    "Education":          "Education — FERPA",
+    "Social Media":       "Social Media",
+    "AI / Tech Platform": "AI / Tech Platform",
+    "Gaming":             "Gaming",
+    "Retail":             "Retail",
 }
 
 # ── Session state ─────────────────────────────────────────────────────────────
@@ -220,9 +243,19 @@ for _k, _v in {
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def highlight_excerpt(paragraph: str, excerpt: str) -> str:
-    if not excerpt or excerpt not in paragraph:
-        return paragraph
-    return paragraph.replace(excerpt, f"<mark>{excerpt}</mark>")
+    """Return HTML-escaped paragraph text with the excerpt wrapped in <mark>.
+
+    Both paragraph and excerpt originate from the analyzed document, which is
+    untrusted third-party text — always escape before this is interpolated
+    into unsafe_allow_html=True markup, never render raw document text as HTML.
+    """
+    escaped_paragraph = html.escape(paragraph)
+    if not excerpt:
+        return escaped_paragraph
+    escaped_excerpt = html.escape(excerpt)
+    if escaped_excerpt not in escaped_paragraph:
+        return escaped_paragraph
+    return escaped_paragraph.replace(escaped_excerpt, f"<mark>{escaped_excerpt}</mark>")
 
 
 def action_suggestions(finding: Dict) -> List[str]:
@@ -327,21 +360,22 @@ def analyze_document(
     url: str | None = None,
     file=None,
     mode: str = "quick",
-    jurisdiction: str = "US-CA",
+    jurisdictions: List[str] | None = None,
     industry: str = "General",
 ) -> Dict | None:
+    jurisdictions = jurisdictions or ["US-CA", "GDPR"]
     try:
         if file is not None:
             resp = requests.post(
                 f"{API_BASE}/analyze/file",
                 files={"file": file},
-                data={"mode": mode, "jurisdictions": jurisdiction, "industry": industry},
+                data={"mode": mode, "jurisdictions": ",".join(jurisdictions), "industry": industry},
                 timeout=400,
             )
         elif url:
             resp = requests.post(
                 f"{API_BASE}/analyze/url",
-                json={"url": url, "mode": mode, "jurisdictions": [jurisdiction], "industry": industry},
+                json={"url": url, "mode": mode, "jurisdictions": jurisdictions, "industry": industry},
                 timeout=400,
             )
         else:
@@ -349,9 +383,8 @@ def analyze_document(
                 f"{API_BASE}/analyze",
                 json={
                     "text": text,
-                    "doc_type": "privacy-policy",
                     "mode": mode,
-                    "jurisdictions": [jurisdiction],
+                    "jurisdictions": jurisdictions,
                     "industry": industry,
                 },
                 timeout=400,
@@ -373,7 +406,7 @@ def analyze_document(
         return None
 
     except requests.exceptions.ConnectionError:
-        st.error("Unable to reach the analysis service on localhost:8000. Start the backend first.")
+        st.error(f"Unable to reach the analysis service at {API_BASE}. Start the backend first.")
         return None
     except Exception as exc:
         st.error(f"Unexpected error: {exc}")
@@ -406,7 +439,7 @@ def render_finding_detail(finding: Dict) -> None:
         )
     elif excerpt:
         st.markdown(
-            f'<div class="excerpt">"{excerpt}"</div>',
+            f'<div class="excerpt">"{html.escape(excerpt)}"</div>',
             unsafe_allow_html=True,
         )
 
@@ -432,7 +465,7 @@ def render_finding_detail(finding: Dict) -> None:
                 "available legal remedies."
             )
 
-    st.markdown(f"<p style='font-size:0.9375rem;line-height:1.7;color:#4a4a4a;margin:0.5rem 0 1rem;'>{explanation}</p>",
+    st.markdown(f"<p style='font-size:0.9375rem;line-height:1.7;color:#4a4a4a;margin:0.5rem 0 1rem;'>{html.escape(explanation)}</p>",
                 unsafe_allow_html=True)
 
     # Actions in a popover — keeps the card clean
@@ -440,6 +473,56 @@ def render_finding_detail(finding: Dict) -> None:
     action_html = "\n".join(f'<div class="action-item">{a}</div>' for a in actions)
     with st.popover("Recommended actions", use_container_width=True):
         st.markdown(action_html, unsafe_allow_html=True)
+
+    # Verify view: full source document with this finding's excerpt highlighted.
+    source_text = st.session_state.get("source_text", "")
+    if source_text and excerpt:
+        with st.expander("View in full document"):
+            st.markdown(
+                f'<div class="excerpt" style="max-height:400px;overflow-y:auto;'
+                f'white-space:pre-wrap;">{highlight_excerpt(source_text, excerpt)}</div>',
+                unsafe_allow_html=True,
+            )
+
+
+_GRADE_COLORS = {
+    "A": "#16A34A", "A-": "#16A34A",
+    "B": "#65A30D", "B-": "#CA8A04",
+    "C+": "#D97706", "C": "#EA580C",
+    "D+": "#DC2626",
+}
+
+
+def render_grade_summary(result: Dict) -> None:
+    """Overall grade/risk-score/confidence card — mirrors the JS SPA's results header."""
+    grade = result.get("grade")
+    risk_score = result.get("risk_score")
+    confidence = result.get("confidence")
+    review_required = result.get("review_required")
+
+    if grade is None and risk_score is None:
+        return
+
+    color = _GRADE_COLORS.get(grade, "#6B7280")
+    with st.container(border=True):
+        c1, c2, c3 = st.columns([1, 2, 2])
+        with c1:
+            st.markdown(
+                f'<div style="font-size:2.5rem;font-weight:700;color:{color};line-height:1;">{grade or "—"}</div>'
+                f'<div style="color:#6B7280;font-size:0.85rem;">Overall grade</div>',
+                unsafe_allow_html=True,
+            )
+        with c2:
+            if risk_score is not None:
+                st.metric("Risk score", f"{risk_score:.1f} / 10")
+        with c3:
+            if confidence is not None:
+                st.metric("Confidence", f"{confidence * 100:.0f}%")
+        if review_required:
+            st.warning(
+                "This analysis has findings flagged for human review "
+                "(confidence below threshold)."
+            )
 
 
 def render_severity_counts(findings: List[Dict]) -> None:
@@ -496,9 +579,14 @@ def main() -> None:
                 text_input = st.text_area(
                     "Text",
                     height=200,
+                    max_chars=50000,
                     placeholder="Paste the full text of the policy or agreement.",
                     label_visibility="collapsed",
                 )
+                counter_text = f"{len(text_input):,} / 50,000 characters"
+                if 0 < len(text_input) < 1000:
+                    counter_text += " — this text appears short. Is this the complete policy?"
+                st.caption(counter_text)
             with sub2:
                 url_input = st.text_input(
                     "URL",
@@ -522,10 +610,20 @@ def main() -> None:
             col_j, col_i = st.columns(2)
 
             with col_j:
-                jurisdiction = st.selectbox(
-                    "Jurisdiction",
+                st.markdown("Jurisdictions")
+                if "jurisdiction_select" not in st.session_state:
+                    st.session_state.jurisdiction_select = ["US-CA", "GDPR"]
+                bcol1, bcol2 = st.columns(2)
+                if bcol1.button("Select all", use_container_width=True):
+                    st.session_state.jurisdiction_select = list(JURISDICTIONS.keys())
+                if bcol2.button("Clear all", use_container_width=True):
+                    st.session_state.jurisdiction_select = []
+                jurisdictions = st.multiselect(
+                    "Jurisdictions",
                     options=list(JURISDICTIONS.keys()),
-                    format_func=lambda x: JURISDICTIONS[x],
+                    format_func=lambda x: f"{x} — {JURISDICTIONS[x]}",
+                    label_visibility="collapsed",
+                    key="jurisdiction_select",
                 )
             with col_i:
                 industry = st.selectbox(
@@ -556,12 +654,14 @@ def main() -> None:
                 st.warning("Provide a document via one of the three input methods above.")
             else:
                 with st.spinner("Analyzing — this may take a few minutes."):
+                    if not jurisdictions:
+                        st.info("Using default jurisdictions (US-CA, GDPR).")
                     result = analyze_document(
                         text=text_input or None,
                         url=url_input or None,
                         file=file_input or None,
                         mode=mode,
-                        jurisdiction=jurisdiction,
+                        jurisdictions=jurisdictions or ["US-CA", "GDPR"],
                         industry=industry,
                     )
                     if result:
@@ -582,6 +682,9 @@ def main() -> None:
         if not findings:
             st.info("No findings yet. Run an analysis on the Analyze tab first.")
         else:
+            # Overall grade / risk score / confidence
+            render_grade_summary(st.session_state.get("last_result", {}))
+            st.write("")
             # Summary metrics
             render_severity_counts(findings)
             st.divider()
@@ -644,7 +747,7 @@ def main() -> None:
                     st.caption("Executive summary, severity table, and annotated findings.")
                     if doc_id:
                         try:
-                            pdf_resp = requests.get(f"{API_BASE}/analyses/{doc_id}/export/pdf", timeout=30)
+                            pdf_resp = requests.get(f"{API_BASE}/exports/analysis/{doc_id}.pdf", timeout=30)
                             if pdf_resp.status_code == 200:
                                 st.download_button(
                                     label="Download PDF",

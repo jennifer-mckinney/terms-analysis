@@ -41,18 +41,24 @@ allowed-tools: Bash, Read, Write, Edit, WebFetch, WebSearch, Grep, Glob
    ```bash
    cd src/backend && python -m app.services.legal_kb index --jurisdiction <jur>
    ```
+   Note: `--jurisdiction` is accepted for CLI compatibility but always rebuilds the
+   full corpus — a full rebuild is simplest/correct at this corpus size.
 
 5. **Verify retrieval quality**
    - Run test queries against known articles
    - Check top-k retrieval accuracy
    - Verify cross-jurisdiction queries work
+   - Use the jurisdiction code exactly as it appears in `schemas.py`'s `Jurisdiction`
+     Literal (e.g. `GDPR`, `PIPEDA`) for the `# Jurisdiction:` header — NOT the
+     directory name — otherwise the jurisdiction filter silently falls back to
+     searching the whole corpus (see issue #14)
 
 ### Updating Existing Corpus
 
 1. Fetch updated text from source
 2. Diff against existing version
 3. Re-chunk and re-embed only changed sections
-4. Update FAISS index
+4. Rebuild the legal-KB index
 
 ## Data Directory Structure
 
@@ -71,9 +77,17 @@ data/
 │   │   └── shield_act.txt
 │   └── canada/
 │       └── pipeda.txt
-├── legal_kb.faiss          # Vector index
-└── legal_kb_metadata.json  # Chunk metadata (article refs, jurisdictions)
+├── legal_kb.npy            # Vector matrix (L2-normalized, exact exhaustive
+│                           # cosine search — no FAISS/ANN; Meta-origin FAISS
+│                           # is excluded by the project's dependency no-go list)
+└── legal_kb_metadata.json  # Chunk metadata (article refs, jurisdictions, status)
 ```
+
+Each corpus file's header must include a `# Status: PLACEHOLDER` line while its
+text is not yet real statute text — this propagates into every parsed chunk and
+`prompts.py::build_user_prompt` uses it to prepend an explicit "UNVERIFIED
+PLACEHOLDER" warning before any such passage reaches the LLM. Remove that line
+once the file contains real, sourced statute text.
 
 ## Arguments
 - `$ARGUMENTS`: jurisdiction code (e.g., "eu-gdpr", "us-ca", "canada-pipeda") or "all"

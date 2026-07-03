@@ -59,11 +59,12 @@ const CONCERN_MAP = {
 
 const GRADE_NARRATIVE = {
     'A':  { emoji: '✅', headline: 'Looks Safe',         detail: 'This policy scored well. We didn\'t find major red flags.' },
+    'A-': { emoji: '✅', headline: 'Mostly Safe',        detail: 'This policy scored well overall, with a few small things worth a glance.' },
     'B':  { emoji: '🟡', headline: 'Minor Concerns',     detail: 'A few things to be aware of, but nothing alarming. Worth a quick look.' },
+    'B-': { emoji: '🟡', headline: 'A Few More Concerns', detail: 'More to be aware of than usual. Worth reading the findings below.' },
     'C+': { emoji: '🟠', headline: 'Watch Out',          detail: 'Several issues that could affect your privacy. Read the findings carefully.' },
     'C':  { emoji: '🟠', headline: 'Concerning',         detail: 'Notable privacy or safety problems. Think carefully before using this service.' },
-    'D+': { emoji: '🔴', headline: 'Serious Issues',     detail: 'Significant problems found. We recommend avoiding this service or contacting the company.' },
-    'D':  { emoji: '🔴', headline: 'Very Concerning',    detail: 'Major red flags. This policy has serious privacy or safety violations.' }
+    'D+': { emoji: '🔴', headline: 'Serious Issues',     detail: 'Significant problems found. We recommend avoiding this service or contacting the company.' }
 };
 
 // Application Data
@@ -144,8 +145,11 @@ function setupNavigation() {
 
     // Quick action buttons
     document.addEventListener('click', (e) => {
-        const action = e.target.closest('[data-action]')?.getAttribute('data-action');
-        if (action) {
+        const target = e.target.closest('[data-action]');
+        const action = target?.getAttribute('data-action');
+        if (action === 'show-finding-details') {
+            showFindingDetails(target.getAttribute('data-category'));
+        } else if (action) {
             handleQuickAction(action);
         }
     });
@@ -572,7 +576,7 @@ function populateWatchlistAlerts() {
         return `
             <div class="analysis-item">
                 <div class="analysis-meta">
-                    <div class="analysis-name">${item.vendor}</div>
+                    <div class="analysis-name">${escapeHtml(item.vendor)}</div>
                     <div class="analysis-date">${item.change_count} changes detected</div>
                 </div>
                 <div class="risk-badge medium">+${item.risk_delta}</div>
@@ -672,40 +676,9 @@ function setupDocumentReview() {
     setupInputTabs();
     setupFileUpload();
     setupAnalyzeButton();
-    setupJurisdictionToggle();
+    setupDocumentTextCounter();
+    setupJurisdictionBulkActions();
     setupConcernChips();
-}
-
-function setupJurisdictionToggle() {
-    const toggleBtn = document.getElementById('jurisdictionToggleBtn');
-    const panel = document.getElementById('jurisdictionPanel');
-    const summary = document.getElementById('jurisdictionSummary');
-    if (!toggleBtn || !panel) return;
-
-    toggleBtn.addEventListener('click', () => {
-        const isOpen = !panel.classList.contains('hidden');
-        panel.classList.toggle('hidden', isOpen);
-        toggleBtn.setAttribute('aria-expanded', String(!isOpen));
-        toggleBtn.innerHTML = isOpen
-            ? 'Show all <i class="fas fa-chevron-down"></i>'
-            : 'Hide <i class="fas fa-chevron-up"></i>';
-    });
-
-    // Update summary line whenever a checkbox changes
-    panel.addEventListener('change', () => {
-        updateJurisdictionSummary();
-    });
-}
-
-function updateJurisdictionSummary() {
-    const summary = document.getElementById('jurisdictionSummary');
-    const toggleBtn = document.getElementById('jurisdictionToggleBtn');
-    if (!summary || !toggleBtn) return;
-    const checked = Array.from(document.querySelectorAll('input[name="jurisdiction"]:checked'))
-        .map(i => i.value);
-    const label = checked.length ? `Selected: ${checked.join(', ')}` : 'None selected';
-    // Preserve the button
-    summary.childNodes[0].textContent = label + ' ';
 }
 
 function setupConcernChips() {
@@ -716,6 +689,43 @@ function setupConcernChips() {
         if (!chip) return;
         chip.classList.toggle('selected');
     });
+}
+
+function setupJurisdictionBulkActions() {
+    const selectAllBtn = document.getElementById('selectAllJurisdictions');
+    const clearAllBtn = document.getElementById('clearAllJurisdictions');
+    const checkboxes = () => document.querySelectorAll('input[name="jurisdiction"]');
+
+    if (selectAllBtn) {
+        selectAllBtn.addEventListener('click', () => {
+            checkboxes().forEach(cb => { cb.checked = true; });
+        });
+    }
+    if (clearAllBtn) {
+        clearAllBtn.addEventListener('click', () => {
+            checkboxes().forEach(cb => { cb.checked = false; });
+        });
+    }
+}
+
+function setupDocumentTextCounter() {
+    const textarea = document.getElementById('documentText');
+    const counter = document.getElementById('documentTextCounter');
+    if (!textarea || !counter) return;
+
+    const maxLength = parseInt(textarea.getAttribute('maxlength'), 10) || 50000;
+
+    const update = () => {
+        const length = textarea.value.length;
+        let text = `${length.toLocaleString()} / ${maxLength.toLocaleString()} characters`;
+        if (length > 0 && length < 1000) {
+            text += ' — this text appears short. Is this the complete policy?';
+        }
+        counter.textContent = text;
+    };
+
+    textarea.addEventListener('input', update);
+    update();
 }
 
 function setupInputTabs() {
@@ -784,8 +794,12 @@ async function startAnalysis() {
     const documentText = document.getElementById('documentText').value;
     const fileInput = document.getElementById('fileInput');
     const analysisMode = document.querySelector('input[name="analysisMode"]:checked').value;
-    const jurisdictions = Array.from(document.querySelectorAll('input[name="jurisdiction"]:checked'))
+    let jurisdictions = Array.from(document.querySelectorAll('input[name="jurisdiction"]:checked'))
         .map(input => input.value);
+    if (jurisdictions.length === 0) {
+        jurisdictions = ['US-CA', 'GDPR'];
+        showToast('Using default jurisdictions (US-CA, GDPR)', 'info');
+    }
 
     // Validate input based on active tab
     const hasUrl = activeInput === 'url' && documentUrl;
@@ -881,6 +895,7 @@ function displayAnalysisResults(doc, mode) {
     const gradeInfo = GRADE_NARRATIVE[grade] || GRADE_NARRATIVE['C'];
     const riskScore = typeof doc.risk_score === 'number' ? doc.risk_score.toFixed(1) : doc.risk_score;
     const modeLabel = mode === 'quick' ? 'Quick Scan — serious issues only' : 'Deep Read — full analysis';
+    const analysisId = doc.id || 'unknown';
 
     const highCount = (doc.findings || []).filter(f => (f.severity || '').toUpperCase() === 'HIGH').length;
     const medCount  = (doc.findings || []).filter(f => (f.severity || '').toUpperCase() === 'MEDIUM').length;
@@ -914,7 +929,7 @@ function displayAnalysisResults(doc, mode) {
         : '';
 
     const summaryText = doc.summary
-        ? `<p style="margin-top:8px">${doc.summary}</p>`
+        ? `<p style="margin-top:8px">${escapeHtml(doc.summary)}</p>`
         : '';
 
     const findingsHtml = (doc.findings || []).length
@@ -937,12 +952,12 @@ function displayAnalysisResults(doc, mode) {
     const html = `
         <div class="results-header">
             <div style="flex:1">
-                <h3>${name}</h3>
-                <p class="text-secondary">Checked on ${analyzedDate} &middot; ${modeLabel}</p>
+                <h3>${escapeHtml(name)}</h3>
+                <p class="text-secondary">Checked on ${analyzedDate} &middot; ${modeLabel} &middot; Analysis ID: ${escapeHtml(analysisId)}</p>
             </div>
             <div class="risk-score" title="${scoreContext}">
                 <div class="risk-score-value">${riskScore}</div>
-                <div class="risk-grade">Grade ${grade}</div>
+                <div class="risk-grade">Grade ${escapeHtml(grade)}</div>
                 <div style="font-size:0.72rem;color:var(--color-text-secondary);text-align:center;margin-top:2px">${scoreContext}</div>
             </div>
         </div>
@@ -989,7 +1004,7 @@ function displayAnalysisResults(doc, mode) {
 
         <div class="action-buttons mt-16">
             <button class="btn btn--primary" data-action="export-results">
-                <i class="fas fa-download"></i> Save Report
+                <i class="fas fa-download"></i> Export JSON
             </button>
             <button class="btn btn--secondary" data-action="add-watchlist">
                 <i class="fas fa-eye"></i> Watch for Changes
@@ -997,34 +1012,6 @@ function displayAnalysisResults(doc, mode) {
             <button class="btn btn--outline" onclick="showVerifyView()">
                 <i class="fas fa-list"></i> Show Source Text
             </button>
-        </div>
-
-        <div class="rubric-mini-card mt-16">
-            <div class="rubric-mini-header">
-                <i class="fas fa-info-circle"></i> How We Scored This
-            </div>
-            <div class="rubric-mini-body">
-                <div class="rubric-mini-grade">
-                    <span style="font-weight:700;font-size:1.1rem">Grade ${grade}</span>
-                    &mdash; ${gradeInfo.headline}
-                </div>
-                <div class="rubric-mini-thresholds">
-                    <span class="rubric-threshold" title="Score 0–3">A: few/no issues</span>
-                    <span class="rubric-threshold" title="Score 3–5">B: minor concerns</span>
-                    <span class="rubric-threshold" title="Score 5–8">C: watch out</span>
-                    <span class="rubric-threshold" title="Score 8–10">D: serious problems</span>
-                </div>
-                <div style="margin-top:10px;font-size:0.8rem;color:var(--color-text-secondary)">
-                    <strong>IRP Score</strong> = 0.5&times;(Impact/5) + 0.4&times;(Likelihood/5) &minus; 0.3&times;(Safeguards/5)<br>
-                    <strong>Rubric categories</strong> (tool quality, not this document):
-                    Product Integrity (20%) &bull; Legal Signal (20%) &bull; AI Law Signal (10%) &bull;
-                    Privacy &amp; Security (10%) &bull; Accessibility (15%) &bull;
-                    Visual/IXD (10%) &bull; Performance (10%) &bull; Governance (5%)
-                </div>
-            </div>
-            <div class="rubric-mini-footer">
-                <a href="#" onclick="navigateToPage('reports');return false">See full rubric &rarr;</a>
-            </div>
         </div>
     `;
 
@@ -1074,15 +1061,22 @@ function createFindingHTML(finding) {
     const severityUpper = (finding.severity || '').toUpperCase();
     const severityLabels = { HIGH: 'Serious', MEDIUM: 'Moderate', LOW: 'Minor' };
     const severityLabel = severityLabels[severityUpper] || finding.severity;
-    const safeCategory = (finding.category || '').replace(/'/g, "\\'");
+    const confidence = formatConfidence(finding.confidence);
     return `
-        <div class="finding-item" onclick="showFindingDetails('${safeCategory}')">
+        <div class="finding-item" data-action="show-finding-details" data-category="${escapeHtml(finding.category)}">
             <div class="finding-header">
-                <div class="finding-category">${info.label}</div>
-                <div class="finding-severity ${severityUpper.toLowerCase()}">${severityLabel}</div>
+                <div class="finding-category">${escapeHtml(info.label)}</div>
+                <div class="finding-severity ${severityUpper.toLowerCase()}">${escapeHtml(severityLabel)}</div>
             </div>
-            <p style="margin:6px 0 4px;font-size:0.92rem">${info.impact}</p>
-            <div class="finding-excerpt">"${finding.excerpt}"</div>
+            <p style="margin:6px 0 4px;font-size:0.92rem">${escapeHtml(info.impact)}</p>
+            <div class="finding-excerpt">"${escapeHtml(finding.excerpt)}"</div>
+            <div class="finding-confidence">
+                <span>Confidence:</span>
+                <div class="confidence-bar">
+                    <div class="confidence-fill" style="width: ${confidence}%"></div>
+                </div>
+                <span>${confidence}%</span>
+            </div>
         </div>
     `;
 }
@@ -1108,23 +1102,30 @@ function showFindingDetails(category) {
     const content = `
         <div class="finding-details">
             <div class="mb-16">
-                <div class="finding-severity ${severityUpper.toLowerCase()}">${severityLabel} Issue</div>
+                <div class="finding-severity ${severityUpper.toLowerCase()}">${escapeHtml(severityLabel)} Issue</div>
+                <div class="text-secondary">Confidence: ${confidencePct}%</div>
             </div>
 
             <h4>What This Means for You</h4>
-            <p class="mb-16">${info.impact}</p>
+            <p class="mb-16">${escapeHtml(info.impact)}</p>
 
             <h4>Where We Found It</h4>
-            <div class="finding-excerpt mb-16">"${finding.excerpt}"</div>
+            <div class="finding-excerpt mb-16">"${escapeHtml(finding.excerpt)}"</div>
 
             <h4>More Detail</h4>
-            <p class="mb-16">${finding.explanation || 'No additional detail available.'}</p>
+            <p class="mb-16">${finding.explanation ? escapeHtml(finding.explanation) : 'No additional detail available.'}</p>
 
-            ${confidencePct >= 80 ? `<p class="text-secondary mb-16">How sure we are: ${confidencePct}%</p>` : ''}
+            <h4>Location</h4>
+            <p class="text-secondary">Lines ${escapeHtml(String(evidence.line_start))}-${escapeHtml(String(evidence.line_end))}</p>
 
             <h4>Privacy Laws This May Violate</h4>
             <div class="mt-8">
-                ${(evidence.legal_basis || []).map(basis => `<span class="status status--info">${basis}</span>`).join(' ') || '<span class="text-secondary">None specified</span>'}
+                ${(evidence.legal_basis || []).map(basis => `<span class="status status--info">${escapeHtml(basis)}</span>`).join(' ') || '<span class="text-secondary">Not provided</span>'}
+            </div>
+
+            <h4>Jurisdictions</h4>
+            <div class="mt-8">
+                ${(finding.jurisdictions || []).map(j => `<span class="status status--info">${escapeHtml(j)}</span>`).join(' ')}
             </div>
         </div>
     `;
@@ -1306,14 +1307,14 @@ function populateWatchlist() {
         return `
             <div class="watchlist-card">
                 <div class="watchlist-header">
-                    <div class="vendor-name">${item.vendor}</div>
-                    <div class="status-badge ${statusClass}">${item.status}</div>
+                    <div class="vendor-name">${escapeHtml(item.vendor)}</div>
+                    <div class="status-badge ${statusClass}">${escapeHtml(item.status)}</div>
                 </div>
                 <div class="watchlist-meta">
                     <div>Last checked: ${lastChecked}</div>
                     <div>Changes: ${item.change_count}</div>
                     <div>Risk delta: ${item.risk_delta}</div>
-                    ${item.change_summary ? `<div>Summary: ${item.change_summary}</div>` : ''}
+                    ${item.change_summary ? `<div>Summary: ${escapeHtml(item.change_summary)}</div>` : ''}
                 </div>
                 <div class="action-buttons mt-16">
                     <button class="btn btn--sm btn--secondary" onclick="viewChanges('${item.id}')">
@@ -1396,8 +1397,8 @@ function viewChanges(itemId) {
 
     const content = `
         <div class="change-history">
-            <h4>Recent Changes for ${item.vendor}</h4>
-            ${item.change_summary ? `<pre>${item.change_summary}</pre>` : '<p class="text-secondary">No change summary available.</p>'}
+            <h4>Recent Changes for ${escapeHtml(item.vendor)}</h4>
+            ${item.change_summary ? `<pre>${escapeHtml(item.change_summary)}</pre>` : '<p class="text-secondary">No change summary available.</p>'}
         </div>
     `;
 
@@ -1457,8 +1458,8 @@ function filterWatchlist() {
         return `
             <div class="watchlist-card">
                 <div class="watchlist-header">
-                    <div class="vendor-name">${item.vendor}</div>
-                    <div class="status-badge ${statusClass}">${item.status}</div>
+                    <div class="vendor-name">${escapeHtml(item.vendor)}</div>
+                    <div class="status-badge ${statusClass}">${escapeHtml(item.status)}</div>
                 </div>
                 <div class="watchlist-meta">
                     <div>Last checked: ${lastChecked}</div>

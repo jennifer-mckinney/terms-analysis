@@ -178,201 +178,48 @@
 
                         <div class="input-panel" id="text-input">
                             <label class="form-label">Document Text</label>
-                            <textarea class="form-control" rows="8" placeholder="Paste your document text here..." id="documentText"></textarea>
+                            <textarea class="form-control" rows="8" maxlength="50000" placeholder="Paste your document text here..." id="documentText"></textarea>
+                            <p class="text-secondary" id="documentTextCounter" style="margin-top: 4px; font-size: 0.8rem;">0 / 50,000 characters</p>
                         </div>
                     </div>
 
                     <div class="analysis-options">
                         <label class="form-label">Jurisdictions</label>
-                        <div class="jurisdiction-selector">
-                            <div class="jurisdiction-summary" id="jurisdictionSummary">
-                                Selected: US-CA, GDPR
-                                <button type="button" class="jurisdiction-toggle-btn" id="jurisdictionToggleBtn" aria-expanded="false">
-                                    Show all <i class="fas fa-chevron-down"></i>
-                                </button>
-                            </div>
-                            <div class="jurisdiction-panel hidden" id="jurisdictionPanel">
-                                <div class="jurisdiction-group">
-                                    <div class="jurisdiction-group-label">United States</div>
-                                    <div class="jurisdiction-group-items">
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="US-CA" checked>
-                                            <span class="jx-code">US-CA</span>
-                                            <span class="jx-name">CCPA/CPRA</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="US-FED">
-                                            <span class="jx-code">US-FED</span>
-                                            <span class="jx-name">Federal</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="US-NY">
-                                            <span class="jx-code">US-NY</span>
-                                            <span class="jx-name">SHIELD Act</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="US-TX">
-                                            <span class="jx-code">US-TX</span>
-                                            <span class="jx-name">TDPSA</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="US-VA">
-                                            <span class="jx-code">US-VA</span>
-                                            <span class="jx-name">VCDPA</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="US-CO">
-                                            <span class="jx-code">US-CO</span>
-                                            <span class="jx-name">CPA</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="US-CT">
-                                            <span class="jx-code">US-CT</span>
-                                            <span class="jx-name">CTDPA</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="US-IL">
-                                            <span class="jx-code">US-IL</span>
-                                            <span class="jx-name">BIPA</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="US-NJ">
-                                            <span class="jx-code">US-NJ</span>
-                                            <span class="jx-name">NJDPA</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="US-MN">
-                                            <span class="jx-code">US-MN</span>
-                                            <span class="jx-name">MCDPA</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="US-OR">
-                                            <span class="jx-code">US-OR</span>
-                                            <span class="jx-name">OCPA</span>
-                                        </label>
-                                    </div>
-                                </div>
-                                <div class="jurisdiction-group">
-                                    <div class="jurisdiction-group-label">European Union / UK</div>
-                                    <div class="jurisdiction-group-items">
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="GDPR" checked>
-                                            <span class="jx-code">GDPR</span>
-                                            <span class="jx-name">EU GDPR</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="UK-GDPR">
-                                            <span class="jx-code">UK-GDPR</span>
-                                            <span class="jx-name">UK GDPR</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="EU-AI-ACT">
-                                            <span class="jx-code">EU-AI-ACT</span>
-                                            <span class="jx-name">EU AI Act</span>
-                                        </label>
-                                    </div>
-                                </div>
-                                <div class="jurisdiction-group">
-                                    <div class="jurisdiction-group-label">Canada</div>
-                                    <div class="jurisdiction-group-items">
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="PIPEDA">
-                                            <span class="jx-code">PIPEDA</span>
-                                            <span class="jx-name">Federal</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="CA-QC">
-                                            <span class="jx-code">CA-QC</span>
-                                            <span class="jx-name">Quebec Law 25</span>
-                                        </label>
-                                    </div>
-                                </div>
-                                <div class="jurisdiction-group">
-                                    <div class="jurisdiction-group-label">Asia-Pacific</div>
-                                    <div class="jurisdiction-group-items">
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="APP">
-                                            <span class="jx-code">APP</span>
-                                            <span class="jx-name">Australia Privacy</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="APPI">
-                                            <span class="jx-code">APPI</span>
-                                            <span class="jx-name">Japan</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="PDPA-TH">
-                                            <span class="jx-code">PDPA-TH</span>
-                                            <span class="jx-name">Thailand</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="PIPA">
-                                            <span class="jx-code">PIPA</span>
-                                            <span class="jx-name">South Korea</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="DPDP">
-                                            <span class="jx-code">DPDP</span>
-                                            <span class="jx-name">India</span>
-                                        </label>
-                                    </div>
-                                </div>
-                                <div class="jurisdiction-group">
-                                    <div class="jurisdiction-group-label">Global AI Standards</div>
-                                    <div class="jurisdiction-group-items">
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="OECD-AI">
-                                            <span class="jx-code">OECD-AI</span>
-                                            <span class="jx-name">OECD AI Principles</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="UNESCO-AI">
-                                            <span class="jx-code">UNESCO-AI</span>
-                                            <span class="jx-name">UNESCO Recommendation</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="COE-AI-225">
-                                            <span class="jx-code">COE-AI-225</span>
-                                            <span class="jx-name">CoE Framework Convention</span>
-                                        </label>
-                                    </div>
-                                </div>
-                                <div class="jurisdiction-group">
-                                    <div class="jurisdiction-group-label">Other</div>
-                                    <div class="jurisdiction-group-items">
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="LGPD">
-                                            <span class="jx-code">LGPD</span>
-                                            <span class="jx-name">Brazil</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="POPIA">
-                                            <span class="jx-code">POPIA</span>
-                                            <span class="jx-name">South Africa</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="PDPA-KE">
-                                            <span class="jx-code">PDPA-KE</span>
-                                            <span class="jx-name">Kenya</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="NDPR">
-                                            <span class="jx-code">NDPR</span>
-                                            <span class="jx-name">Nigeria</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="ICCPR-17">
-                                            <span class="jx-code">ICCPR-17</span>
-                                            <span class="jx-name">UN Human Rights</span>
-                                        </label>
-                                        <label class="jurisdiction-item">
-                                            <input type="checkbox" name="jurisdiction" value="COE-108">
-                                            <span class="jx-code">COE-108</span>
-                                            <span class="jx-name">Convention 108+</span>
-                                        </label>
-                                    </div>
-                                </div>
-                            </div>
+                        <div class="jurisdiction-actions">
+                            <button type="button" class="btn btn--outline" id="selectAllJurisdictions">Select All</button>
+                            <button type="button" class="btn btn--outline" id="clearAllJurisdictions">Clear All</button>
+                        </div>
+                        <div class="jurisdiction-list" id="jurisdictionList">
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="US-FED"> <span>US-FED — US Federal (COPPA, HIPAA, GLBA, FTC §5, CAN-SPAM)</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="US-CA" checked> <span>US-CA — California (CCPA/CPRA)</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="US-TX"> <span>US-TX — Texas (TDPSA)</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="US-VA"> <span>US-VA — Virginia (VCDPA)</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="US-CO"> <span>US-CO — Colorado (CPA + AI Act SB 205)</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="US-CT"> <span>US-CT — Connecticut (CTDPA)</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="US-IL"> <span>US-IL — Illinois (BIPA + AEIA)</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="US-NY"> <span>US-NY — New York (SHIELD Act)</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="US-NJ"> <span>US-NJ — New Jersey (NJDPA)</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="US-MN"> <span>US-MN — Minnesota (MCDPA)</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="US-OR"> <span>US-OR — Oregon (OCPA)</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="GDPR" checked> <span>GDPR — European Union</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="UK-GDPR"> <span>UK-GDPR — United Kingdom (UK GDPR + DPA 2018)</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="LGPD"> <span>LGPD — Brazil</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="PIPEDA"> <span>PIPEDA — Canada</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="CA-QC"> <span>CA-QC — Quebec (Law 25)</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="POPIA"> <span>POPIA — South Africa</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="PDPA-KE"> <span>PDPA-KE — Kenya (PDPA 2019)</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="DPDP"> <span>DPDP — India (DPDP Act 2023)</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="APPI"> <span>APPI — Japan</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="PIPA"> <span>PIPA — South Korea</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="APP"> <span>APP — Australia (Privacy Act / APPs)</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="PDPA-TH"> <span>PDPA-TH — Thailand</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="NDPR"> <span>NDPR — Nigeria</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="ICCPR-17"> <span>ICCPR-17 — UN ICCPR Article 17</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="COE-108"> <span>COE-108 — Council of Europe Convention 108+</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="EU-AI-ACT"> <span>EU-AI-ACT — EU AI Act</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="COE-AI-225"> <span>COE-AI-225 — CETS 225 (AI Framework Convention)</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="OECD-AI"> <span>OECD-AI — OECD AI Principles</span></label>
+                            <label class="checkbox-row"><input type="checkbox" name="jurisdiction" value="UNESCO-AI"> <span>UNESCO-AI — Ethics of AI Recommendation</span></label>
                         </div>
                     </div>
 
@@ -528,8 +375,11 @@
                 </div>
 
                 <div class="rubric-scores">
-                    <h3>Tool Performance Scores</h3>
-                    <p class="text-secondary" style="font-size:0.85rem;margin-bottom:12px">How well our checker is doing across all policies you've tested</p>
+                    <h3>Rubric Scoring System</h3>
+                    <p class="text-secondary" style="margin-top: -8px; margin-bottom: 12px;">
+                        Internal quality-evaluation scores (0&ndash;10) for this tool's own build quality
+                        across engineering dimensions &mdash; not a rating of any analyzed document.
+                    </p>
                     <div class="rubric-grid" id="rubricGrid">
                         <!-- Rubric scores populated by JavaScript -->
                     </div>

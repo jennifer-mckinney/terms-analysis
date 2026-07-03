@@ -243,7 +243,7 @@ All tests pass with 100% success rate.
 - `app/models.py` - Added PolicySnapshot and PolicyWatch models
 - `app/schemas.py` - Added Pydantic schemas for new endpoints
 - `app/services/diffing.py` - Enhanced with token-level diff algorithm
-- `app/main.py` - Added 7 new API endpoints
+- `app/main.py` - Added 8 new API endpoints (3 snapshot + 1 diff + 4 policy-watch)
 - `tests/test_snapshots_and_diffs.py` - New comprehensive test suite (32 tests)
 
 ## Dependencies

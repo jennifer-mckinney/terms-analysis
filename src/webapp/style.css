@@ -1,68 +1,61 @@
 :root {
-  /* Primitive Color Tokens — Alexa palette */
-  --color-white: rgba(255, 255, 255, 1);
-  --color-black: rgba(0, 0, 0, 1);
-  /* Alexa brand colors */
-  --color-cream-50: rgba(249, 243, 230, 1);     /* #F9F3E6 warm cream */
-  --color-cream-100: rgba(253, 249, 242, 1);    /* lighter warm cream for surfaces */
-  --color-navy-700: rgba(35, 61, 83, 1);        /* #233D53 dark navy */
-  --color-navy-800: rgba(20, 38, 54, 1);        /* deeper navy for dark bg */
-  --color-ocean-500: rgba(6, 75, 115, 1);       /* #064B73 ocean blue */
-  --color-ocean-400: rgba(10, 97, 148, 1);      /* ocean hover */
-  --color-ocean-300: rgba(74, 156, 200, 1);     /* ocean light (dark-mode primary) */
-  --color-orange-500: rgba(250, 83, 46, 1);     /* #FA532E orange-red accent */
-  --color-orange-400: rgba(255, 115, 80, 1);    /* lighter orange-red for dark mode */
-  /* Neutrals */
-  --color-gray-200: rgba(240, 238, 232, 1);     /* warm off-white */
-  --color-gray-300: rgba(185, 183, 178, 1);
-  --color-gray-400: rgba(130, 130, 128, 1);
-  --color-slate-500: rgba(110, 120, 130, 1);
+  /* === CLEAN ENERGY PALETTE (Light Mode Default) === */
 
-  /* RGB versions for opacity control */
-  --color-navy-700-rgb: 35, 61, 83;
-  --color-navy-800-rgb: 20, 38, 54;
-  --color-ocean-500-rgb: 6, 75, 115;
-  --color-ocean-300-rgb: 74, 156, 200;
-  --color-cream-50-rgb: 249, 243, 230;
-  --color-orange-500-rgb: 250, 83, 46;
-  --color-orange-400-rgb: 255, 115, 80;
-  --color-gray-200-rgb: 240, 238, 232;
-  --color-gray-300-rgb: 185, 183, 178;
-  --color-gray-400-rgb: 130, 130, 128;
-  --color-slate-500-rgb: 110, 120, 130;
+  /* Exact colors from reference image */
+  --ocean-deep: #003135;        /* Deep ocean teal (darkest) */
+  --ocean-mid: #024950;         /* Mid teal */
+  --earth: #964734;             /* Terracotta earth */
+  --turquoise: #0FA4AF;         /* Bright turquoise */
+  --mint: #AFDDE5;              /* Pale mint */
 
-  /* Background color tokens (Light Mode) */
-  --color-bg-1: rgba(59, 130, 246, 0.08);
-  --color-bg-2: rgba(245, 158, 11, 0.08);
-  --color-bg-3: rgba(34, 197, 94, 0.08);
-  --color-bg-4: rgba(239, 68, 68, 0.08);
-  --color-bg-5: rgba(147, 51, 234, 0.08);
-  --color-bg-6: rgba(249, 115, 22, 0.08);
-  --color-bg-7: rgba(236, 72, 153, 0.08);
-  --color-bg-8: rgba(6, 182, 212, 0.08);
+  /* Backgrounds */
+  --color-background: #AFDDE5;  /* Pale mint - main page background */
+  --color-surface: #FFFFFF;     /* Pure white - cards/panels */
+  --color-surface-alt: rgba(0, 49, 53, 0.06); /* Subtle tinted surface for inline card accents */
+  --color-input-bg: #FFFFFF;    /* Pure white - form inputs */
+  --color-highlight: #E5F4F6;   /* Very light teal - highlights */
 
-  /* Semantic Color Tokens (Light Mode) */
-  --color-background: var(--color-cream-50);
-  --color-surface: var(--color-cream-100);
-  --color-surface-alt: rgba(var(--color-navy-700-rgb), 0.06);
-  --color-text: var(--color-navy-700);
-  --color-text-secondary: var(--color-slate-500);
-  --color-primary: var(--color-ocean-500);
-  --color-primary-hover: var(--color-ocean-400);
-  --color-primary-active: rgba(6, 75, 115, 0.82);
-  --color-secondary: rgba(var(--color-navy-700-rgb), 0.10);
-  --color-secondary-hover: rgba(var(--color-navy-700-rgb), 0.18);
-  --color-secondary-active: rgba(var(--color-navy-700-rgb), 0.24);
-  --color-border: rgba(var(--color-navy-700-rgb), 0.18);
-  --color-btn-primary-text: var(--color-cream-50);
-  --color-card-border: rgba(var(--color-navy-700-rgb), 0.12);
-  --color-card-border-inner: rgba(var(--color-navy-700-rgb), 0.10);
-  --color-error: var(--color-orange-500);
-  --color-success: var(--color-ocean-500);
-  --color-warning: rgba(200, 130, 20, 1);
-  --color-info: var(--color-slate-500);
-  --color-focus-ring: rgba(var(--color-ocean-500-rgb), 0.35);
-  --color-select-caret: rgba(var(--color-navy-700-rgb), 0.8);
+  /* Text */
+  --color-text: #003135;        /* Deep ocean teal - main text */
+  --color-text-secondary: #024950; /* Mid teal - secondary text */
+  --color-text-hint: #3D6D74;   /* Teal-gray - hints/captions (darkened from #6B9EA5, which was 2.02:1 on the page background, below the 3:1 WCAG floor) */
+
+  /* Primary Actions (Bright Turquoise) */
+  --color-primary: #0FA4AF;     /* Bright turquoise - buttons/links */
+  --color-primary-hover: #0D8A94; /* Darker turquoise */
+  --color-primary-active: #0B767F; /* Even darker */
+  --color-primary-bg: #C5EEF2;  /* Light turquoise - backgrounds */
+
+  /* Earth Accent (Terracotta) */
+  --color-accent: #964734;      /* Terracotta - warm emphasis */
+  --color-accent-hover: #7D3A2B; /* Darker terracotta */
+  --color-accent-bg: #F2DDD8;   /* Light peachy beige */
+
+  /* Status Colors */
+  --color-critical: #C75F54;    /* Warm coral */
+  --color-high: #D98B5F;        /* Peachy orange */
+  --color-medium: #E8C068;      /* Soft gold */
+  --color-low: #7ECAC4;         /* Pale turquoise */
+  --color-success: #5CB3A7;     /* Teal-green */
+  --color-error: #C75F54;       /* Same as critical */
+  --color-warning: #D98B5F;     /* Same as high */
+  --color-danger: #C75F54;      /* Alias for --color-error, used by inline Action Readiness styles */
+  --color-info: #024950;        /* Mid teal */
+
+  /* Borders */
+  --color-border-subtle: #D4E9EC; /* Very soft teal */
+  --color-border: #A8CED4;      /* Visible teal-gray */
+  --color-border-focus: #0FA4AF; /* Bright turquoise (focus ring) */
+  --color-card-border: #D4E9EC;
+  --color-card-border-inner: #E5F4F6;
+
+  /* Semantic aliases for compatibility */
+  --color-btn-primary-text: #003135; /* was #FFFFFF — only 3.02:1 on --color-primary, below 4.5:1 AA */
+  --color-secondary: #E5F4F6;
+  --color-secondary-hover: #D4E9EC;
+  --color-secondary-active: #C5EEF2;
+  --color-focus-ring: rgba(15, 164, 175, 0.2);
+  --color-select-caret: rgba(0, 49, 53, 0.8);
 
   /* Common style patterns */
   --focus-ring: 0 0 0 3px var(--color-focus-ring);
@@ -72,11 +65,17 @@
   --select-caret-light: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23134252' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
   --select-caret-dark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23f5f5f5' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
 
-  /* RGB versions for light mode status colors */
-  --color-success-rgb: 6, 75, 115;
-  --color-error-rgb: 250, 83, 46;
-  --color-warning-rgb: 200, 130, 20;
-  --color-info-rgb: 110, 120, 130;
+  /* RGB versions for opacity control (must match the hex above — these
+     previously didn't, e.g. --color-error-rgb was 192,21,47 vs the actual
+     --color-error #C75F54 = 199,95,84, distorting badge tint backgrounds) */
+  --color-success-rgb: 92, 179, 167;
+  --color-error-rgb: 199, 95, 84;
+  --color-warning-rgb: 217, 139, 95;
+  --color-info-rgb: 2, 73, 80;
+  --color-critical-rgb: 199, 95, 84;
+  --color-high-rgb: 217, 139, 95;
+  --color-medium-rgb: 232, 192, 104;
+  --color-low-rgb: 126, 202, 196;
 
   /* Typography */
   --font-family-base: "Geist", "Inter", -apple-system,
@@ -144,156 +143,182 @@
 }
 
 /* Dark mode colors */
+/* System-preference dark mode. This block previously referenced the same
+ * undefined tokens as [data-color-scheme="dark"] below (--color-charcoal-700,
+ * --color-teal-300, --color-red-400, etc.) — meaning anyone with OS-level
+ * dark mode enabled who hadn't manually touched the theme selector got
+ * broken/unstyled rendering by default. Rewritten to match the real
+ * "Clean Energy" palette's dark variant (same values as the manual
+ * [data-color-scheme="dark"] override further down this file). */
 @media (prefers-color-scheme: dark) {
   :root {
-    /* RGB versions for opacity control (Dark Mode) */
-    --color-gray-400-rgb: 130, 130, 128;
-    --color-ocean-300-rgb: 74, 156, 200;
-    --color-gray-300-rgb: 185, 183, 178;
-    --color-gray-200-rgb: 240, 238, 232;
+    --color-background: #001417;
+    --color-surface: #0a2a2d;
+    --color-surface-alt: rgba(215, 238, 240, 0.06);
+    --color-input-bg: #0a2a2d;
+    --color-highlight: #133a3e;
 
-    /* Background color tokens (Dark Mode) */
-    --color-bg-1: rgba(6, 75, 115, 0.18); /* Dark ocean */
-    --color-bg-2: rgba(180, 100, 9, 0.15); /* Dark amber */
-    --color-bg-3: rgba(21, 128, 61, 0.15); /* Dark green */
-    --color-bg-4: rgba(250, 83, 46, 0.15); /* Dark orange-red */
-    --color-bg-5: rgba(107, 33, 168, 0.15); /* Dark purple */
-    --color-bg-6: rgba(194, 65, 12, 0.15); /* Dark orange */
-    --color-bg-7: rgba(190, 24, 93, 0.15); /* Dark pink */
-    --color-bg-8: rgba(8, 145, 178, 0.15); /* Dark cyan */
+    --color-text: #d7eef0;
+    --color-text-secondary: #9fc9ce;
+    --color-text-hint: #6b9ea5;
 
-    /* Semantic Color Tokens (Dark Mode — Alexa palette) */
-    --color-background: var(--color-navy-800);
-    --color-surface: var(--color-navy-700);
-    --color-text: var(--color-cream-50);
-    --color-text-secondary: rgba(var(--color-gray-200-rgb), 0.65);
-    --color-primary: var(--color-ocean-300);
-    --color-primary-hover: var(--color-ocean-400);
-    --color-primary-active: var(--color-ocean-500);
-    --color-secondary: rgba(var(--color-gray-400-rgb), 0.15);
-    --color-secondary-hover: rgba(var(--color-gray-400-rgb), 0.25);
-    --color-secondary-active: rgba(var(--color-gray-400-rgb), 0.3);
-    --color-border: rgba(var(--color-gray-400-rgb), 0.3);
-    --color-error: var(--color-orange-400);
-    --color-success: var(--color-ocean-300);
-    --color-warning: rgba(255, 190, 80, 1);
-    --color-info: var(--color-gray-300);
-    --color-focus-ring: rgba(var(--color-ocean-300-rgb), 0.4);
-    --color-btn-primary-text: var(--color-cream-50);
-    --color-card-border: rgba(var(--color-gray-400-rgb), 0.2);
-    --color-card-border-inner: rgba(var(--color-gray-400-rgb), 0.15);
-    --shadow-inset-sm: inset 0 1px 0 rgba(255, 255, 255, 0.08),
-      inset 0 -1px 0 rgba(0, 0, 0, 0.18);
-    --button-border-secondary: rgba(var(--color-gray-400-rgb), 0.2);
-    --color-border-secondary: rgba(var(--color-gray-400-rgb), 0.2);
-    --color-select-caret: rgba(var(--color-gray-200-rgb), 0.8);
+    --color-primary: #2fc3ce;
+    --color-primary-hover: #4fd4de;
+    --color-primary-active: #1fa8b3;
+    --color-primary-bg: #0f3a3e;
 
-    /* Common style patterns - updated for dark mode */
-    --focus-ring: 0 0 0 3px var(--color-focus-ring);
-    --focus-outline: 2px solid var(--color-primary);
-    --status-bg-opacity: 0.15;
-    --status-border-opacity: 0.25;
-    --select-caret-light: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23134252' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
-    --select-caret-dark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23f0eee8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+    --color-accent: #e08b6f;
+    --color-accent-hover: #f0a488;
+    --color-accent-bg: #3a2420;
 
-    /* RGB versions for dark mode */
-    --color-success-rgb: var(--color-ocean-300-rgb);
-    --color-error-rgb: var(--color-orange-400-rgb);
-    --color-warning-rgb: 255, 190, 80;
-    --color-info-rgb: var(--color-gray-300-rgb);
+    --color-critical: #e07a6f;
+    --color-high: #e8a878;
+    --color-medium: #f0d090;
+    --color-low: #7ecac4;
+    --color-success: #6fcdb8;
+    --color-error: #e07a6f;
+    --color-warning: #e8a878;
+    --color-danger: #e07a6f;
+    --color-info: #9fc9ce;
+
+    --color-border-subtle: #163438;
+    --color-border: #2a4d52;
+    --color-border-focus: #2fc3ce;
+    --color-card-border: #2a4d52;
+    --color-card-border-inner: #163438;
+
+    --color-btn-primary-text: #001417;
+    --color-secondary: #163438;
+    --color-secondary-hover: #1c4145;
+    --color-secondary-active: #234e52;
+    --color-focus-ring: rgba(47, 195, 206, 0.3);
+    --color-select-caret: rgba(215, 238, 240, 0.8);
+
+    --color-success-rgb: 111, 205, 184;
+    --color-error-rgb: 224, 122, 111;
+    --color-warning-rgb: 232, 168, 120;
+    --color-info-rgb: 159, 201, 206;
+    --color-critical-rgb: 224, 122, 111;
+    --color-high-rgb: 232, 168, 120;
+    --color-medium-rgb: 240, 208, 144;
+    --color-low-rgb: 126, 202, 196;
   }
 }
 
-/* Data attribute for manual theme switching */
+/* Data attribute for manual theme switching.
+ *
+ * These blocks previously referenced design tokens (--color-charcoal-700,
+ * --color-teal-300, --color-cream-50, --color-slate-900, etc.) that were
+ * never defined anywhere in this file — leftover from a different
+ * template's variable scheme than the "Clean Energy" palette actually
+ * defined in :root above. That meant selecting "Dark" OR "Light" from the
+ * Settings page broke theming entirely (only the unset/"Auto" state
+ * happened to render correctly, since it left :root's own values active).
+ * Rewritten below to derive from the real palette. */
 [data-color-scheme="dark"] {
-  /* RGB versions for opacity control (dark mode) */
-  --color-gray-400-rgb: 130, 130, 128;
-  --color-ocean-300-rgb: 74, 156, 200;
-  --color-gray-300-rgb: 185, 183, 178;
-  --color-gray-200-rgb: 240, 238, 232;
+  --color-background: #001417;
+  --color-surface: #0a2a2d;
+  --color-surface-alt: rgba(215, 238, 240, 0.06);
+  --color-input-bg: #0a2a2d;
+  --color-highlight: #133a3e;
 
-  /* Colorful background palette - Dark Mode */
-  --color-bg-1: rgba(6, 75, 115, 0.18); /* Dark ocean */
-  --color-bg-2: rgba(180, 100, 9, 0.15); /* Dark amber */
-  --color-bg-3: rgba(21, 128, 61, 0.15); /* Dark green */
-  --color-bg-4: rgba(250, 83, 46, 0.15); /* Dark orange-red */
-  --color-bg-5: rgba(107, 33, 168, 0.15); /* Dark purple */
-  --color-bg-6: rgba(194, 65, 12, 0.15); /* Dark orange */
-  --color-bg-7: rgba(190, 24, 93, 0.15); /* Dark pink */
-  --color-bg-8: rgba(8, 145, 178, 0.15); /* Dark cyan */
+  --color-text: #d7eef0;
+  --color-text-secondary: #9fc9ce;
+  --color-text-hint: #6b9ea5;
 
-  /* Semantic Color Tokens (Dark Mode — Alexa palette) */
-  --color-background: var(--color-navy-800);
-  --color-surface: var(--color-navy-700);
-  --color-text: var(--color-cream-50);
-  --color-text-secondary: rgba(var(--color-gray-200-rgb), 0.65);
-  --color-primary: var(--color-ocean-300);
-  --color-primary-hover: var(--color-ocean-400);
-  --color-primary-active: var(--color-ocean-500);
-  --color-secondary: rgba(var(--color-gray-400-rgb), 0.15);
-  --color-secondary-hover: rgba(var(--color-gray-400-rgb), 0.25);
-  --color-secondary-active: rgba(var(--color-gray-400-rgb), 0.3);
-  --color-border: rgba(var(--color-gray-400-rgb), 0.3);
-  --color-error: var(--color-orange-400);
-  --color-success: var(--color-ocean-300);
-  --color-warning: rgba(255, 190, 80, 1);
-  --color-info: var(--color-gray-300);
-  --color-focus-ring: rgba(var(--color-ocean-300-rgb), 0.4);
-  --color-btn-primary-text: var(--color-cream-50);
-  --color-card-border: rgba(var(--color-gray-400-rgb), 0.15);
-  --color-card-border-inner: rgba(var(--color-gray-400-rgb), 0.15);
-  --shadow-inset-sm: inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.18);
-  --color-border-secondary: rgba(var(--color-gray-400-rgb), 0.2);
-  --color-select-caret: rgba(var(--color-gray-200-rgb), 0.8);
+  --color-primary: #2fc3ce;
+  --color-primary-hover: #4fd4de;
+  --color-primary-active: #1fa8b3;
+  --color-primary-bg: #0f3a3e;
 
-  /* Common style patterns - updated for dark mode */
-  --focus-ring: 0 0 0 3px var(--color-focus-ring);
-  --focus-outline: 2px solid var(--color-primary);
-  --status-bg-opacity: 0.15;
-  --status-border-opacity: 0.25;
-  --select-caret-light: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23134252' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
-  --select-caret-dark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23f0eee8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  --color-accent: #e08b6f;
+  --color-accent-hover: #f0a488;
+  --color-accent-bg: #3a2420;
 
-  /* RGB versions for dark mode */
-  --color-success-rgb: var(--color-ocean-300-rgb);
-  --color-error-rgb: var(--color-orange-400-rgb);
-  --color-warning-rgb: 255, 190, 80;
-  --color-info-rgb: var(--color-gray-300-rgb);
+  --color-critical: #e07a6f;
+  --color-high: #e8a878;
+  --color-medium: #f0d090;
+  --color-low: #7ecac4;
+  --color-success: #6fcdb8;
+  --color-error: #e07a6f;
+  --color-warning: #e8a878;
+  --color-danger: #e07a6f;
+  --color-info: #9fc9ce;
+
+  --color-border-subtle: #163438;
+  --color-border: #2a4d52;
+  --color-border-focus: #2fc3ce;
+  --color-card-border: #2a4d52;
+  --color-card-border-inner: #163438;
+
+  --color-btn-primary-text: #001417;
+  --color-secondary: #163438;
+  --color-secondary-hover: #1c4145;
+  --color-secondary-active: #234e52;
+  --color-focus-ring: rgba(47, 195, 206, 0.3);
+  --color-select-caret: rgba(215, 238, 240, 0.8);
+
+  --color-success-rgb: 111, 205, 184;
+  --color-error-rgb: 224, 122, 111;
+  --color-warning-rgb: 232, 168, 120;
+  --color-info-rgb: 159, 201, 206;
+  --color-critical-rgb: 224, 122, 111;
+  --color-high-rgb: 232, 168, 120;
+  --color-medium-rgb: 240, 208, 144;
+  --color-low-rgb: 126, 202, 196;
 }
 
 [data-color-scheme="light"] {
-  /* RGB versions for opacity control (light mode) */
-  --color-navy-700-rgb: 35, 61, 83;
-  --color-ocean-500-rgb: 6, 75, 115;
-  --color-cream-50-rgb: 249, 243, 230;
+  --color-background: #afdde5;
+  --color-surface: #ffffff;
+  --color-surface-alt: rgba(0, 49, 53, 0.06);
+  --color-input-bg: #ffffff;
+  --color-highlight: #e5f4f6;
 
-  /* Semantic Color Tokens (Light Mode — Alexa palette) */
-  --color-background: var(--color-cream-50);
-  --color-surface: var(--color-cream-100);
-  --color-text: var(--color-navy-700);
-  --color-text-secondary: var(--color-slate-500);
-  --color-primary: var(--color-ocean-500);
-  --color-primary-hover: var(--color-ocean-400);
-  --color-primary-active: rgba(6, 75, 115, 0.82);
-  --color-secondary: rgba(var(--color-navy-700-rgb), 0.10);
-  --color-secondary-hover: rgba(var(--color-navy-700-rgb), 0.18);
-  --color-secondary-active: rgba(var(--color-navy-700-rgb), 0.24);
-  --color-border: rgba(var(--color-navy-700-rgb), 0.18);
-  --color-btn-primary-text: var(--color-cream-50);
-  --color-card-border: rgba(var(--color-navy-700-rgb), 0.12);
-  --color-card-border-inner: rgba(var(--color-navy-700-rgb), 0.10);
-  --color-error: var(--color-orange-500);
-  --color-success: var(--color-ocean-500);
-  --color-warning: rgba(200, 130, 20, 1);
-  --color-info: var(--color-slate-500);
-  --color-focus-ring: rgba(var(--color-ocean-500-rgb), 0.35);
+  --color-text: #003135;
+  --color-text-secondary: #024950;
+  --color-text-hint: #3d6d74;
 
-  /* RGB versions for light mode */
-  --color-success-rgb: 6, 75, 115;
-  --color-error-rgb: 250, 83, 46;
-  --color-warning-rgb: 200, 130, 20;
-  --color-info-rgb: var(--color-slate-500-rgb);
+  --color-primary: #0fa4af;
+  --color-primary-hover: #0d8a94;
+  --color-primary-active: #0b767f;
+  --color-primary-bg: #c5eef2;
+
+  --color-accent: #964734;
+  --color-accent-hover: #7d3a2b;
+  --color-accent-bg: #f2ddd8;
+
+  --color-critical: #c75f54;
+  --color-high: #d98b5f;
+  --color-medium: #e8c068;
+  --color-low: #7ecac4;
+  --color-success: #5cb3a7;
+  --color-error: #c75f54;
+  --color-warning: #d98b5f;
+  --color-danger: #c75f54;
+  --color-info: #024950;
+
+  --color-border-subtle: #d4e9ec;
+  --color-border: #a8ced4;
+  --color-border-focus: #0fa4af;
+  --color-card-border: #d4e9ec;
+  --color-card-border-inner: #e5f4f6;
+
+  --color-btn-primary-text: #003135;
+  --color-secondary: #e5f4f6;
+  --color-secondary-hover: #d4e9ec;
+  --color-secondary-active: #c5eef2;
+  --color-focus-ring: rgba(15, 164, 175, 0.2);
+  --color-select-caret: rgba(0, 49, 53, 0.8);
+
+  --color-success-rgb: 92, 179, 167;
+  --color-error-rgb: 199, 95, 84;
+  --color-warning-rgb: 217, 139, 95;
+  --color-info-rgb: 2, 73, 80;
+  --color-critical-rgb: 199, 95, 84;
+  --color-high-rgb: 217, 139, 95;
+  --color-medium-rgb: 232, 192, 104;
+  --color-low-rgb: 126, 202, 196;
 }
 
 /* Base styles */
@@ -567,43 +592,27 @@ select.form-control {
 }
 
 .status--success {
-  background-color: rgba(
-    var(--color-success-rgb, 33, 128, 141),
-    var(--status-bg-opacity)
-  );
+  background-color: rgba(var(--color-success-rgb), var(--status-bg-opacity));
   color: var(--color-success);
-  border: 1px solid
-    rgba(var(--color-success-rgb, 33, 128, 141), var(--status-border-opacity));
+  border: 1px solid rgba(var(--color-success-rgb), var(--status-border-opacity));
 }
 
 .status--error {
-  background-color: rgba(
-    var(--color-error-rgb, 192, 21, 47),
-    var(--status-bg-opacity)
-  );
+  background-color: rgba(var(--color-error-rgb), var(--status-bg-opacity));
   color: var(--color-error);
-  border: 1px solid
-    rgba(var(--color-error-rgb, 192, 21, 47), var(--status-border-opacity));
+  border: 1px solid rgba(var(--color-error-rgb), var(--status-border-opacity));
 }
 
 .status--warning {
-  background-color: rgba(
-    var(--color-warning-rgb, 168, 75, 47),
-    var(--status-bg-opacity)
-  );
+  background-color: rgba(var(--color-warning-rgb), var(--status-bg-opacity));
   color: var(--color-warning);
-  border: 1px solid
-    rgba(var(--color-warning-rgb, 168, 75, 47), var(--status-border-opacity));
+  border: 1px solid rgba(var(--color-warning-rgb), var(--status-border-opacity));
 }
 
 .status--info {
-  background-color: rgba(
-    var(--color-info-rgb, 98, 108, 113),
-    var(--status-bg-opacity)
-  );
+  background-color: rgba(var(--color-info-rgb), var(--status-bg-opacity));
   color: var(--color-info);
-  border: 1px solid
-    rgba(var(--color-info-rgb, 98, 108, 113), var(--status-border-opacity));
+  border: 1px solid rgba(var(--color-info-rgb), var(--status-border-opacity));
 }
 
 /* Container layout */
@@ -896,8 +905,8 @@ select.form-control {
 }
 
 .stat-icon.risk-high {
-  background: rgba(220, 38, 38, 0.1);
-  color: #dc2626;
+  background: rgba(var(--color-high-rgb), 0.16);
+  color: var(--color-high);
 }
 
 .stat-number {
@@ -975,18 +984,18 @@ select.form-control {
 }
 
 .risk-badge.high {
-  background: rgba(220, 38, 38, 0.1);
-  color: #dc2626;
+  background: rgba(var(--color-high-rgb), 0.16);
+  color: var(--color-high);
 }
 
 .risk-badge.medium {
-  background: rgba(217, 119, 6, 0.1);
-  color: #d97706;
+  background: rgba(var(--color-medium-rgb), 0.2);
+  color: var(--color-medium);
 }
 
 .risk-badge.low {
-  background: rgba(5, 150, 105, 0.1);
-  color: #059669;
+  background: rgba(var(--color-low-rgb), 0.16);
+  color: var(--color-low);
 }
 
 /* Document Review Styles */
@@ -1078,6 +1087,30 @@ select.form-control {
   grid-template-columns: 1fr 1fr;
   gap: var(--space-12);
   margin-top: var(--space-12);
+}
+
+.jurisdiction-actions {
+  display: flex;
+  gap: var(--space-8);
+  margin-top: var(--space-8);
+  margin-bottom: var(--space-8);
+}
+
+.jurisdiction-list {
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-base);
+  padding: var(--space-8) var(--space-12);
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding: 4px 0;
+  cursor: pointer;
+  font-size: var(--font-size-sm);
 }
 
 .mode-option {
@@ -1190,24 +1223,28 @@ select.form-control {
   text-transform: uppercase;
 }
 
+/* Derived from --color-critical/high/medium/low (the brand's warm->cool
+ * severity ramp) instead of generic Tailwind red/orange/green — previously
+ * .critical and .high were byte-for-byte identical (both #dc2626 on the
+ * same tint), making the two severities visually indistinguishable. */
 .finding-severity.critical {
-  background: rgba(220, 38, 38, 0.1);
-  color: #dc2626;
+  background: rgba(var(--color-critical-rgb), 0.14);
+  color: var(--color-critical);
 }
 
 .finding-severity.high {
-  background: rgba(220, 38, 38, 0.1);
-  color: #dc2626;
+  background: rgba(var(--color-high-rgb), 0.16);
+  color: var(--color-high);
 }
 
 .finding-severity.medium {
-  background: rgba(217, 119, 6, 0.1);
-  color: #d97706;
+  background: rgba(var(--color-medium-rgb), 0.2);
+  color: var(--color-medium);
 }
 
 .finding-severity.low {
-  background: rgba(5, 150, 105, 0.1);
-  color: #059669;
+  background: rgba(var(--color-low-rgb), 0.16);
+  color: var(--color-low);
 }
 
 .finding-excerpt {
@@ -1238,8 +1275,8 @@ select.form-control {
 }
 
 .verify-line--hit {
-  background: rgba(234, 179, 8, 0.18);
-  border-left: 3px solid #eab308;
+  background: rgba(var(--color-medium-rgb), 0.18);
+  border-left: 3px solid var(--color-medium);
 }
 
 .confidence-bar {
@@ -1362,13 +1399,13 @@ select.form-control {
 }
 
 .status-badge.updated {
-  background: rgba(217, 119, 6, 0.1);
-  color: #d97706;
+  background: rgba(var(--color-warning-rgb), 0.16);
+  color: var(--color-warning);
 }
 
 .status-badge.no-changes {
-  background: rgba(5, 150, 105, 0.1);
-  color: #059669;
+  background: rgba(var(--color-success-rgb), 0.18);
+  color: var(--color-success);
 }
 
 .watchlist-meta {
@@ -1654,15 +1691,15 @@ select.form-control {
 }
 
 .toast.success {
-  border-left: 4px solid #059669;
+  border-left: 4px solid var(--color-success);
 }
 
 .toast.error {
-  border-left: 4px solid #dc2626;
+  border-left: 4px solid var(--color-error);
 }
 
 .toast.warning {
-  border-left: 4px solid #d97706;
+  border-left: 4px solid var(--color-warning);
 }
 
 .toast.info {

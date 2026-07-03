@@ -3,7 +3,7 @@
 **Version:** 2.0  
 **Date:** 2026-06-27  
 **Status:** Draft for Development  
-**Change Notes (v2.0):** AI Law Analysis (F8), expanded jurisdiction coverage (26 codes), multilingual analysis (1,000+ languages), LocalAI inference stack.
+**Change Notes (v2.0):** AI Law Analysis (F8), expanded jurisdiction coverage (30 codes), multilingual analysis (1,000+ languages), LocalAI inference stack.
 **Product Manager:** [Name]  
 **Engineering Lead:** [Name]  
 **Project Location:** `/Users/jennifermckinney/Documents/_AUTOMATION/Claude_Projects/terms-analysis`  
@@ -39,8 +39,8 @@ Build a privacy-first web application that empowers individuals and small organi
 
 **In Scope:**
 - Multi-format document ingestion (URL, file upload, text paste)
-- IRP risk scoring with 9 risk categories
-- Multi-jurisdiction support (US, EU, UK, Canada, Australia, Brazil)
+- Severity-weighted risk scoring across ~50 risk categories (IRP formula is a planned enhancement)
+- Multi-jurisdiction support (30 codes: US federal/state, EU/UK, Canada, Latin America, Africa, Asia-Pacific, AI-law frameworks)
 - Basic results view with findings breakdown
 - PDF export
 - Local LLM inference via LocalAI (Apertus 8B world model, EuroLLM 22B EU specialist)
@@ -235,6 +235,19 @@ Build a privacy-first web application that empowers individuals and small organi
 
 ---
 
+## Implementation Status Note (2026-07-03)
+
+An independent UI/UX validation pass (live Playwright run against both shipped UIs) found several feature-requirement gaps between this spec and the actual running app, summarized here rather than annotated inline on every checkbox below:
+
+- **F1.3 (character count, short-text warning)**: **resolved.** Both UIs now show a live character counter with a short-text warning (JS SPA: `#documentTextCounter`; Streamlit: computed in `app_streamlit.py`).
+- **F2.1 (30-code jurisdiction multi-select with flags/Select-All/Clear-All)**: **resolved.** Both UIs now expose all 30 jurisdiction codes with Select-All/Clear-All controls (Streamlit: `st.multiselect`; JS SPA: a scrollable 30-checkbox list).
+- **F3.1/F4.1 (grade/score display)**: **resolved.** `render_grade_summary()` now shows grade/risk-score/confidence in Streamlit, mirroring the JS SPA's results header.
+- **F4.3 (Verify View)**: **resolved.** Streamlit now has a "View in full document" Verify View expander alongside the JS SPA's modal implementation.
+- **F5.1 (PDF export)**: was broken in both UIs by a backend route-ordering bug (fixed, see issue #16). The JS SPA's export button was relabeled "Export JSON" to accurately describe what it downloads, rather than being mislabeled as a PDF export (issue #17, resolved).
+- **Dark mode**: JS SPA toggle is now functional (`applyTheme()` sets `data-color-scheme`, all three theming blocks in `style.css` corrected); Streamlit follows the OS/browser theme automatically per Streamlit's own theming model, with no in-app toggle.
+
+Given this, the remaining gap between the two UIs (per issue #17/#19) is now narrow: both surface the same core findings, grade, and Verify View. See issue #19 for the planned guided-intake redesign that will make Streamlit the fully-featured flagship UI.
+
 ## Feature Requirements
 
 ### F1: Document Ingestion
@@ -344,7 +357,7 @@ Build a privacy-first web application that empowers individuals and small organi
 - [ ] Selection persists across sessions (localStorage)
 - [ ] "Select All" and "Clear All" quick actions available
 
-**Supported Jurisdictions (26):**
+**Supported Jurisdictions (30 — matches `Jurisdiction` Literal in `schemas.py`):**
 
 *US Federal & State*
 1. **US-FED** — US Federal (COPPA, HIPAA, GLBA, FTC § 5, CAN-SPAM)
@@ -355,35 +368,39 @@ Build a privacy-first web application that empowers individuals and small organi
 6. **US-CT** — Connecticut (CTDPA)
 7. **US-IL** — Illinois (BIPA + AEIA)
 8. **US-NY** — New York (SHIELD Act)
+9. **US-NJ** — New Jersey (NJDPA)
+10. **US-MN** — Minnesota (MCDPA)
+11. **US-OR** — Oregon (OCPA)
 
 *International Privacy*
-9. **GDPR** — European Union (GDPR)
-10. **UK-GDPR** — United Kingdom (UK GDPR + DPA 2018)
-11. **LGPD** — Brazil (LGPD)
-12. **PIPEDA** — Canada (PIPEDA)
-13. **POPIA** — South Africa (POPIA)
-14. **PDPA-KE** — Kenya (PDPA 2019)
-15. **DPDP** — India (DPDP Act 2023)
-16. **APPI** — Japan (APPI)
-17. **PIPA** — South Korea (PIPA)
-18. **APP** — Australia (Privacy Act / APPs)
-19. **PDPA-TH** — Thailand (PDPA)
-20. **NDPR** — Nigeria (NDPR)
+12. **GDPR** — European Union (GDPR)
+13. **UK-GDPR** — United Kingdom (UK GDPR + DPA 2018)
+14. **LGPD** — Brazil (LGPD)
+15. **PIPEDA** — Canada (PIPEDA)
+16. **CA-QC** — Quebec (Law 25)
+17. **POPIA** — South Africa (POPIA)
+18. **PDPA-KE** — Kenya (PDPA 2019)
+19. **DPDP** — India (DPDP Act 2023)
+20. **APPI** — Japan (APPI)
+21. **PIPA** — South Korea (PIPA)
+22. **APP** — Australia (Privacy Act / APPs)
+23. **PDPA-TH** — Thailand (PDPA)
+24. **NDPR** — Nigeria (NDPR)
 
 *International Frameworks*
-21. **ICCPR-17** — UN ICCPR Article 17 (173 state parties)
-22. **COE-108** — Council of Europe Convention 108+
+25. **ICCPR-17** — UN ICCPR Article 17 (173 state parties)
+26. **COE-108** — Council of Europe Convention 108+
 
 *AI Law*
-23. **EU-AI-ACT** — EU AI Act (Regulation 2024/1689)
-24. **COE-AI-225** — Council of Europe CETS 225 (AI Framework Convention)
-25. **OECD-AI** — OECD AI Principles (2024, 46+ countries)
-26. **UNESCO-AI** — UNESCO Recommendation on Ethics of AI (2021, 193 member states)
+27. **EU-AI-ACT** — EU AI Act (Regulation 2024/1689)
+28. **COE-AI-225** — Council of Europe CETS 225 (AI Framework Convention)
+29. **OECD-AI** — OECD AI Principles (2024, 46+ countries)
+30. **UNESCO-AI** — UNESCO Recommendation on Ethics of AI (2021, 193 member states)
 
 **Technical Notes:**
-- Store jurisdiction codes: `US-FED`, `US-CA`, `US-TX`, `US-VA`, `US-CO`, `US-CT`, `US-IL`, `US-NY`, `GDPR`, `UK-GDPR`, `LGPD`, `PIPEDA`, `POPIA`, `PDPA-KE`, `DPDP`, `APPI`, `PIPA`, `APP`, `PDPA-TH`, `NDPR`, `ICCPR-17`, `COE-108`, `EU-AI-ACT`, `COE-AI-225`, `OECD-AI`, `UNESCO-AI`
+- Store jurisdiction codes: `US-FED`, `US-CA`, `US-TX`, `US-VA`, `US-CO`, `US-CT`, `US-IL`, `US-NY`, `US-NJ`, `US-MN`, `US-OR`, `GDPR`, `UK-GDPR`, `LGPD`, `PIPEDA`, `CA-QC`, `POPIA`, `PDPA-KE`, `DPDP`, `APPI`, `PIPA`, `APP`, `PDPA-TH`, `NDPR`, `ICCPR-17`, `COE-108`, `EU-AI-ACT`, `COE-AI-225`, `OECD-AI`, `UNESCO-AI`
 - Analysis filters findings by selected jurisdictions
-- Different jurisdictions trigger different rule patterns
+- Different jurisdictions trigger different rule patterns (all 30 codes have `RulePattern` coverage in `rules.py`)
 
 **Edge Cases:**
 - No jurisdiction selected → Default to US-CA + GDPR, show info: "Using default jurisdictions"
@@ -437,30 +454,36 @@ Build a privacy-first web application that empowers individuals and small organi
 **Priority:** P0 (MVP)
 **User Story:** As a user, I want the system to automatically detect risky clauses and calculate an overall risk score so I can quickly assess the document.
 
-#### F3.1: IRP Risk Scoring
+#### F3.1: Risk Scoring
 
-**Acceptance Criteria:**
+**Status:** the Impact/Likelihood/Safeguards ("IRP") formula below describes a **planned enhancement** — `Finding` has no `impact`/`likelihood`/`safeguards` fields yet and `analyzer.py` does not compute this formula. **Current shipped behavior** is a severity-weighted average (see "Current Implementation" below); update this section's acceptance criteria to reflect IRP once it lands.
+
+**Current Implementation (shipped):**
+- [x] System calculates a severity-weighted score: `10 × (Σ weight(severity) / count(findings))`, where `weight = {Low: 0.2, Medium: 0.5, High: 0.8, Critical: 1.0}`
+- [x] System assigns letter grade on a 0–10 scale (higher = worse): A (<3.5), A- (3.5–4.5), B (4.5–5.5), B- (5.5–6.5), C+ (6.5–7.5), C (7.5–8.5), D+ (≥8.5)
+- [x] System displays confidence level for each finding (0-1 scale)
+- [x] Findings with confidence <0.80 are flagged for review
+
+**Planned: IRP Risk Scoring (not yet implemented):**
 - [ ] System calculates IRP score: `0.5×(Impact/5) + 0.4×(Likelihood/5) - 0.3×(Safeguards/5)`
 - [ ] System assigns letter grade: A (IRP <0.30), B (0.30-0.44), C (0.45-0.74), D (0.75-0.84), F (≥0.85)
 - [ ] Score is calculated per finding and overall document
-- [ ] System displays confidence level for each finding (0-1 scale)
-- [ ] Findings with confidence <0.80 are flagged for review
 
-**Impact Scoring (1-5):**
+**Impact Scoring (1-5, planned):**
 - **5 - Critical:** Identity theft, financial fraud, major privacy violation
 - **4 - High:** Significant data exposure, major rights waiver
 - **3 - Medium:** Moderate privacy concern, limited data sharing
 - **2 - Low:** Minor inconvenience, standard practice
 - **1 - Minimal:** Informational, no real risk
 
-**Likelihood Scoring (1-5):**
+**Likelihood Scoring (1-5, planned):**
 - **5 - Certain:** Clause states practice is current/ongoing
 - **4 - Likely:** Clause allows practice with few limitations
 - **3 - Possible:** Conditional or situational language
 - **2 - Unlikely:** Heavily restricted or rare circumstances
 - **1 - Rare:** Theoretical possibility only
 
-**Safeguards Scoring (1-5):**
+**Safeguards Scoring (1-5, planned):**
 - **5 - Strong:** Multiple protections, user control, transparency, limits
 - **4 - Good:** Some protections and user rights
 - **3 - Moderate:** Basic protections, limited user control
@@ -468,26 +491,27 @@ Build a privacy-first web application that empowers individuals and small organi
 - **1 - None:** No protections, no user recourse
 
 **Technical Notes:**
-- Calculate per-finding IRP, then weighted average for overall score
-- Weight by severity: High severity findings count 3×, Medium 2×, Low 1×
-- Store individual scores for transparency
+- Current: `analyzer.py::calculate_risk_score()` averages per-finding severity weights across all findings (no per-severity multiplier weighting beyond the weight table above)
+- Planned: calculate per-finding IRP, then weighted average for overall score
 
 **UI Display:**
-- Overall grade: Large letter (A-F) with color coding
-- Overall IRP score: Numeric (0.00-1.00) with 2 decimal places
+- Overall grade: Large letter with color coding
+- Overall score: Numeric (0.00-10.00), 2 decimal places (current); IRP would use a 0.00–1.00 scale (planned)
 - Risk level label: "Low", "Medium", "High", "Critical"
 - Visual: Risk gauge/meter
 
-#### F3.2: Risk Categories (9 Types)
+#### F3.2: Risk Categories (9 Core Types — expanded in practice to ~50)
+
+**Note:** the 9 categories below are the original conceptual framework. Actual rule coverage in `rules.py` has grown to ~50 category labels across 64 `RulePattern` entries — additional AI Act sub-categories (High-Risk AI, Prohibited AI, Automated Decision-Making, AI Training, AI-Generated Content, GPAI, AI Training Opt-Out, Algorithmic Accountability, Human Oversight, AI Non-Discrimination) and industry-specific blocks (HIPAA, FERPA, PCI DSS, COPPA) layer on top of these 9 buckets rather than replacing them.
 
 **Acceptance Criteria:**
-- [ ] System detects and categorizes findings into 9 risk types
+- [ ] System detects and categorizes findings into risk types (9 core + expanded jurisdiction/industry-specific categories)
 - [ ] Each finding is assigned exactly one primary category
 - [ ] System displays category icon and color
 - [ ] User can filter findings by category
 - [ ] System shows count of findings per category
 
-**Category Definitions:**
+**Category Definitions (core 9):**
 
 **1. Data Sharing**
 - **What:** Third-party sales, data broker relationships, cross-border transfers
@@ -1070,8 +1094,9 @@ uuid1,"Example Privacy Policy",f2,Retention,Medium,0.82,"We keep data...",145,15
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                    FRONTEND                         │
-│  (Vanilla HTML/CSS/JS - src/webapp/)                │
+│              FRONTEND — two UIs                     │
+│  Streamlit (primary, :8501, app_streamlit.py)       │
+│  Vanilla JS SPA (fallback, :8000, index.html/app.js)│
 │                                                     │
 │  ┌───────────┐  ┌──────────┐  ┌─────────────┐     │
 │  │  Input UI │  │ Results  │  │  Verify     │     │
@@ -1080,26 +1105,26 @@ uuid1,"Example Privacy Policy",f2,Retention,Medium,0.82,"We keep data...",145,15
 └─────────────────────────────────────────────────────┘
                         ↓ HTTP/REST
 ┌─────────────────────────────────────────────────────┐
-│                 BACKEND (FastAPI)                   │
+│                 BACKEND (FastAPI, :9000)            │
 │               (src/backend/app/)                    │
 │                                                     │
-│  ┌──────────────┐  ┌──────────────┐               │
-│  │  Ingestion   │  │  Analysis    │               │
-│  │  Service     │→ │  Service     │               │
-│  │              │  │              │               │
-│  │ - URL fetch  │  │ - Rule-based │               │
-│  │ - File parse │  │ - LLM calls  │               │
-│  │ - Text norm  │  │ - Scoring    │               │
-│  └──────────────┘  └──────────────┘               │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────┐ │
+│  │  Ingestion   │  │  Analysis    │  │ Legal KB  │ │
+│  │  (ingest.py) │→ │ (analyzer.py)│←→│(legal_kb  │ │
+│  │              │  │              │  │  .py)     │ │
+│  │ - URL fetch  │  │ - Rule-based │  │ numpy +   │ │
+│  │ - File parse │  │ - LLM calls  │  │ BM25/RRF  │ │
+│  │ - Text norm  │  │ - Scoring    │  │           │ │
+│  └──────────────┘  └──────────────┘  └───────────┘ │
 │         ↓                   ↓                       │
 │  ┌──────────────────────────────────┐              │
 │  │       Database (SQLite)          │              │
 │  │     data/terms_analysis.db       │              │
 │  │                                  │              │
-│  │  - analyses                      │              │
-│  │  - findings                      │              │
-│  │  - review_items                  │              │
-│  │  - watchlist_items               │              │
+│  │  - Analysis (incl. result_json)  │              │
+│  │  - ReviewItem                    │              │
+│  │  - WatchlistItem                 │              │
+│  │  - PolicySnapshot / PolicyWatch  │              │
 │  └──────────────────────────────────┘              │
 └─────────────────────────────────────────────────────┘
                         ↓ HTTP/REST
@@ -1107,96 +1132,92 @@ uuid1,"Example Privacy Policy",f2,Retention,Medium,0.82,"We keep data...",145,15
 │                LocalAI (Local LLM)                  │
 │         http://localhost:8080/v1                    │
 │                                                     │
-│  - Models: Apertus 8B / EuroLLM 22B                 │
+│  - Models: Apertus-8B-Instruct / EuroLLM-22B-Instruct│
 │  - Inference: Local GPU/CPU                         │
 │  - No data sent to cloud                            │
 └─────────────────────────────────────────────────────┘
 ```
 
+Note: `services/embedding.py` (BM25 + dense RRF chunk selection for over-length *documents*) is a separate module from `legal_kb.py` (retrieval over the embedded *legal corpus*) — both are wired into `analyzer.py::analyze_text()`.
+
 ### Database Schema
 
-#### Table: `analyses`
+Actual schema (`src/backend/app/models.py`) is a single denormalized `Analysis` row per analysis (findings stored as a JSON blob) plus review/watchlist/snapshot tables — not the normalized `analyses`/`findings` design originally specified below:
+
+#### Table: `analyses` (model: `Analysis`)
 
 ```sql
 CREATE TABLE analyses (
     id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    doc_type TEXT NOT NULL,
-    jurisdictions TEXT NOT NULL, -- JSON array
-    industry TEXT,
-    raw_text TEXT NOT NULL,
-    line_offsets TEXT NOT NULL, -- JSON array of line start positions
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    doc_name TEXT,
+    doc_type TEXT,
+    source_url TEXT,
+    source_type TEXT,       -- 'url', 'file', 'text'
+    source_value TEXT,
+    status TEXT DEFAULT 'completed',
+    confidence REAL NOT NULL,
     risk_score REAL NOT NULL,
     grade TEXT NOT NULL,
-    confidence REAL NOT NULL,
-    review_required BOOLEAN DEFAULT FALSE,
-    status TEXT DEFAULT 'completed',
-    source_type TEXT, -- 'url', 'file', 'text'
-    source_value TEXT, -- URL or filename
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    document_text TEXT NOT NULL,
+    result_json TEXT NOT NULL  -- full findings payload, serialized JSON
 );
 ```
 
-#### Table: `findings`
-
-```sql
-CREATE TABLE findings (
-    id TEXT PRIMARY KEY,
-    analysis_id TEXT NOT NULL,
-    category TEXT NOT NULL,
-    severity TEXT NOT NULL,
-    confidence REAL NOT NULL,
-    excerpt TEXT NOT NULL,
-    explanation TEXT NOT NULL,
-    impact INTEGER NOT NULL,
-    likelihood INTEGER NOT NULL,
-    safeguards INTEGER NOT NULL,
-    irp_score REAL NOT NULL,
-    line_start INTEGER NOT NULL,
-    line_end INTEGER NOT NULL,
-    legal_basis TEXT NOT NULL, -- JSON array
-    jurisdictions TEXT NOT NULL, -- JSON array
-    detection_method TEXT, -- 'rule', 'llm', 'hybrid'
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (analysis_id) REFERENCES analyses(id) ON DELETE CASCADE
-);
-```
-
-#### Table: `review_items`
+#### Table: `review_items` (model: `ReviewItem`)
 
 ```sql
 CREATE TABLE review_items (
     id TEXT PRIMARY KEY,
     analysis_id TEXT NOT NULL,
-    finding_id TEXT NOT NULL,
     status TEXT DEFAULT 'pending', -- 'pending', 'approved', 'rejected'
-    reviewer_notes TEXT,
-    reviewed_at TIMESTAMP,
+    notes TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (analysis_id) REFERENCES analyses(id) ON DELETE CASCADE,
-    FOREIGN KEY (finding_id) REFERENCES findings(id) ON DELETE CASCADE
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (analysis_id) REFERENCES analyses(id) ON DELETE CASCADE
 );
 ```
 
-#### Table: `watchlist_items`
+#### Table: `watchlist_items` (model: `WatchlistItem`)
 
 ```sql
 CREATE TABLE watchlist_items (
     id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    url TEXT NOT NULL UNIQUE,
-    frequency TEXT DEFAULT 'weekly', -- 'daily', 'weekly', 'monthly'
+    vendor TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    status TEXT,
+    last_checked TIMESTAMP,
+    changes_since TIMESTAMP,
+    change_count INTEGER DEFAULT 0,
+    risk_delta REAL,
+    change_summary TEXT,
+    last_document_text TEXT,
+    last_document_hash TEXT,
+    last_risk_score REAL,
     last_analysis_id TEXT,
-    last_checked_at TIMESTAMP,
-    next_check_at TIMESTAMP,
-    previous_text_hash TEXT,
-    current_text_hash TEXT,
-    risk_delta REAL, -- Change in risk score
-    change_detected BOOLEAN DEFAULT FALSE,
-    user_notes TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (last_analysis_id) REFERENCES analyses(id)
+);
+```
+
+#### Tables: `policy_snapshots` / `policy_watches` (models: `PolicySnapshot` / `PolicyWatch`)
+
+```sql
+CREATE TABLE policy_snapshots (
+    id TEXT PRIMARY KEY,
+    url TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    captured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    raw_text TEXT NOT NULL
+);
+
+CREATE TABLE policy_watches (
+    id TEXT PRIMARY KEY,
+    url TEXT NOT NULL UNIQUE,
+    user_id TEXT,
+    check_frequency INTEGER DEFAULT 86400,
+    last_check TIMESTAMP,
+    enabled TEXT DEFAULT 'true',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
 
@@ -1466,6 +1487,16 @@ CREATE TABLE watchlist_items (
 
 **Response:** CSV file with `Content-Disposition: attachment`
 
+#### Additional shipped endpoints not in the original spec
+
+These exist in `main.py` and are documented here for completeness (JSON shapes follow the same conventions as the endpoints above):
+
+- `POST /analyze/batch` — analyze multiple documents in one request with cross-reference detection
+- `GET /rubric` — aggregate rubric scores across analyses
+- `GET/POST /snapshots`, `GET /snapshots/detail/{id}` — capture/list historical policy snapshots (SHA-256 deduplicated)
+- `GET /diff/{snapshot_id_1}/{snapshot_id_2}` — token-level diff between two snapshots, with keyword-based severity classification
+- `POST/GET /policy-watch`, `DELETE /policy-watch/{id}`, `POST /policy-watch/{id}/snapshot` — scheduled policy-watch configuration (see `docs/ENHANCEMENT_6.md`)
+
 ### LLM Integration Specification
 
 #### LocalAI Configuration
@@ -1475,6 +1506,8 @@ CREATE TABLE watchlist_items (
 - Model loaded (recommended: LocalAI model (Apertus 8B or EuroLLM 22B))
 - API endpoint: `http://localhost:8080/v1` (configurable via `LOCALAI_BASE_URL`)
 - Model env vars: `MODEL_WORLD` for Apertus 8B, `MODEL_EU` for EuroLLM 22B
+- **Legal-KB augmentation:** before the LLM call, `analyzer.py` retrieves relevant legal-corpus passages via `legal_kb.py` (numpy-exhaustive + BM25/RRF over `data/legal_corpus/`) and injects them into the prompt as citable context (see `prompts.py::build_user_prompt`'s `legal_context` parameter). Degrades to no augmentation if the index hasn't been built or LocalAI is unreachable.
+- **Operational note:** `run.sh`/`.env.example` previously set unrelated `LM_STUDIO_*` variables that never wired into these settings — fixed so `run.sh` now exports `LOCALAI_BASE_URL`/`MODEL_WORLD`/`MODEL_EU` directly.
 
 **Model Selection Criteria:**
 - Context window: ≥8K tokens (for long documents)
@@ -1586,8 +1619,8 @@ Provide findings as JSON array:
 **Must Have (P0):**
 - [ ] User can analyze documents via URL, file upload, or text paste
 - [ ] System supports PDF, DOCX, RTF, HTML, TXT formats
-- [ ] System detects all 9 risk categories with 80%+ accuracy
-- [ ] System calculates IRP score and assigns letter grade
+- [x] System detects the 9 core risk categories (expanded to ~50 in practice) with 80%+ accuracy
+- [x] System calculates a severity-weighted risk score and assigns letter grade (IRP formula is a planned enhancement, not yet built)
 - [ ] System displays findings with excerpts and explanations
 - [ ] User can view findings in Verify view with highlighting
 - [ ] User can export analysis as PDF

@@ -5,7 +5,7 @@ A privacy-focused tool for analyzing Terms of Service and Privacy Policies. Iden
 ## Features
 
 - **Multi-format input**: URLs, PDFs, DOCX, RTF, HTML, or pasted text
-- **Risk scoring**: Impact/Likelihood/Safeguards (IRP) methodology with letter grades
+- **Risk scoring**: severity-weighted average (0-10 scale) with letter grades; an Impact/Likelihood/Safeguards (IRP) methodology is a planned, not-yet-implemented enhancement
 - **Jurisdiction mapping**: US (CA, CO, CT, NY, Federal), EU/GDPR, UK, Canada, Australia, Brazil
 - **Industry profiles**: Retail, Finance, Health, Gaming, Social, Education
 - **Watchlist monitoring**: Track policy changes over time
@@ -50,8 +50,8 @@ The script will:
 1. Create a Python virtual environment
 2. Install dependencies
 3. Initialize the SQLite database
-4. Start the FastAPI backend on `http://localhost:8000`
-5. Open the web UI
+4. Start the FastAPI backend on `http://localhost:9000`
+5. Start the Streamlit UI (primary) on `http://localhost:8501` and the vanilla JS SPA (fallback) on `http://localhost:8000`
 
 ### Configuration
 

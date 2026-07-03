@@ -7,7 +7,7 @@ from app.services.localai import LocalAIClient
 
 
 def test_analyze_text_falls_back_to_rules(monkeypatch):
-    async def fake_analyze(self, numbered_text, jurisdictions, rule_findings):
+    async def fake_analyze(self, numbered_text, jurisdictions, rule_findings, legal_context=None):
         return None
 
     monkeypatch.setattr(LocalAIClient, "analyze", fake_analyze)

@@ -16,6 +16,7 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 PORT="${PORT:-8000}"
+STREAMLIT_PORT="${STREAMLIT_PORT:-8501}"
 BACKEND_PORT="${BACKEND_PORT:-9000}"
 BACKEND_HOST="${BACKEND_HOST:-0.0.0.0}"
 # LocalAI (Apache 2.0, zero VC) — https://localai.io
@@ -27,7 +28,8 @@ MODEL_WORLD="${MODEL_WORLD:-apertus-8b-instruct}"
 # EuroLLM 22B Instruct — EU Horizon Europe / EuroHPC, Apache 2.0, 35 EU languages
 # https://huggingface.co/utter-project/EuroLLM-22B-Instruct-GGUF
 MODEL_EU="${MODEL_EU:-eurollm-22b-instruct}"
-ALLOWED_ORIGINS="${ALLOWED_ORIGINS:-http://localhost:${PORT},http://127.0.0.1:${PORT}}"
+ALLOWED_ORIGINS="${ALLOWED_ORIGINS:-http://localhost:${PORT},http://127.0.0.1:${PORT},http://localhost:${STREAMLIT_PORT},http://127.0.0.1:${STREAMLIT_PORT}}"
+API_BASE_URL="${API_BASE_URL:-http://localhost:${BACKEND_PORT}}"
 
 if [[ ! -d "$APP_DIR" ]]; then
   echo "error: app directory not found: $APP_DIR" >&2
@@ -48,10 +50,11 @@ export LOCALAI_BASE_URL
 export MODEL_WORLD
 export MODEL_EU
 export ALLOWED_ORIGINS
+export API_BASE_URL
 
 echo "Starting Terms & Policies Reviewer..."
-echo "App dir:     $APP_DIR"
-echo "App URL:     http://localhost:$PORT"
+echo "Primary UI (Streamlit): http://localhost:$STREAMLIT_PORT"
+echo "Fallback UI (vanilla JS SPA): http://localhost:$PORT"
 echo "Backend dir: $BACKEND_DIR"
 echo "Backend URL: http://localhost:$BACKEND_PORT"
 echo "LocalAI:     $LOCALAI_BASE_URL"
@@ -71,12 +74,30 @@ echo "Starting backend..."
 "$VENV_PATH/bin/python" -m uvicorn app.main:app --host "$BACKEND_HOST" --port "$BACKEND_PORT" --reload --app-dir "$BACKEND_DIR" &
 BACKEND_PID=$!
 
+echo "Starting fallback UI (vanilla JS SPA)..."
+(cd "$APP_DIR" && "$VENV_PATH/bin/python" -m http.server "$PORT") &
+FALLBACK_PID=$!
+
+echo "Starting primary UI (Streamlit)..."
+(cd "$APP_DIR" && "$VENV_PATH/bin/python" -m streamlit run app_streamlit.py \
+  --server.port "$STREAMLIT_PORT" \
+  --server.headless true) &
+STREAMLIT_PID=$!
+
 cleanup() {
   if [[ -n "${BACKEND_PID:-}" ]]; then
     kill "$BACKEND_PID" >/dev/null 2>&1 || true
   fi
+  if [[ -n "${FALLBACK_PID:-}" ]]; then
+    kill "$FALLBACK_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${STREAMLIT_PID:-}" ]]; then
+    kill "$STREAMLIT_PID" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
-cd "$APP_DIR"
-"$VENV_PATH/bin/python" -m http.server "$PORT"
+# Wait on all three so the script (and thus the EXIT trap) stays alive until
+# one exits or the script is signaled — this ensures cleanup() actually runs
+# for all three processes even under a non-interactive SIGTERM, not just Ctrl+C.
+wait -n "$BACKEND_PID" "$FALLBACK_PID" "$STREAMLIT_PID"
