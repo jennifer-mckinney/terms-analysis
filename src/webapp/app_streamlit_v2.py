@@ -89,6 +89,13 @@ _SIMPLIFY_PATTERNS = [
     re.compile(r"(?i)minors? (?:under |aged? )?(?:\d+)"),
 ]
 
+# Apostrophe normalization — fixes LOW-1 from grumpy peer review of commit 6c6afb0.
+# html.escape() does NOT convert typographic apostrophes (U+2019, U+2018) to entities,
+# so widening the regex to (?:'|&#x27;) alone still misses "Children’s" input.
+# Normalize typographic apostrophes to ASCII BEFORE html.escape so downstream patterns
+# see a canonical form. Regex apostrophe alternation retained as belt-and-suspenders.
+_APOSTROPHE_TRANSLATE = str.maketrans({"’": "'", "‘": "'"})
+
 # Replacement text for each pattern in order (must match length of _SIMPLIFY_PATTERNS)
 _SIMPLIFY_REPLACEMENTS = [
     "There's a law that says websites have to be extra careful with kids' information (kids under 13). They need special permission before collecting things like age or location.",
@@ -693,8 +700,13 @@ def simplify_finding_for_context(finding: dict, context_selections: list[str]) -
         return finding
 
     finding_copy = finding.copy()
+    # Normalize typographic apostrophes (U+2019, U+2018) -> ASCII BEFORE escape
+    # so pattern alternation `(?:'|&#x27;)` reliably matches. html.escape leaves
+    # typographic quotes unchanged; without normalization "Children’s" would
+    # silently defeat every pattern here. See LOW-1 in grumpy review of 6c6afb0.
+    raw_explanation = str(finding.get("explanation") or "").translate(_APOSTROPHE_TRANSLATE)
     # HTML-escape FIRST (defense in depth) so unescaped content cannot leak.
-    explanation = html.escape(str(finding.get("explanation") or ""))
+    explanation = html.escape(raw_explanation)
 
     # Apply simplification patterns in order; first match wins.
     # Patterns are pre-compiled at module load to prevent ReDoS (CRITICAL-1).
@@ -703,7 +715,7 @@ def simplify_finding_for_context(finding: dict, context_selections: list[str]) -
 
     # Fallback: if explanation still looks very legal, add a note.
     # (Only if no patterns matched.)
-    original_escaped = html.escape(str(finding.get("explanation") or ""))
+    original_escaped = html.escape(raw_explanation)
     if explanation == original_escaped:
         # Pattern didn't match. Check if it still contains legal jargon markers.
         jargon_markers = ["GDPR", "CCPA", "regulation", "legislation", "statute", "compliance"]

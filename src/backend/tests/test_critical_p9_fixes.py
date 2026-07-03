@@ -422,5 +422,78 @@ class TestIntegration:
         assert result is not None
 
 
+# ---------------------------------------------------------------------------
+# LOW-1 + LOW-2: Escape -> match contract with apostrophe variants
+# (Grumpy peer review of commit 6c6afb0.)
+# ---------------------------------------------------------------------------
+
+
+class TestEscapeApostropheContract:
+    """Pin the load-bearing behavior that html.escape() runs BEFORE the regex
+    patterns in simplify_finding_for_context.
+
+    For ASCII apostrophes html.escape emits ``&#x27;``; for typographic
+    apostrophes (U+2019, U+2018) html.escape leaves them unchanged. Both paths
+    MUST still trigger the plain-English children's-data replacement for the
+    ``for_child`` context chip.
+
+    Regression on this fell out of commit 6c6afb0 (patterns widened to
+    ``(?:'|&#x27;)``) and its LOW-1 follow-up (typographic normalization via
+    ``_APOSTROPHE_TRANSLATE`` before ``html.escape``).
+
+    The mirror at ``tests/test_child_context_simplification.py`` tests a COPIED
+    function that omits ``html.escape``; this file pins the LIVE source.
+    """
+
+    @pytest.mark.parametrize(
+        "apostrophe",
+        [
+            "'",       # ASCII (already covered by mirror test)
+            "’",  # RIGHT SINGLE QUOTATION MARK - LOW-1 fix
+            "‘",  # LEFT SINGLE QUOTATION MARK - LOW-1 fix
+        ],
+    )
+    def test_children_data_replacement_survives_escape_and_apostrophe_variant(
+        self, apostrophe: str
+    ) -> None:
+        import app_streamlit_v2
+
+        finding = {
+            "explanation": (
+                f"Children{apostrophe}s data requires special protections and disclosures."
+            ),
+            "category": "Data Collection",
+        }
+        result = app_streamlit_v2.simplify_finding_for_context(finding, ["for_child"])
+        # Expected plain-language replacement (from _SIMPLIFY_REPLACEMENTS in
+        # src/webapp/app_streamlit_v2.py; the "lock" wording is spec-owned there).
+        assert "lock" in result["explanation"], (
+            f"apostrophe variant {apostrophe!r} did not trigger children's-data "
+            f"replacement; got: {result['explanation']!r}"
+        )
+        # And critically: the un-simplified original marker should be gone.
+        assert "Children" + apostrophe + "s data requires special protections" not in result[
+            "explanation"
+        ]
+
+    def test_coppa_replacement_survives_escape_apostrophe_and_ferpa(self) -> None:
+        """Pin the COPPA + FERPA plain-English replacement path with an ASCII
+        apostrophe (which html.escape converts to ``&#x27;``)."""
+        import app_streamlit_v2
+
+        finding = {
+            "explanation": (
+                "Special protections required for children's personal information "
+                "under COPPA (under 13) and FERPA (education records)."
+            ),
+            "category": "Data Collection",
+        }
+        result = app_streamlit_v2.simplify_finding_for_context(finding, ["for_child"])
+        assert "law that says websites have to be extra careful" in result["explanation"]
+        assert "kids under 13" in result["explanation"]
+        assert "COPPA" not in result["explanation"]
+        assert "FERPA" not in result["explanation"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
