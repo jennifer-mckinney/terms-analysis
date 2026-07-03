@@ -111,8 +111,11 @@ def _extract_docx(data: bytes) -> str:
 
 
 def _preserve_rtf_delimiter_spaces(text: str) -> str:
-    pattern = re.compile(r"(?<=\\w)\\\\[a-zA-Z]+-?\\d* (?=\\w)")
-    return pattern.sub(lambda match: match.group(0)[:-1] + r"\\~", text)
+    # Fixed: RTF patterns use single backslash (\) not double (\\)
+    # Raw string escapes one backslash to get the literal RTF code like \font0
+    # (CRITICAL-2 from P9 security review: wrong escape levels in raw string)
+    pattern = re.compile(r"(?<=\w)\\[a-zA-Z]+-?\d*\s(?=\w)")
+    return pattern.sub(lambda match: match.group(0)[:-1] + r"\~", text)
 
 
 def _extract_rtf(data: bytes) -> str:

@@ -24,6 +24,89 @@ from typing import Optional
 import requests
 import streamlit as st
 
+# Pre-compile all simplification patterns ONCE at module load to prevent ReDoS.
+# Patterns use bounded alternation instead of unbounded [^.]* greedy matching.
+# See CRITICAL-1: ReDoS in Regex Patterns from P9 security review.
+_SIMPLIFY_PATTERNS = [
+    # COPPA + FERPA
+    re.compile(
+        r"(?i)Special protections required for children's personal information under COPPA \(under 13\) and FERPA"
+    ),
+    re.compile(
+        r"(?i)Special protections required for children's personal information under COPPA"
+    ),
+    # AI/ML training disclosure + opt-out
+    re.compile(
+        r"(?i)Using user data to train AI/ML models requires clear disclosure and (?:in many jurisdictions )?an? opt-out right"
+    ),
+    re.compile(r"(?i)Using user data to train AI/ML models requires clear disclosure"),
+    # Generic children's data
+    re.compile(r"(?i)Children's data requires special protections and disclosures"),
+    # Marketing/tracking purposes
+    re.compile(
+        r"(?i)(?:Using|Tracking|Collecting) (?:user|personal) data for (?:marketing|advertising|analytics) purposes"
+    ),
+    # Retention/storage patterns (FIXED: removed [^.]* unbounded greedy matching)
+    re.compile(
+        r"(?i)(?:Personal|user) data (?:may be )?(?:retained|stored|kept) for (?:marketing|business|commercial) purposes"
+    ),
+    # Third-party sharing (FIXED: removed [^.]* unbounded greedy matching)
+    re.compile(
+        r"(?i)(?:Personal|user) data (?:may be |is )?(?:shared|disclosed|provided) to third.?parties for (?:marketing|advertising|commercial) purposes"
+    ),
+    re.compile(
+        r"(?i)(?:Personal|user) data (?:may be |is )?(?:shared|disclosed|provided) to third.?parties"
+    ),
+    # Profiling/behavioral tracking
+    re.compile(
+        r"(?i)(?:behavioral|user|activity|usage) profiling (?:for )?(?:targeting|analytics|personalization)"
+    ),
+    # Location tracking
+    re.compile(
+        r"(?i)(?:location|geolocation) data (?:is )?(?:collected|tracked|monitored)"
+    ),
+    # Biometric data
+    re.compile(
+        r"(?i)(?:facial recognition|biometric|face scan|fingerprint) (?:data )?(?:collection|processing|use)"
+    ),
+    # Deletion/right to be forgotten
+    re.compile(
+        r"(?i)(?:right to deletion|right to be forgotten|erasure right) may (?:be limited|be restricted|not apply)"
+    ),
+    re.compile(r"(?i)(?:right to deletion|right to be forgotten|erasure right)"),
+    # Automated decision-making
+    re.compile(
+        r"(?i)automated decision.?making (?:based|relying) on (?:personal|user) data"
+    ),
+    # Opt-in vs opt-out consent
+    re.compile(r"(?i)(?:opt.?out|negative) consent"),
+    re.compile(r"(?i)(?:opt.?in|affirmative|explicit) consent"),
+    # Minors/children in general
+    re.compile(r"(?i)minors? (?:under |aged? )?(?:\d+)"),
+]
+
+# Replacement text for each pattern in order (must match length of _SIMPLIFY_PATTERNS)
+_SIMPLIFY_REPLACEMENTS = [
+    "There's a law that says websites have to be extra careful with kids' information (kids under 13). They need special permission before collecting things like age or location.",
+    "There's a law that says websites have to be extra careful with kids' information (kids under 13). They need special permission before collecting things like age or location.",
+    "This service might teach its AI system using your information. The law says they should tell you if they do this, and let you say 'no thanks'.",
+    "This service might teach its AI system using your information. The law says they should tell you if they do this.",
+    "Kids' information needs extra safety - it's like keeping their data in a special lock.",
+    "This company watches what you do so they can show you better ads.",
+    "This company keeps your information to use it for ads and other business reasons.",
+    "This company shares your information with other companies so they can send you ads too.",
+    "This company shares your information with other companies.",
+    "This service tracks what you do to figure out what you like.",
+    "This service can see where you are.",
+    "This service can recognize your face or fingerprint.",
+    "You might not be able to ask them to delete your information.",
+    "You can ask them to delete your information.",
+    "A computer decides things about you based on your information.",
+    "They start doing something unless you say stop.",
+    "They ask permission first before doing something.",
+    "kids under that age",
+]
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 # Backend API base. run.sh exports API_BASE_URL; default to localhost:9000 to
@@ -591,6 +674,9 @@ def simplify_finding_for_context(finding: dict, context_selections: list[str]) -
     language: simple words, storytelling tone, explains why, and avoids acronyms
     without explanation.
 
+    Defense-in-depth: HTML-escapes explanation before simplification so no
+    unescaped HTML can leak into rendered findings (CRITICAL-3 from P9 review).
+
     Args:
         finding: A finding dict with 'explanation' and other fields.
         context_selections: List of selected context values (e.g., ["for_child"]).
@@ -603,105 +689,18 @@ def simplify_finding_for_context(finding: dict, context_selections: list[str]) -
         return finding
 
     finding_copy = finding.copy()
-    explanation = str(finding.get("explanation") or "")
+    # HTML-escape FIRST (defense in depth) so unescaped content cannot leak.
+    explanation = html.escape(str(finding.get("explanation") or ""))
 
-    # Translation map: patterns to simple-english alternatives.
-    # Each tuple is (pattern_to_match, simple_replacement).
-    # Patterns are checked in order; first match wins.
-    replacements = [
-        # COPPA + FERPA
-        (
-            r"(?i)Special protections required for children's personal information under COPPA \(under 13\) and FERPA",
-            "There's a law that says websites have to be extra careful with kids' information (kids under 13). They need special permission before collecting things like age or location.",
-        ),
-        (
-            r"(?i)Special protections required for children's personal information under COPPA",
-            "There's a law that says websites have to be extra careful with kids' information (kids under 13). They need special permission before collecting things like age or location.",
-        ),
-        # AI/ML training disclosure + opt-out
-        (
-            r"(?i)Using user data to train AI/ML models requires clear disclosure and (?:in many jurisdictions )?an? opt-out right",
-            "This service might teach its AI system using your information. The law says they should tell you if they do this, and let you say 'no thanks'.",
-        ),
-        (
-            r"(?i)Using user data to train AI/ML models requires clear disclosure",
-            "This service might teach its AI system using your information. The law says they should tell you if they do this.",
-        ),
-        # Generic children's data
-        (
-            r"(?i)Children's data requires special protections and disclosures",
-            "Kids' information needs extra safety - it's like keeping their data in a special lock.",
-        ),
-        # Marketing/tracking purposes
-        (
-            r"(?i)(?:Using|Tracking|Collecting) (?:user|personal) data for (?:marketing|advertising|analytics) purposes",
-            "This company watches what you do so they can show you better ads.",
-        ),
-        # Retention/storage patterns
-        (
-            r"(?i)(?:Personal|user) data (?:may be )?(?:retained|stored|kept) for [^.]*(?:marketing|business|commercial) purposes",
-            "This company keeps your information to use it for ads and other business reasons.",
-        ),
-        # Third-party sharing
-        (
-            r"(?i)(?:Personal|user) data (?:may be |is )?(?:shared|disclosed|provided) to third.?parties for [^.]*(?:marketing|advertising|commercial) purposes",
-            "This company shares your information with other companies so they can send you ads too.",
-        ),
-        (
-            r"(?i)(?:Personal|user) data (?:may be |is )?(?:shared|disclosed|provided) to third.?parties",
-            "This company shares your information with other companies.",
-        ),
-        # Profiling/behavioral tracking
-        (
-            r"(?i)(?:behavioral|user|activity|usage) profiling (?:for )?(?:targeting|analytics|personalization)",
-            "This service tracks what you do to figure out what you like.",
-        ),
-        # Location tracking
-        (
-            r"(?i)(?:location|geolocation) data (?:is )?(?:collected|tracked|monitored)",
-            "This service can see where you are.",
-        ),
-        # Biometric data
-        (
-            r"(?i)(?:facial recognition|biometric|face scan|fingerprint) (?:data )?(?:collection|processing|use)",
-            "This service can recognize your face or fingerprint.",
-        ),
-        # Deletion/right to be forgotten
-        (
-            r"(?i)(?:right to deletion|right to be forgotten|erasure right) may (?:be limited|be restricted|not apply)",
-            "You might not be able to ask them to delete your information.",
-        ),
-        (
-            r"(?i)(?:right to deletion|right to be forgotten|erasure right)",
-            "You can ask them to delete your information.",
-        ),
-        # Automated decision-making
-        (
-            r"(?i)automated decision.?making (?:based|relying) on (?:personal|user) data",
-            "A computer decides things about you based on your information.",
-        ),
-        # Opt-in vs opt-out consent
-        (
-            r"(?i)(?:opt.?out|negative) consent",
-            "They start doing something unless you say stop.",
-        ),
-        (
-            r"(?i)(?:opt.?in|affirmative|explicit) consent",
-            "They ask permission first before doing something.",
-        ),
-        # Minors/children in general
-        (
-            r"(?i)minors? (?:under |aged? )?(?:\d+)",
-            "kids under that age",
-        ),
-    ]
-
-    for pattern, replacement in replacements:
-        explanation = re.sub(pattern, replacement, explanation)
+    # Apply simplification patterns in order; first match wins.
+    # Patterns are pre-compiled at module load to prevent ReDoS (CRITICAL-1).
+    for pattern, replacement in zip(_SIMPLIFY_PATTERNS, _SIMPLIFY_REPLACEMENTS):
+        explanation = pattern.sub(replacement, explanation)
 
     # Fallback: if explanation still looks very legal, add a note.
-    # (Only if none of the patterns matched.)
-    if explanation == str(finding.get("explanation") or ""):
+    # (Only if no patterns matched.)
+    original_escaped = html.escape(str(finding.get("explanation") or ""))
+    if explanation == original_escaped:
         # Pattern didn't match. Check if it still contains legal jargon markers.
         jargon_markers = ["GDPR", "CCPA", "regulation", "legislation", "statute", "compliance"]
         if any(marker in explanation for marker in jargon_markers):
