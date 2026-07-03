@@ -112,7 +112,8 @@ review_agents:
   security-engineer: STRIDE-style threat-model review — auth, secrets, user input, RLS, CSP, dependencies, session/cookie state, migration safety, endpoint deprecation contract
   grumpy-developer: blunt code-quality review — swallowed errors, dead code, brittle assumptions, missed edges, tautological tests, dispatch-boundary artifacts from multi-Doer sessions
 custom: reviewer prompts MUST be customized to the actual diff and session context, not defaults
-gate: any CRITICAL or HIGH finding from either agent blocks push until (a) resolved by follow-up Coder or (b) explicitly overridden by user in-session per P8 override_authority
+gate: security-engineer findings of ANY severity (CRITICAL / HIGH / MEDIUM / LOW / NIT) block push and MUST be fixed — zero tolerance, no follow-up-issue path; grumpy-developer findings of CRITICAL or HIGH block push, MEDIUM / LOW / NIT can be filed as follow-up issues; either gate resolves via (a) fix-Coder + re-verify, or (b) explicit user override in-session per P8 override_authority
+security_findings_zero_tolerance: user directive 2026-07-03 — every security-engineer finding is a fix-now item regardless of severity; codified after F1-F7 review where two MEDIUMs would have shipped as follow-ups under prior gate
 because: local pytest + orchestrator spot-check is not sufficient for pushed code; two independent adversarial reviewers catch what dispatch Coders and orchestrator miss; especially load-bearing after multi-agent sessions where domain boundaries were crossed
 enforcement: prompt-based today; automation follow-up: pre-push git hook that refuses push until a signed reviewer-log exists for the current HEAD
 xref: [[P8]] [[LIB-TEST]]
