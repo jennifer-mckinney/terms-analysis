@@ -408,17 +408,20 @@ async def analyze_text(
                 except Exception:
                     continue
 
-        # Filter LLM findings by requested jurisdictions. Rule-based detection is
-        # already jurisdiction-scoped in ``detect_findings``, but the LLM can
-        # return findings tagged for jurisdictions the user did not request
-        # (e.g., BIPA for a California-only request). A finding is kept only if
-        # at least one of its declared jurisdictions matches the caller's list,
-        # or if it declares none (treated as universally applicable).
+        # Filter LLM findings by requested jurisdictions. Rule-based detection
+        # is already jurisdiction-scoped in ``detect_findings``, but the LLM
+        # can return findings tagged for jurisdictions the user did not
+        # request (e.g., BIPA for a California-only request) or for no
+        # jurisdiction at all. A finding is kept only if it declares at least
+        # one jurisdiction and at least one of those declared jurisdictions
+        # matches the caller's list. Findings with an empty jurisdictions list
+        # are dropped: an unclaimed jurisdiction can't be verified as
+        # applicable, so we don't surface it. (PR #34 security review HIGH-2.)
         if jurisdictions:
             jurisdiction_set = set(jurisdictions)
             llm_findings = [
                 f for f in llm_findings
-                if not f.jurisdictions or any(j in jurisdiction_set for j in f.jurisdictions)
+                if f.jurisdictions and any(j in jurisdiction_set for j in f.jurisdictions)
             ]
 
     # Add source_document to findings for batch processing

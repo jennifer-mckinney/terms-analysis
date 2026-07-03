@@ -105,6 +105,23 @@ class AnalyzeRequest(BaseModel):
     mode: Literal["full", "quick"] = Field(default="full", description="Analysis mode: 'full' for complete analysis, 'quick' for high-severity rules only")
     context: List[ContextChip] = Field(default_factory=list, description="Context chip selections from intake (biases top-things surfacing)")
 
+    @field_validator("source_url")
+    @classmethod
+    def _validate_source_url_scheme(cls, v: Optional[str]) -> Optional[str]:
+        # Defense-in-depth against ``javascript:`` (and other non-web) schemes
+        # that survive ``html.escape()`` intact and would execute if rendered
+        # in an ``<a href>``. Mirrors ``WatchlistCreateRequest`` — see PR #34
+        # security review HIGH-1.
+        if v is None or v == "":
+            return v
+        from urllib.parse import urlparse
+        parsed = urlparse(v)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("source_url must use http or https scheme")
+        if not parsed.hostname:
+            raise ValueError("source_url must include a valid hostname")
+        return v
+
 
 class AnalyzeUrlRequest(BaseModel):
     url: str = Field(..., min_length=4)
@@ -114,6 +131,21 @@ class AnalyzeUrlRequest(BaseModel):
     jurisdictions: List[Jurisdiction] = Field(default_factory=lambda: ["US-CA", "GDPR"])
     mode: Literal["full", "quick"] = Field(default="full", description="Analysis mode: 'full' for complete analysis, 'quick' for high-severity rules only")
     context: List[ContextChip] = Field(default_factory=list, description="Context chip selections from intake (biases top-things surfacing)")
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url_scheme(cls, v: str) -> str:
+        # See ``AnalyzeRequest._validate_source_url_scheme`` — reject
+        # ``javascript:`` and other non-http(s) schemes before they reach the
+        # fetch layer or get echoed back into rendered payloads. SSRF-target
+        # rejection still happens downstream in ``ingest._validate_url``.
+        from urllib.parse import urlparse
+        parsed = urlparse(v)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("url must use http or https scheme")
+        if not parsed.hostname:
+            raise ValueError("url must include a valid hostname")
+        return v
 
 
 class AnalysisPayload(BaseModel):
@@ -254,7 +286,22 @@ class BatchItem(BaseModel):
     url: Optional[str] = Field(default=None, description="URL to analyze")
     name: Optional[str] = Field(default=None, description="Display name for document")
     doc_type: Optional[DocType] = None
-    
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url_scheme(cls, v: Optional[str]) -> Optional[str]:
+        # Same defense as ``AnalyzeRequest`` / ``AnalyzeUrlRequest`` — reject
+        # non-http(s) schemes at the schema layer.
+        if v is None or v == "":
+            return v
+        from urllib.parse import urlparse
+        parsed = urlparse(v)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("url must use http or https scheme")
+        if not parsed.hostname:
+            raise ValueError("url must include a valid hostname")
+        return v
+
 
 class AnalyzeBatchRequest(BaseModel):
     """Request for batch analysis of multiple documents"""

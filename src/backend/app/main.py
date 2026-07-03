@@ -9,6 +9,7 @@ import typing
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from io import BytesIO, StringIO
+from typing import get_args
 from uuid import uuid4
 from xml.sax.saxutils import escape as _xml_escape
 
@@ -27,12 +28,14 @@ from .schemas import (
     AnalyzeRequest,
     AnalyzeUrlRequest,
     BatchAnalysisResult,
+    ContextChip,
     DiffResult,
     DiffToken,
     DocType,
     IndustryProfile,
     InferRequest,
     InferResponse,
+    Jurisdiction,
     PolicySnapshotListItem,
     PolicySnapshotPayload,
     PolicyWatchCreateRequest,
@@ -54,6 +57,14 @@ from .services.ingest import extract_text_from_bytes, fetch_url_text
 from .services.rules import detect_findings
 
 logger = logging.getLogger("uvicorn.error")
+
+# Derive allowlists directly from the schema ``Literal`` definitions so that
+# any change to the source enums (e.g. adding a new context chip) is picked up
+# automatically. The hardcoded allowlist that used to live inside
+# ``/analyze/file`` silently dropped the ``for_work`` chip after it was added
+# to ``ContextChip`` — deriving from ``typing.get_args`` prevents that drift.
+_VALID_CHIPS: frozenset[str] = frozenset(get_args(ContextChip))
+_VALID_JURISDICTIONS: frozenset[str] = frozenset(get_args(Jurisdiction))
 
 
 def _verify_api_key(x_api_key: str | None = Header(default=None)) -> None:
@@ -371,18 +382,26 @@ async def analyze_file(
             detail=f"Invalid industry '{industry}'. Valid values: {sorted(_valid_industries)}",
         )
 
+    # ``jurisdictions`` arrives as a comma-separated list on multipart uploads.
+    # Only recognised codes from the schema Literal are kept; unknown values are
+    # dropped rather than propagated to the analyzer where they'd short-circuit
+    # the post-LLM jurisdiction filter. Falls back to the same default as the
+    # JSON endpoints when no valid values remain.
     selected_jurisdictions = (
-        [j.strip() for j in jurisdictions.split(",") if j.strip()]
+        [j.strip() for j in jurisdictions.split(",") if j.strip() in _VALID_JURISDICTIONS]
         if jurisdictions
-        else ["US-CA", "GDPR"]
+        else []
     )
+    if not selected_jurisdictions:
+        selected_jurisdictions = ["US-CA", "GDPR"]
 
     # ``context`` arrives as a comma-separated list on multipart uploads. Only
     # valid ContextChip values are propagated; anything else is silently dropped
-    # so the form endpoint stays tolerant.
-    _valid_chips = {"want_understand", "for_child", "for_care", "just_curious"}
+    # so the form endpoint stays tolerant. Allowlist is derived from the schema
+    # Literal at module load — see ``_VALID_CHIPS`` — so it can't drift when
+    # new chips (e.g. ``for_work``) are added.
     selected_context = (
-        [c.strip() for c in context.split(",") if c.strip() in _valid_chips]
+        [c.strip() for c in context.split(",") if c.strip() in _VALID_CHIPS]
         if context
         else []
     )

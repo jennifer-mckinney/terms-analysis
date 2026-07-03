@@ -1379,3 +1379,159 @@ class TestAnalyzeWithContext:
         assert body["context"] == []
         assert body["verdict_headline"]
         assert body["verdict_label"]
+
+
+# ===========================================================================
+# PR #34 must-fix regressions
+# ===========================================================================
+
+
+class TestPr34MustFixRegressions:
+    """Regression tests for the four must-fix findings from PR #34's review workflow.
+
+    See PR #34 comments for the full rationale on each fix.
+    """
+
+    def test_analyze_file_accepts_for_work_context(self, app_client, monkeypatch):
+        """Regression: ``for_work`` was silently dropped by a hardcoded allowlist.
+
+        The multipart handler now derives its allowlist from ``ContextChip`` via
+        ``typing.get_args``, so any new chip added to the schema is accepted
+        automatically. See PR #34 principal-engineer P0 #1 / grumpy-developer
+        CRITICAL / security-engineer MEDIUM-2.
+        """
+        captured: dict = {}
+
+        async def fake_analyze(text, jurisdictions, name=None, doc_type=None,
+                               industry=None, source_url=None, mode=None, **kwargs):
+            captured["context"] = kwargs.get("context")
+            payload = _make_analysis_payload(name=name)
+            payload_with_ctx = payload.model_copy(update={"context": kwargs.get("context") or []})
+            return AnalysisResult(payload=payload_with_ctx, issues=[])
+
+        monkeypatch.setattr("app.main.analyze_text", fake_analyze)
+        # Bypass real ingest — return the raw bytes decoded so we don't need
+        # a full text-extraction pipeline in this test.
+        monkeypatch.setattr(
+            "app.main.extract_text_from_bytes",
+            lambda filename, content_type, data: data.decode("utf-8", errors="ignore") or "text",
+        )
+
+        response = app_client.post(
+            "/analyze/file",
+            files={"file": ("policy.txt", b"Some policy text about work usage.", "text/plain")},
+            data={"context": "for_work", "jurisdictions": "US-CA,GDPR"},
+        )
+        assert response.status_code == 200, response.text
+        # Must NOT be dropped — the handler forwards it to analyze_text.
+        assert captured["context"] == ["for_work"]
+        # And it round-trips into the response payload.
+        assert response.json()["context"] == ["for_work"]
+
+    def test_analyze_file_validates_jurisdictions(self, app_client, monkeypatch):
+        """Bogus jurisdiction codes must be filtered out; valid ones pass through.
+
+        Regression per PR #34 security-engineer MEDIUM-2 — the multipart
+        endpoint previously accepted any comma-separated string, which meant a
+        crafted request could disable the post-LLM jurisdiction filter by
+        supplying a value that no finding declared.
+        """
+        captured: dict = {}
+
+        async def fake_analyze(text, jurisdictions, name=None, doc_type=None,
+                               industry=None, source_url=None, mode=None, **kwargs):
+            captured["jurisdictions"] = jurisdictions
+            return _make_fake_result(name=name)
+
+        monkeypatch.setattr("app.main.analyze_text", fake_analyze)
+        monkeypatch.setattr(
+            "app.main.extract_text_from_bytes",
+            lambda filename, content_type, data: "policy text",
+        )
+
+        # Mix of valid + bogus values — only the valid ones survive.
+        response = app_client.post(
+            "/analyze/file",
+            files={"file": ("policy.txt", b"policy text", "text/plain")},
+            data={"jurisdictions": "US-CA,BOGUS-JUR,GDPR,../etc/passwd"},
+        )
+        assert response.status_code == 200, response.text
+        assert captured["jurisdictions"] == ["US-CA", "GDPR"]
+        assert "BOGUS-JUR" not in captured["jurisdictions"]
+
+    def test_analyze_file_defaults_jurisdictions_when_all_invalid(self, app_client, monkeypatch):
+        """When no valid jurisdiction survives the filter, fall back to the JSON default."""
+        captured: dict = {}
+
+        async def fake_analyze(text, jurisdictions, name=None, doc_type=None,
+                               industry=None, source_url=None, mode=None, **kwargs):
+            captured["jurisdictions"] = jurisdictions
+            return _make_fake_result(name=name)
+
+        monkeypatch.setattr("app.main.analyze_text", fake_analyze)
+        monkeypatch.setattr(
+            "app.main.extract_text_from_bytes",
+            lambda filename, content_type, data: "policy text",
+        )
+
+        response = app_client.post(
+            "/analyze/file",
+            files={"file": ("policy.txt", b"policy text", "text/plain")},
+            data={"jurisdictions": "NOT-REAL,ALSO-FAKE"},
+        )
+        assert response.status_code == 200, response.text
+        # Sensible default matching JSON endpoints.
+        assert captured["jurisdictions"] == ["US-CA", "GDPR"]
+
+    def test_analyze_rejects_javascript_source_url(self, app_client):
+        """``javascript:`` scheme is rejected by pydantic before hitting the handler.
+
+        Regression per PR #34 security-engineer HIGH-1. ``html.escape`` on the
+        frontend does NOT neutralise scheme-based XSS in ``<a href>``.
+        """
+        response = app_client.post(
+            "/analyze",
+            json={
+                "text": "hello world",
+                "source_url": "javascript:alert(1)",
+            },
+        )
+        # Pydantic validation error surfaces as 422 (FastAPI's default for
+        # request-body validation failures).
+        assert response.status_code in (400, 422), response.text
+        assert "source_url" in response.text or "scheme" in response.text.lower()
+
+    def test_analyze_rejects_data_uri_source_url(self, app_client):
+        """``data:`` URIs are also blocked — same XSS class as ``javascript:``."""
+        response = app_client.post(
+            "/analyze",
+            json={
+                "text": "hello world",
+                "source_url": "data:text/html,<script>alert(1)</script>",
+            },
+        )
+        assert response.status_code in (400, 422)
+
+    def test_analyze_accepts_https_source_url(self, app_client, monkeypatch):
+        """Sanity check: valid https URLs still pass the new validator."""
+        async def fake_analyze(*args, **kwargs):
+            return _make_fake_result(source_url="https://example.com/privacy")
+
+        monkeypatch.setattr("app.main.analyze_text", fake_analyze)
+
+        response = app_client.post(
+            "/analyze",
+            json={
+                "text": "hello world",
+                "source_url": "https://example.com/privacy",
+            },
+        )
+        assert response.status_code == 200
+
+    def test_analyze_url_rejects_javascript_scheme(self, app_client):
+        """``/analyze/url`` also rejects non-web schemes at the schema layer."""
+        response = app_client.post(
+            "/analyze/url",
+            json={"url": "javascript:alert(1)"},
+        )
+        assert response.status_code in (400, 422)

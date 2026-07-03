@@ -721,10 +721,26 @@ def render_results() -> None:
     # Crumb: what was reviewed + source link.
     source_name = result.get("name") or result.get("source_url") or "Pasted document"
     source_url = result.get("source_url")
-    crumb_bits = [f"Reviewed: <strong>{html.escape(str(source_name))}</strong>"]
+    # Defense-in-depth against ``javascript:`` (and other non-web) schemes —
+    # ``html.escape`` does NOT neutralise a scheme in an ``href`` attribute, so
+    # the URL must be validated separately before it's rendered as a link. The
+    # backend schema layer (AnalyzeRequest/AnalyzeUrlRequest) already rejects
+    # non-http(s) source URLs; this is a belt-and-braces check in case a legacy
+    # payload lacking that validation is rendered. See PR #34 security review
+    # HIGH-1.
+    safe_source_url: str | None = None
     if source_url:
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(str(source_url))
+        except Exception:
+            parsed = None
+        if parsed and parsed.scheme in ("http", "https") and parsed.hostname:
+            safe_source_url = str(source_url)
+    crumb_bits = [f"Reviewed: <strong>{html.escape(str(source_name))}</strong>"]
+    if safe_source_url:
         crumb_bits.append(
-            f'<a href="{html.escape(str(source_url))}" target="_blank" '
+            f'<a href="{html.escape(safe_source_url)}" target="_blank" '
             f'rel="noopener">open source</a>'
         )
     st.markdown(

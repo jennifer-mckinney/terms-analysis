@@ -68,3 +68,127 @@ def test_group_by_domain_empty_domain_maps_to_empty_list():
     assert grouped["Terms of use"] == []
     assert grouped["Privacy rights"] == []
     assert len(grouped["Data use"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# PR #34 regression: LLM jurisdiction filter must not admit empty-jurisdiction
+# findings. See PR #34 security-engineer HIGH-2.
+# ---------------------------------------------------------------------------
+
+
+def test_llm_jurisdiction_filter_drops_empty_jurisdictions_finding(monkeypatch):
+    """A finding with ``jurisdictions=[]`` must be dropped when a jurisdiction filter is active.
+
+    Previously the predicate was ``not f.jurisdictions or any(...)`` which
+    admitted any finding without a declared jurisdiction, effectively creating
+    a bypass for anything the LLM returned without a jurisdiction tag. The
+    predicate now requires explicit overlap: unclaimed jurisdiction ==>
+    unverifiable applicability ==> dropped.
+    """
+    import asyncio
+
+    from app.services import analyzer as analyzer_module
+    from app.services.analyzer import analyze_text
+    from app.services.localai import LocalAIClient
+
+    # LLM returns two findings: one with a matching jurisdiction, one with an
+    # empty jurisdictions list (regression case).
+    llm_payload = {
+        "summary": "Mocked LLM summary",
+        "overall_confidence": 0.9,
+        "findings": [
+            {
+                "category": "Sale/Share",
+                "severity": "High",
+                "confidence": 0.9,
+                "excerpt": "we may sell your personal information",
+                "explanation": "Sale/share disclosure without an opt-out.",
+                "jurisdictions": ["US-CA"],
+                "evidence": {
+                    "line_start": 1,
+                    "line_end": 1,
+                    "legal_basis": ["CCPA §1798.120"],
+                },
+            },
+            {
+                "category": "Unclaimed Category",
+                "severity": "High",
+                "confidence": 0.9,
+                "excerpt": "opaque clause with no jurisdiction tag",
+                "explanation": "LLM produced a finding without declaring any jurisdiction.",
+                "jurisdictions": [],
+                "evidence": {
+                    "line_start": 2,
+                    "line_end": 2,
+                    "legal_basis": ["general terms"],
+                },
+            },
+        ],
+    }
+
+    async def fake_llm_analyze(self, *args, **kwargs):
+        return llm_payload
+
+    monkeypatch.setattr(LocalAIClient, "analyze", fake_llm_analyze)
+
+    # Bypass legal-KB retrieval — return an empty list so the test focuses on
+    # the jurisdiction filter itself.
+    class _NoopKB:
+        async def retrieve(self, *args, **kwargs):
+            return []
+
+    monkeypatch.setattr(analyzer_module, "get_legal_kb", lambda: _NoopKB())
+
+    # Analyze with US-CA-only filter. The empty-jurisdiction finding must be
+    # dropped; the US-CA finding must survive.
+    result = asyncio.run(analyze_text("we may sell your personal information.", ["US-CA"]))
+    categories = {finding.category for finding in result.payload.findings}
+    assert "Unclaimed Category" not in categories, (
+        "empty-jurisdiction LLM findings must be dropped by the post-LLM filter"
+    )
+
+
+def test_llm_jurisdiction_filter_keeps_matching_finding(monkeypatch):
+    """Sanity check for the tightened filter: matching jurisdictions still pass."""
+    import asyncio
+
+    from app.services import analyzer as analyzer_module
+    from app.services.analyzer import analyze_text
+    from app.services.localai import LocalAIClient
+
+    llm_payload = {
+        "summary": "Mocked",
+        "overall_confidence": 0.9,
+        "findings": [
+            {
+                "category": "Cross-Border Transfer",
+                "severity": "Medium",
+                "confidence": 0.85,
+                "excerpt": "personal data is transferred outside the EU",
+                "explanation": "GDPR-relevant cross-border transfer.",
+                "jurisdictions": ["GDPR"],
+                "evidence": {
+                    "line_start": 1,
+                    "line_end": 1,
+                    "legal_basis": ["GDPR Ch. V"],
+                },
+            }
+        ],
+    }
+
+    async def fake_llm_analyze(self, *args, **kwargs):
+        return llm_payload
+
+    monkeypatch.setattr(LocalAIClient, "analyze", fake_llm_analyze)
+
+    class _NoopKB:
+        async def retrieve(self, *args, **kwargs):
+            return []
+
+    monkeypatch.setattr(analyzer_module, "get_legal_kb", lambda: _NoopKB())
+
+    result = asyncio.run(
+        analyze_text("personal data is transferred outside the EU.", ["GDPR"])
+    )
+    categories = {finding.category for finding in result.payload.findings}
+    assert "Cross-Border Transfer" in categories
