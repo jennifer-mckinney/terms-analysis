@@ -20,6 +20,8 @@
 #     snapshots        test_snapshots_and_diffs.py.
 #     validation       test_validation.py.
 #     smoke            test_all.py only (broad smoke suite).
+#     simplification   Shell assertions for simplify_finding_for_context() (headless, no backend).
+#     smoke-live       Live HTTP smoke tests via curl+jq (requires backend running).
 #
 # Exit codes:
 #     0    All tests pass.
@@ -150,6 +152,12 @@ case "${scope}" in
         ;;
     smoke)
         args=("${TESTS_DIR}/test_all.py")
+        ;;
+    simplification)
+        exec "${REPO_ROOT}/scripts/testing/simplification-check.sh"
+        ;;
+    smoke-live)
+        exec "${REPO_ROOT}/scripts/testing/smoke-test.sh"
         ;;
     *)
         echo "ERROR: unknown scope '${scope}'" >&2
