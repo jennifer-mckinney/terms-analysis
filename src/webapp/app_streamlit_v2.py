@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import html
 import os
+import re
 from typing import Optional
 
 import requests
@@ -642,32 +643,75 @@ def _selected_context_labels() -> list[str]:
 
 
 def _highlight_document_with_findings(document_text: str, findings: list[dict]) -> str:
-    """Return document text with each finding excerpt wrapped in a highlight span.
+    """Return document text with every finding excerpt occurrence wrapped in a highlight span.
 
-    Uses ``str.replace`` on the raw document text after HTML-escaping the
-    document and each excerpt separately so nothing user-controlled leaks
-    into the rendered HTML. The highlight span uses the ``pr-verify-hl``
-    class (light-teal background per v2 palette). No JavaScript.
+    Uses ``re.finditer`` on the HTML-escaped document to find every match of
+    each finding's HTML-escaped excerpt, then splices in ``<span class=
+    "pr-verify-hl">...</span>`` around each non-overlapping match. HTML-escape
+    happens once on the document body and once on each excerpt so nothing
+    user-controlled leaks into rendered HTML.
 
-    Falls back to a bold + quote-mark decoration if an excerpt string is
-    empty (rendering '""' would look broken).
+    Reviewer P9 (grumpy F8): the prior implementation deduplicated on the
+    excerpt string via a ``seen: set``. Two findings pointing at the same
+    quote (e.g. an arbitration clause cited by both a "class action waiver"
+    and a "mandatory arbitration" rule) would only get one highlight, so
+    the Verify view under-reports coverage. We now wrap every occurrence of
+    every excerpt, tracking already-wrapped char ranges so overlapping
+    matches don't nest spans.
+
+    An empty excerpt is skipped rather than rendered.
     """
     escaped_doc = html.escape(document_text)
-    # De-duplicate excerpts so we don't wrap already-wrapped text on repeats.
-    # Order preserved so identical excerpts still get one highlight span.
-    seen: set[str] = set()
-    for f in findings:
+    open_tag_prefix = '<span class="pr-verify-hl">'
+    close_tag = "</span>"
+
+    # Sort matches longest-first so a long quote wraps before a shorter
+    # substring of it wraps mid-quote. Ties broken by original finding order.
+    ranked: list[tuple[int, int, str]] = []  # (neg_len, order, escaped_excerpt)
+    for order, f in enumerate(findings):
         excerpt = str(f.get("excerpt") or "").strip()
-        if not excerpt or excerpt in seen:
+        if not excerpt:
             continue
-        seen.add(excerpt)
         escaped_excerpt = html.escape(excerpt)
-        if escaped_excerpt in escaped_doc:
-            escaped_doc = escaped_doc.replace(
-                escaped_excerpt,
-                f'<span class="pr-verify-hl">{escaped_excerpt}</span>',
-                1,
-            )
+        if not escaped_excerpt:
+            continue
+        ranked.append((-len(escaped_excerpt), order, escaped_excerpt))
+    ranked.sort()
+
+    # Range-tracking list holds already-wrapped [start, end) intervals in
+    # `escaped_doc`. A new match that overlaps any existing range is skipped
+    # so we never nest a highlight span inside another.
+    wrapped_ranges: list[tuple[int, int]] = []
+
+    def _overlaps(start: int, end: int) -> bool:
+        for (rs, re_) in wrapped_ranges:
+            # Intervals overlap iff start < re_ and rs < end.
+            if start < re_ and rs < end:
+                return True
+        return False
+
+    # Do the wraps back-to-front on the string so earlier offsets remain
+    # valid as we splice. Collect all (start, end) matches first, filter by
+    # overlap, then apply in descending order.
+    pending: list[tuple[int, int]] = []
+    for _neg_len, _order, escaped_excerpt in ranked:
+        for m in re.finditer(re.escape(escaped_excerpt), escaped_doc):
+            start, end = m.start(), m.end()
+            if _overlaps(start, end):
+                continue
+            wrapped_ranges.append((start, end))
+            pending.append((start, end))
+
+    # Apply splices in descending order of start so index arithmetic holds.
+    pending.sort(key=lambda x: x[0], reverse=True)
+    for start, end in pending:
+        escaped_doc = (
+            escaped_doc[:start]
+            + open_tag_prefix
+            + escaped_doc[start:end]
+            + close_tag
+            + escaped_doc[end:]
+        )
     return escaped_doc
 
 
