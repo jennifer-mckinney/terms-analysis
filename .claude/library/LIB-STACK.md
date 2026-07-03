@@ -66,7 +66,7 @@ RAG pipeline is implemented (`services/legal_kb.py`, `services/embedding.py`) us
 
 | Tech | Purpose |
 |------|---------|
-| Streamlit | Primary UI (`app_streamlit.py`, served on :8501 by `run.sh`) |
+| Streamlit | Primary UI (`app_streamlit_v2.py`, served on :8501 by `run.sh`; `app_streamlit_legacy.py` retained for reference) |
 | Vanilla HTML/CSS/JS | Fallback UI (`index.html`/`app.js`/`style.css`, :8000) — no build step, no bundler |
 | Font Awesome | Icons (CSS-only) |
 | CSS custom properties | Design tokens, light/dark theming |

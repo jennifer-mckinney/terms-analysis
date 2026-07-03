@@ -1033,9 +1033,13 @@ def _match_stats(patterns: Iterable[str], text: str) -> tuple[Optional[re.Match]
 
 
 def detect_findings(text: str, jurisdictions: List[Jurisdiction]) -> List[Finding]:
+    # Empty ``jurisdictions`` == "no filter". This is a global tool: an unknown
+    # reader location means "run every rule" rather than "assume US-CA + GDPR".
+    # See Fix 4 in the plain-language redesign spec.
+    jurisdiction_filter = set(jurisdictions) if jurisdictions else None
     findings: List[Finding] = []
     for rule in PATTERNS:
-        if not set(rule.jurisdictions).intersection(jurisdictions):
+        if jurisdiction_filter is not None and not set(rule.jurisdictions).intersection(jurisdiction_filter):
             continue
         match, pattern_hits, match_count = _match_stats(rule.patterns, text)
         if not match:

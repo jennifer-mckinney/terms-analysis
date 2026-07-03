@@ -329,12 +329,13 @@ class TestInferAll:
         assert "statute" in result.detected_signals
 
     def test_inference_infer_all_location_needed_true_when_no_signals(self):
+        # Global-tool contract (Fix 4): no signals means empty jurisdictions,
+        # not a US-CA + GDPR default. Callers must interpret empty as
+        # "no filter" — the tool is used worldwide.
         result = infer_all(None, "generic policy text with no cues")
         assert result.location_needed is True
-        # Fallback jurisdictions applied.
-        assert "US-CA" in result.jurisdictions
-        assert "GDPR" in result.jurisdictions
-        # Fallback signal recorded so the UI can explain.
+        assert result.jurisdictions == []
+        # Fallback signal still recorded so the UI can explain to the reader.
         assert "fallback" in result.detected_signals
 
     def test_inference_infer_all_location_needed_false_when_signals_present(self):
@@ -360,3 +361,122 @@ class TestInferAll:
         )
         result = infer_all(None, text)
         assert result.jurisdictions.count("US-CA") == 1
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: /infer request caching (lru_cache keyed on (url, sha256(text)))
+# ---------------------------------------------------------------------------
+
+
+class TestInferAllCaching:
+    def _clear_cache(self) -> None:
+        from app.services.inference import _infer_all_cached
+        _infer_all_cached.cache_clear()
+
+    def test_inference_infer_all_cache_hits_second_call(self):
+        # Second call with identical args returns from cache.
+        from app.services.inference import _infer_all_cached, infer_all
+
+        self._clear_cache()
+        url = "https://example.co.uk/privacy"
+        text = "This policy honours the GDPR."
+        infer_all(url, text)
+        infer_all(url, text)
+        info = _infer_all_cached.cache_info()
+        assert info.hits >= 1, "expected at least one cache hit on repeated infer_all call"
+        assert info.misses == 1, "expected exactly one miss for the first call"
+
+    def test_inference_infer_all_cache_different_text_misses(self):
+        from app.services.inference import _infer_all_cached, infer_all
+
+        self._clear_cache()
+        infer_all(None, "text A")
+        infer_all(None, "text B")
+        info = _infer_all_cached.cache_info()
+        assert info.misses == 2, "distinct text bodies must produce distinct cache entries"
+
+    def test_inference_infer_all_cache_returns_equal_response(self):
+        # Cache short-circuit still returns a semantically identical response.
+        from app.services.inference import infer_all
+
+        self._clear_cache()
+        a = infer_all("https://example.co.uk/privacy", "GDPR text")
+        b = infer_all("https://example.co.uk/privacy", "GDPR text")
+        assert a.model_dump() == b.model_dump()
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: observability — infer_fallback log fires when no signals detected
+# ---------------------------------------------------------------------------
+
+
+class TestInferFallbackLogging:
+    def test_inference_infer_fallback_logs_when_no_signals(self, caplog):
+        import logging
+
+        from app.services.inference import _infer_all_cached, infer_all
+
+        _infer_all_cached.cache_clear()
+        with caplog.at_level(logging.INFO, logger="app.services.inference"):
+            infer_all(None, "text with no jurisdiction cues at all")
+
+        events = [
+            r.__dict__.get("event")
+            for r in caplog.records
+            if r.name == "app.services.inference"
+        ]
+        assert "infer_fallback" in events, (
+            "expected structured infer_fallback event when no signals fire"
+        )
+
+    def test_inference_infer_no_fallback_log_when_signals_present(self, caplog):
+        import logging
+
+        from app.services.inference import _infer_all_cached, infer_all
+
+        _infer_all_cached.cache_clear()
+        with caplog.at_level(logging.INFO, logger="app.services.inference"):
+            infer_all("https://example.fr/privacy", None)
+
+        events = [
+            r.__dict__.get("event")
+            for r in caplog.records
+            if r.name == "app.services.inference"
+        ]
+        assert "infer_fallback" not in events
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: text size limit — schema-level max_length + defensive truncation
+# ---------------------------------------------------------------------------
+
+
+class TestInferTextSizeLimit:
+    def test_inference_schema_rejects_oversized_text(self):
+        # InferRequest.text max_length=200_000 rejects anything larger.
+        import pydantic
+
+        from app.schemas import InferRequest
+
+        oversized = "x" * 200_001
+        with pytest.raises(pydantic.ValidationError):
+            InferRequest(text=oversized)
+
+    def test_inference_schema_accepts_max_length_text(self):
+        from app.schemas import InferRequest
+
+        # Boundary — 200_000 exactly must be accepted.
+        InferRequest(text="x" * 200_000)
+
+    def test_inference_infer_all_truncates_oversized_text_defensively(self):
+        # Direct callers (evaluation scripts, etc.) bypass the pydantic
+        # validator, so infer_all itself must clamp the length.
+        from app.services.inference import _infer_all_cached, infer_all
+
+        _infer_all_cached.cache_clear()
+        # 300k chars of noise — the regex sweep would be very expensive on
+        # the full body. Must not raise; response must still be well-formed.
+        oversized = "generic policy text with no cues " * 10000
+        result = infer_all(None, oversized)
+        assert result.location_needed is True
+        assert result.jurisdictions == []

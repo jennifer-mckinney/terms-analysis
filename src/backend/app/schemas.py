@@ -39,6 +39,75 @@ Jurisdiction = Literal[
 ]
 Severity = Literal["Low", "Medium", "High", "Critical"]
 
+# ── Canonical finding categories ─────────────────────────────────────────────
+# Single source of truth for category strings used across ``rules.py``,
+# ``analyzer.py``, and ``context.py``. Modules that key dicts on category
+# names must validate their keys against this set at import time so drift
+# fails loudly instead of silently mis-mapping.
+#
+# NOTE: ``Sale/Share`` (canonical, emitted by rules) and ``Data Sale / Sharing``
+# (defensive alias for LLM-generated variants) both live here on purpose.
+CATEGORIES: frozenset[str] = frozenset({
+    # Data-collection categories
+    "Sensitive Data",
+    "Sensitive Data / Opt-Out",
+    "Biometric Data",
+    "Health Data",
+    "Financial Data",
+    "Children's Privacy",
+    "Collection Notice",
+    "Minors",
+    # Data-use categories
+    "AI Training",
+    "AI Training Opt-Out",
+    "AI Training (Opt-Out)",  # alias used by ``_CATEGORY_IRP_DEFAULTS``
+    "Sale/Share",
+    "Data Sale / Sharing",  # LLM alias
+    "Tracking / Profiling",
+    "Tracking & Consent",
+    "Marketing Communications",
+    "Purpose Limitation",
+    "ADM",
+    "Automated Decision-Making",
+    "Consequential AI Decisions",
+    "High-Risk AI",
+    "Prohibited AI",
+    "GPAI / Generative AI",
+    "AI-Generated Content",
+    "Algorithmic Accountability",
+    "Human Oversight",
+    "AI Non-Discrimination",
+    # Terms-of-use categories
+    "Liability",
+    "Unilateral Changes",
+    "Dark Patterns",
+    "Deceptive Practices",
+    "Retention",
+    "Breach Notification",
+    "Data Security",
+    "Consent",
+    # Privacy-rights categories
+    "User Rights",
+    "Data Rights",
+    "Individual Rights",
+    "Privacy Rights",
+    "Cross-Border Transfer",
+    "COPPA Compliance",
+    "HIPAA Compliance",
+    "FERPA Compliance",
+    "PCI DSS Compliance",
+    "PIPEDA Consent",
+    "LGPD Rights",
+    "APPI Disclosure",
+    "DPDP Consent",
+    "POPIA Processing",
+    "PIPA Processing",
+    "APP Privacy",
+    "UK Data Rights",
+    "Privacy as Human Right",
+    "Serious Privacy Invasion",
+})
+
 DocType = Literal[
     "Privacy Policy",
     "Terms of Service",
@@ -101,7 +170,7 @@ class AnalyzeRequest(BaseModel):
     doc_type: Optional[DocType] = None
     industry: Optional[IndustryProfile] = None
     source_url: Optional[str] = None
-    jurisdictions: List[Jurisdiction] = Field(default_factory=lambda: ["US-CA", "GDPR"])
+    jurisdictions: List[Jurisdiction] = Field(default_factory=list)
     mode: Literal["full", "quick"] = Field(default="full", description="Analysis mode: 'full' for complete analysis, 'quick' for high-severity rules only")
     context: List[ContextChip] = Field(default_factory=list, description="Context chip selections from intake (biases top-things surfacing)")
 
@@ -128,7 +197,7 @@ class AnalyzeUrlRequest(BaseModel):
     name: Optional[str] = None
     doc_type: Optional[DocType] = None
     industry: Optional[IndustryProfile] = None
-    jurisdictions: List[Jurisdiction] = Field(default_factory=lambda: ["US-CA", "GDPR"])
+    jurisdictions: List[Jurisdiction] = Field(default_factory=list)
     mode: Literal["full", "quick"] = Field(default="full", description="Analysis mode: 'full' for complete analysis, 'quick' for high-severity rules only")
     context: List[ContextChip] = Field(default_factory=list, description="Context chip selections from intake (biases top-things surfacing)")
 
@@ -186,6 +255,10 @@ class AnalysisPayload(BaseModel):
     top_by_domain: dict[str, list[Finding]] = Field(
         default_factory=dict,
         description="Top findings grouped by domain (Data, Data use, Terms of use, Privacy rights). Max 2 per domain, 8 total.",
+    )
+    action_items: List[str] = Field(
+        default_factory=list,
+        description="Suggested reader-actionable next steps derived from findings + jurisdictions. Backend-generated so the frontend does not have to know the derivation rules.",
     )
 
 
@@ -261,7 +334,11 @@ class WatchlistCreateRequest(BaseModel):
 class InferRequest(BaseModel):
     """Request to infer jurisdiction, doc_type, and industry from URL and/or text."""
     url: Optional[str] = Field(default=None, description="Source URL (used for TLD signals)")
-    text: Optional[str] = Field(default=None, description="Policy text (used for statute / geographic / regulatory-body signals)")
+    text: Optional[str] = Field(
+        default=None,
+        max_length=200_000,
+        description="Policy text (used for statute / geographic / regulatory-body signals). Capped at 200k chars to bound cache and regex work.",
+    )
     context: List[ContextChip] = Field(default_factory=list, description="Context chip selections from the intake")
 
     @field_validator("text")
@@ -307,7 +384,7 @@ class AnalyzeBatchRequest(BaseModel):
     """Request for batch analysis of multiple documents"""
     items: List[BatchItem] = Field(..., min_items=1, description="Documents to analyze")
     industry: Optional[IndustryProfile] = None
-    jurisdictions: List[Jurisdiction] = Field(default_factory=lambda: ["US-CA", "GDPR"])
+    jurisdictions: List[Jurisdiction] = Field(default_factory=list)
     mode: Literal["full", "quick"] = Field(default="full", description="Analysis mode: 'full' for complete analysis, 'quick' for high-severity rules only")
     detect_cross_references: bool = Field(default=True, description="Detect references between documents")
     context: List[ContextChip] = Field(default_factory=list, description="Context chip selections from intake (biases top-things surfacing)")

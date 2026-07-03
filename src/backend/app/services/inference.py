@@ -12,20 +12,35 @@ Signals are ranked by precision (highest to lowest):
   3. Regulatory body mentions (ICO, CNIL, ANPD, ...).
   4. Geographic scope phrases ("California residents", "EEA data subjects", ...).
   5. Currency + language pairing (£ + UK phrase, € + European phrase).
-  6. Language heuristic (French/German/Italian/Spanish/Dutch → GDPR default).
+  6. Language heuristic (French/German/Italian/Spanish/Dutch → GDPR).
 
 Deduplicates hits while preserving insertion order, so higher-precision signals
-appear first in the result. Falls back to ["US-CA", "GDPR"] when nothing fires
-and reports ``location_needed=True`` so the intake can prompt the user.
+appear first in the result. When nothing fires, returns an empty
+``jurisdictions`` list and reports ``location_needed=True``. This is a global
+tool: unknown-user location means "no filter", not "assume US-CA + GDPR".
 """
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import re
+from functools import lru_cache
 from typing import Optional
 from urllib.parse import urlparse
 
 from ..schemas import DocType, IndustryProfile, InferResponse, Jurisdiction
+
+logger = logging.getLogger(__name__)
+
+# Cap defensively against runaway payloads. Mirrors ``InferRequest.text``
+# max_length so the cache and downstream regex work are bounded.
+_MAX_TEXT_LENGTH = 200_000
+
+# lru_cache size for the compiled InferResponse. 128 entries * ~a few KB
+# per response keeps the memory footprint bounded while covering typical
+# Streamlit rerun churn.
+_INFER_CACHE_SIZE = 128
 
 
 # ── URL TLD → jurisdiction map ───────────────────────────────────────────────
@@ -66,7 +81,10 @@ _TLD_JURISDICTIONS: list[tuple[str, list[Jurisdiction]]] = [
 # ── Statute mention patterns → jurisdiction(s) ───────────────────────────────
 # Order matters only for the human-readable signal log; jurisdictions are
 # de-duplicated later. Patterns are case-insensitive.
-_STATUTE_PATTERNS: list[tuple[str, list[Jurisdiction], str]] = [
+# NOTE: source pattern strings are kept in ``_STATUTE_PATTERN_SOURCES`` so
+# tests can introspect them; compiled versions are built once at import time
+# below (Fix 7: regex pre-compilation).
+_STATUTE_PATTERN_SOURCES: list[tuple[str, list[Jurisdiction], str]] = [
     # California
     (r"\bCCPA\b", ["US-CA"], "CCPA"),
     (r"\bCalifornia Consumer Privacy Act\b", ["US-CA"], "California Consumer Privacy Act"),
@@ -116,6 +134,13 @@ _STATUTE_PATTERNS: list[tuple[str, list[Jurisdiction], str]] = [
     (r"\bHIPAA\b", ["US-FED"], "HIPAA"),
 ]
 
+# Pre-compile the statute patterns once at import time so the hot path avoids
+# repeated ``re.compile`` calls (Fix 7).
+_STATUTE_PATTERNS: list[tuple[re.Pattern[str], list[Jurisdiction], str]] = [
+    (re.compile(source, re.IGNORECASE), juris, label)
+    for source, juris, label in _STATUTE_PATTERN_SOURCES
+]
+
 # CPA is Colorado only when Colorado is otherwise implicated; handled separately
 # so a Canadian "CPA" (chartered accountant) doesn't false-trigger.
 _CPA_PATTERN = re.compile(r"\bCPA\b", re.IGNORECASE)
@@ -123,7 +148,7 @@ _COLORADO_HINT = re.compile(r"\bColorado\b|\bC\.R\.S\.\b|\bSB\s*205\b", re.IGNOR
 
 
 # ── Regulatory body → jurisdiction ───────────────────────────────────────────
-_REG_BODY_PATTERNS: list[tuple[str, list[Jurisdiction], str]] = [
+_REG_BODY_PATTERN_SOURCES: list[tuple[str, list[Jurisdiction], str]] = [
     (r"\bCNIL\b", ["GDPR"], "CNIL (France)"),
     (r"\bICO\b", ["UK-GDPR"], "ICO (UK)"),
     (r"\bAEPD\b", ["GDPR"], "AEPD (Spain)"),
@@ -134,8 +159,17 @@ _REG_BODY_PATTERNS: list[tuple[str, list[Jurisdiction], str]] = [
 ]
 
 
+# Regulator patterns compiled at import time (Fix 7).
+# NOTE: the original code searched regulator patterns case-sensitive; preserve
+# that behaviour by not passing IGNORECASE here.
+_REG_BODY_PATTERNS: list[tuple[re.Pattern[str], list[Jurisdiction], str]] = [
+    (re.compile(source), juris, label)
+    for source, juris, label in _REG_BODY_PATTERN_SOURCES
+]
+
+
 # ── Geographic scope phrases → jurisdiction ──────────────────────────────────
-_GEO_PATTERNS: list[tuple[str, list[Jurisdiction], str]] = [
+_GEO_PATTERN_SOURCES: list[tuple[str, list[Jurisdiction], str]] = [
     (r"\bCalifornia residents?\b", ["US-CA"], "California residents"),
     (r"\bEEA data subjects?\b", ["GDPR"], "EEA data subjects"),
     (r"\bEuropean Economic Area\b", ["GDPR"], "European Economic Area"),
@@ -153,6 +187,13 @@ _GEO_PATTERNS: list[tuple[str, list[Jurisdiction], str]] = [
     (r"\bAustralian residents?\b", ["APP"], "Australian residents"),
     (r"\bBrazilian residents?\b", ["LGPD"], "Brazilian residents"),
     (r"\bJapanese residents?\b", ["APPI"], "Japanese residents"),
+]
+
+
+# Geo patterns compiled once at import time (Fix 7).
+_GEO_PATTERNS: list[tuple[re.Pattern[str], list[Jurisdiction], str]] = [
+    (re.compile(source, re.IGNORECASE), juris, label)
+    for source, juris, label in _GEO_PATTERN_SOURCES
 ]
 
 
@@ -212,6 +253,17 @@ _SOCIAL_MEDIA_DOMAINS = {
 _AI_TECH_DOMAINS = {
     "openai.com", "anthropic.com", "perplexity.ai",
 }
+
+
+# ── Pre-compiled industry-classification regexes (Fix 7) ─────────────────────
+_RE_INDUSTRY_HEALTHCARE = re.compile(r"\b(hipaa|patient|medical|health(?:care)?)\b")
+_RE_INDUSTRY_FINANCE = re.compile(r"\b(bank|credit|finance|financial|investment)\b")
+_RE_INDUSTRY_EDUCATION = re.compile(r"\b(school|university|student|learning|educat\w*)\b")
+_RE_INDUSTRY_GAMING = re.compile(r"\b(game|gaming|play(?:er)?s?)\b")
+_RE_INDUSTRY_AI = re.compile(
+    r"\b(ai|ml|machine learning|chatbot|openai|anthropic|large language model|llm)\b"
+)
+_RE_INDUSTRY_RETAIL = re.compile(r"\b(shop|store|commerce|retail|checkout|cart)\b")
 
 
 def _extract_hostname(url: Optional[str]) -> Optional[str]:
@@ -278,10 +330,10 @@ def infer_jurisdictions(
                 ordered.extend(jurisdictions)
                 break  # only the longest-matching suffix
 
-    # 2. Explicit statutes
+    # 2. Explicit statutes (patterns pre-compiled at module load — Fix 7)
     if text:
         for pattern, jurisdictions, label in _STATUTE_PATTERNS:
-            if re.search(pattern, text, re.IGNORECASE):
+            if pattern.search(text):
                 signals["statute"].append(label)
                 ordered.extend(jurisdictions)
         # CPA is Colorado only in a Colorado context
@@ -289,17 +341,17 @@ def infer_jurisdictions(
             signals["statute"].append("CPA (Colorado context)")
             ordered.append("US-CO")
 
-    # 3. Regulatory bodies
+    # 3. Regulatory bodies (patterns pre-compiled — Fix 7)
     if text:
         for pattern, jurisdictions, label in _REG_BODY_PATTERNS:
-            if re.search(pattern, text):
+            if pattern.search(text):
                 signals["regulator"].append(label)
                 ordered.extend(jurisdictions)
 
-    # 4. Geographic scope phrases
+    # 4. Geographic scope phrases (patterns pre-compiled — Fix 7)
     if text:
         for pattern, jurisdictions, label in _GEO_PATTERNS:
-            if re.search(pattern, text, re.IGNORECASE):
+            if pattern.search(text):
                 signals["geography"].append(label)
                 ordered.extend(jurisdictions)
 
@@ -401,42 +453,56 @@ def infer_industry(
     if not corpus:
         return "General"
 
-    # Order matters: check more-specific patterns first.
-    if re.search(r"\b(hipaa|patient|medical|health(?:care)?)\b", corpus):
+    # Order matters: check more-specific patterns first. Patterns are
+    # pre-compiled at module scope (Fix 7).
+    if _RE_INDUSTRY_HEALTHCARE.search(corpus):
         return "Healthcare"
-    if re.search(r"\b(bank|credit|finance|financial|investment)\b", corpus):
+    if _RE_INDUSTRY_FINANCE.search(corpus):
         return "Finance"
-    if re.search(r"\b(school|university|student|learning|educat\w*)\b", corpus) or ".edu" in hostname:
+    if _RE_INDUSTRY_EDUCATION.search(corpus) or ".edu" in hostname:
         return "Education"
-    if re.search(r"\b(game|gaming|play(?:er)?s?)\b", corpus):
+    if _RE_INDUSTRY_GAMING.search(corpus):
         return "Gaming"
-    if re.search(
-        r"\b(ai|ml|machine learning|chatbot|openai|anthropic|large language model|llm)\b",
-        corpus,
-    ):
+    if _RE_INDUSTRY_AI.search(corpus):
         return "AI / Tech Platform"
-    if re.search(r"\b(shop|store|commerce|retail|checkout|cart)\b", corpus):
+    if _RE_INDUSTRY_RETAIL.search(corpus):
         return "Retail"
 
     return "General"
 
 
-def infer_all(url: Optional[str], text: Optional[str]) -> InferResponse:
-    """Combined inference.
+def _infer_all_impl(url: Optional[str], text: Optional[str]) -> InferResponse:
+    """Combined inference (uncached implementation).
 
     Returns an ``InferResponse`` with jurisdictions, doc_type, industry,
-    ``location_needed`` (True when nothing was detected), and
-    ``detected_signals`` for downstream transparency in the UI.
+    ``location_needed`` (True when no jurisdiction signals were detected),
+    and ``detected_signals`` for downstream transparency in the UI.
+
+    **Global-tool contract:** when no jurisdiction signals fire, the returned
+    ``jurisdictions`` list is empty (no US-CA + GDPR fallback). Downstream
+    callers must interpret an empty list as "no filter" — the tool is used
+    worldwide and cannot assume a default reader location.
     """
     jurisdictions, signals = infer_jurisdictions(url, text)
     doc_type = infer_doc_type(url, text)
     industry = infer_industry(url, text)
 
-    # location_needed: True when we had to fall back to defaults.
+    # location_needed: True when nothing fired. We do NOT populate a default
+    # jurisdiction list — see module docstring (global-tool rule).
     location_needed = len(jurisdictions) == 0
     if location_needed:
-        jurisdictions = ["US-CA", "GDPR"]
-        signals["fallback"] = ["default US-CA + GDPR (no location signals)"]
+        signals["fallback"] = [
+            "no signals detected — jurisdictions returned empty"
+        ]
+        logger.info(
+            "inference_fallback",
+            extra={
+                "event": "infer_fallback",
+                "url": url,
+                "text_present": bool(text),
+                "reason": "no_signals_detected",
+            },
+        )
 
     # Drop empty signal buckets so the response stays compact.
     trimmed_signals = {k: v for k, v in signals.items() if v}
@@ -448,3 +514,40 @@ def infer_all(url: Optional[str], text: Optional[str]) -> InferResponse:
         location_needed=location_needed,
         detected_signals=trimmed_signals,
     )
+
+
+@lru_cache(maxsize=_INFER_CACHE_SIZE)
+def _infer_all_cached(
+    url: Optional[str], text_hash: Optional[str], text: Optional[str]
+) -> InferResponse:
+    """Cache wrapper keyed on ``(url, sha256(text))``.
+
+    ``text_hash`` is the actual cache key discriminator — ``text`` is passed
+    through so the underlying implementation can reconstitute the response
+    (patterns are matched against the full body, not the hash).
+    """
+    # ``text_hash`` unused inside — it exists purely to make the lru_cache
+    # key stable and bounded even when the underlying text is very large.
+    del text_hash
+    return _infer_all_impl(url, text)
+
+
+def infer_all(url: Optional[str], text: Optional[str]) -> InferResponse:
+    """Cached combined inference.
+
+    Streamlit reruns every widget interaction. Without a cache the backend
+    would re-run every regex against the same policy body on every keypress;
+    the ``lru_cache`` keyed on ``(url, sha256(text))`` collapses that back to
+    one real call per unique input (Fix 1).
+
+    Also defensively truncates oversized inputs (Fix 3) — the schema already
+    enforces a ``max_length`` on ``InferRequest.text`` but this guards direct
+    ``infer_all`` callers (evaluation scripts, tests) too.
+    """
+    # Fix 3: defensive text-length ceiling for direct callers.
+    if text is not None and len(text) > _MAX_TEXT_LENGTH:
+        text = text[:_MAX_TEXT_LENGTH]
+    text_hash = (
+        hashlib.sha256(text.encode("utf-8")).hexdigest() if text else None
+    )
+    return _infer_all_cached(url, text_hash, text)

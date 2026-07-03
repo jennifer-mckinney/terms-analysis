@@ -934,6 +934,85 @@ class TestAnalyzeCreatesReviewItem:
 
 
 # ===========================================================================
+# POST /analyze — Fix 4: empty jurisdictions == "no filter" (global-tool)
+# ===========================================================================
+
+
+class TestAnalyzeEmptyJurisdictionsNoFilter:
+    def test_main_analyze_empty_jurisdictions_returns_findings_across_all_rules(
+        self, app_client, db_session, monkeypatch
+    ):
+        """When ``jurisdictions=[]`` is sent, the analyzer must run every rule.
+
+        Uses a monkeypatched ``LocalAIClient`` so the LLM branch is stubbed
+        out; the assertion focuses on rule-level detection surviving with no
+        jurisdiction filter.
+        """
+        from app.services import analyzer as analyzer_module
+        from app.services.localai import LocalAIClient
+
+        async def fake_llm_analyze(self, *args, **kwargs):
+            return None  # skip LLM findings — rule-only path
+
+        monkeypatch.setattr(LocalAIClient, "analyze", fake_llm_analyze)
+
+        class _NoopKB:
+            async def retrieve(self, *args, **kwargs):
+                return []
+
+        monkeypatch.setattr(analyzer_module, "get_legal_kb", lambda: _NoopKB())
+
+        # Text hits categories under multiple jurisdictions — CCPA (Sale/Share)
+        # plus GDPR (ADM) plus something from a non-US-CA / non-GDPR rule.
+        text = (
+            "We sell your personal information. "
+            "We use automated decision-making. "
+            "Under APPI Japanese residents have rights."
+        )
+        response = app_client.post(
+            "/analyze", json={"text": text, "jurisdictions": []}
+        )
+        assert response.status_code == 200
+        body = response.json()
+        categories = {f["category"] for f in body["findings"]}
+        # With no filter we expect coverage beyond just US-CA + GDPR.
+        assert categories, "no-filter analyze should surface findings"
+        # The response echoes jurisdictions (empty list preserved).
+        assert body["jurisdictions"] == []
+
+    def test_main_analyze_empty_jurisdictions_populates_action_items(
+        self, app_client, db_session, monkeypatch
+    ):
+        """Fix 8: /analyze payload must include backend-generated action_items."""
+        from app.services import analyzer as analyzer_module
+        from app.services.localai import LocalAIClient
+
+        async def fake_llm_analyze(self, *args, **kwargs):
+            return None
+
+        monkeypatch.setattr(LocalAIClient, "analyze", fake_llm_analyze)
+
+        class _NoopKB:
+            async def retrieve(self, *args, **kwargs):
+                return []
+
+        monkeypatch.setattr(analyzer_module, "get_legal_kb", lambda: _NoopKB())
+
+        response = app_client.post(
+            "/analyze",
+            json={
+                "text": "We sell your personal information.",
+                "jurisdictions": ["US-CA"],
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert "action_items" in body
+        # Sale/Share + US-CA should yield the "Do Not Sell" line.
+        assert any("Do Not Sell" in line for line in body["action_items"])
+
+
+# ===========================================================================
 # _clamp helper
 # ===========================================================================
 
@@ -1295,6 +1374,10 @@ class TestInferEndpoint:
         assert body["location_needed"] is False
 
     def test_main_infer_location_needed_true_when_no_signals(self, app_client):
+        # Global-tool contract (Fix 4): no signals means empty jurisdictions.
+        # The old US-CA + GDPR default fallback has been removed — this is a
+        # global tool and can't assume a reader location. Callers must treat
+        # an empty list as "no filter".
         response = app_client.post(
             "/infer",
             json={"text": "generic policy paragraph without any statute cues"},
@@ -1302,9 +1385,9 @@ class TestInferEndpoint:
         assert response.status_code == 200
         body = response.json()
         assert body["location_needed"] is True
-        # Fallback jurisdictions are populated so the caller still has usable defaults.
-        assert "US-CA" in body["jurisdictions"]
-        assert "GDPR" in body["jurisdictions"]
+        assert body["jurisdictions"] == []
+        # The fallback signal is still recorded so the UI can explain.
+        assert "fallback" in body["detected_signals"]
 
     def test_main_infer_context_field_accepted_but_not_required(self, app_client):
         response = app_client.post(
@@ -1312,6 +1395,33 @@ class TestInferEndpoint:
             json={"url": "https://example.com/privacy", "context": ["for_child"]},
         )
         assert response.status_code == 200
+
+    def test_main_infer_fallback_logs_observability_event(self, app_client, caplog):
+        # Fix 2: the fallback path emits a structured infer_fallback log
+        # so production ops can measure how often inference actually succeeded.
+        import logging
+
+        from app.services.inference import _infer_all_cached
+
+        _infer_all_cached.cache_clear()
+        with caplog.at_level(logging.INFO, logger="app.services.inference"):
+            response = app_client.post(
+                "/infer",
+                json={"text": "another generic paragraph with no cues"},
+            )
+        assert response.status_code == 200
+        events = [
+            r.__dict__.get("event")
+            for r in caplog.records
+            if r.name == "app.services.inference"
+        ]
+        assert "infer_fallback" in events
+
+    def test_main_infer_schema_rejects_oversized_text(self, app_client):
+        # Fix 3: /infer must reject oversized text bodies via the schema-level
+        # ``max_length`` on ``InferRequest.text``.
+        response = app_client.post("/infer", json={"text": "x" * 200_001})
+        assert response.status_code == 422
 
 
 # ===========================================================================

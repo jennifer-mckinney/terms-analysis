@@ -26,7 +26,7 @@
 
 | Path | Purpose |
 |------|---------|
-| `src/webapp/` | Streamlit UI (primary, `app_streamlit.py`) + static SPA fallback: `index.html`, `app.js`, `style.css` |
+| `src/webapp/` | Streamlit UI (primary, `app_streamlit_v2.py` — issue #19 redesign; `app_streamlit_legacy.py` retained) + static SPA fallback: `index.html`, `app.js`, `style.css` |
 | `src/backend/app/` | FastAPI app: `main.py` (24 endpoints + `/health`), `services/`, `schemas.py`, `models.py` |
 | `src/backend/app/services/` | Core logic: `rules.py`, `analyzer.py`, `validation.py`, `ingest.py`, `localai.py`, `embedding.py`, `legal_kb.py`, `diffing.py`, `prompts.py` |
 | `src/backend/tests/` | pytest suite |

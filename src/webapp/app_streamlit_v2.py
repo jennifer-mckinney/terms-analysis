@@ -216,13 +216,14 @@ def init_state() -> None:
         "inferred_doc_type": None,
         "inferred_industry": None,
         "location_needed": False,
-        "location_country": "United States",
-        "location_state": "California",
+        # Location defaults are intentionally blank. This is a global tool and we
+        # must never infer/assume the reader's jurisdiction — session-state itself
+        # is the "cache" for a returning user in the same session; a fresh session
+        # leaves the selects empty until the reader chooses.
+        "location_country": None,
+        "location_state": None,
         "analysis_result": None,
         "analysis_error": None,
-        # Tracks whether we've already used /infer results to pre-fill the location
-        # dropdown. Once true, we never overwrite the user's subsequent choices.
-        "_location_prefilled_from_infer": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -271,7 +272,10 @@ def call_analyze(
     try:
         payload_common = {
             "context": context,
-            "jurisdictions": jurisdictions or ["US-CA", "GDPR"],
+            # Empty list is intentional: this is a global tool. When the reader
+            # hasn't chosen a location (or chose "Other"), we send [] and let the
+            # backend skip jurisdiction filtering. Never fall back to US-CA + GDPR.
+            "jurisdictions": jurisdictions,
             "doc_type": doc_type,
             "industry": industry,
             "mode": "full",
@@ -288,7 +292,7 @@ def call_analyze(
                 files={"file": file},
                 data={
                     "mode": "full",
-                    "jurisdictions": ",".join(jurisdictions or ["US-CA", "GDPR"]),
+                    "jurisdictions": ",".join(jurisdictions),
                     "industry": industry or "General",
                     "context": ",".join(context),
                 },
@@ -314,12 +318,19 @@ def call_analyze(
         return None
 
 
-def _location_to_jurisdictions(country: str, state: Optional[str]) -> list[str]:
-    """Translate country/state selections to backend jurisdiction codes.
+def _location_to_jurisdictions(country: Optional[str], state: Optional[str]) -> list[str]:
+    """Map the reader's location selection to jurisdiction codes.
 
-    Falls back to US-CA + GDPR when the country is not in the known map.
+    Returns [] (empty) when the reader hasn't chosen or chose "Other" — the
+    backend interprets empty as "no filter" (this is a global tool with an
+    unknown reader). NEVER falls back to US-CA + GDPR; that would silently
+    mis-scope findings for the ~90% of world users who aren't in California.
     """
+    if not country or country == "Other":
+        return []
     if country == "United States":
+        if not state or state == "Other state":
+            return ["US-FED"]
         mapping = {
             "California": "US-CA",
             "Texas": "US-TX",
@@ -328,7 +339,8 @@ def _location_to_jurisdictions(country: str, state: Optional[str]) -> list[str]:
             "Colorado": "US-CO",
             "Illinois": "US-IL",
         }
-        return [mapping.get(state or "California", "US-CA"), "US-FED"]
+        primary = mapping.get(state)
+        return [primary, "US-FED"] if primary else ["US-FED"]
     country_map = {
         "European Union": ["GDPR"],
         "Canada": ["PIPEDA"],
@@ -338,7 +350,7 @@ def _location_to_jurisdictions(country: str, state: Optional[str]) -> list[str]:
         "Australia": ["APP"],
         "Japan": ["APPI"],
     }
-    return country_map.get(country, ["US-CA", "GDPR"])
+    return country_map.get(country, [])  # unknown country -> no filter
 
 
 # ── Intake view ───────────────────────────────────────────────────────────────
@@ -423,10 +435,11 @@ def render_intake() -> None:
                 selections.append(chip["value"])
     st.session_state.context_selections = selections
 
-    # Try inference when we have some input. Inference signals are used to
-    # pre-fill defaults for the location dropdown, but the user's explicit
-    # location choice is always the source of truth for filtering findings.
-    inferred = None
+    # Inference is about the POLICY jurisdictions we detected in the text/URL —
+    # NOT about where the reader is. We surface these signals in results (so the
+    # reader can see what the policy talks about) but never use them to pre-fill
+    # or override the reader's location choice. The reader's location is a
+    # separate, explicit decision that must always come from the reader.
     if st.session_state.url_input or st.session_state.text_input:
         inferred = call_infer(
             st.session_state.url_input or None,
@@ -439,58 +452,10 @@ def render_intake() -> None:
             st.session_state.inferred_industry = inferred.get("industry")
             st.session_state.location_needed = bool(inferred.get("location_needed"))
 
-            # Pre-fill location dropdown defaults from inferred jurisdictions, but only
-            # on the first inference (don't overwrite if the user has already touched
-            # the dropdowns). Order matters — inferred_juris is precision-ranked.
-            if not st.session_state.get("_location_prefilled_from_infer"):
-                inferred_juris = st.session_state.inferred_juris or []
-                for j in inferred_juris:
-                    if j.startswith("US-") and j != "US-FED":
-                        st.session_state.location_country = "United States"
-                        us_state_map = {
-                            "US-CA": "California",
-                            "US-TX": "Texas",
-                            "US-NY": "New York",
-                            "US-VA": "Virginia",
-                            "US-CO": "Colorado",
-                            "US-IL": "Illinois",
-                        }
-                        if j in us_state_map and us_state_map[j] in US_STATE_OPTIONS:
-                            st.session_state.location_state = us_state_map[j]
-                        st.session_state._location_prefilled_from_infer = True
-                        break
-                    elif j == "GDPR":
-                        st.session_state.location_country = "European Union"
-                        st.session_state._location_prefilled_from_infer = True
-                        break
-                    elif j == "UK-GDPR":
-                        st.session_state.location_country = "United Kingdom"
-                        st.session_state._location_prefilled_from_infer = True
-                        break
-                    elif j == "PIPEDA":
-                        st.session_state.location_country = "Canada"
-                        st.session_state._location_prefilled_from_infer = True
-                        break
-                    elif j == "LGPD":
-                        st.session_state.location_country = "Brazil"
-                        st.session_state._location_prefilled_from_infer = True
-                        break
-                    elif j == "APP":
-                        st.session_state.location_country = "Australia"
-                        st.session_state._location_prefilled_from_infer = True
-                        break
-                    elif j == "APPI":
-                        st.session_state.location_country = "Japan"
-                        st.session_state._location_prefilled_from_infer = True
-                        break
-                    elif j == "DPDP":
-                        st.session_state.location_country = "India"
-                        st.session_state._location_prefilled_from_infer = True
-                        break
-
     # Always show the location question when the user has provided any input.
-    # It drives which jurisdictions the analysis actually filters findings by,
-    # so it must always be visible and editable — never hidden behind inference.
+    # Both country and region selects start blank — the session itself is the
+    # "cache" for a returning user, and a fresh session leaves them empty until
+    # the reader chooses. Never infer/prefill from the source document.
     if st.session_state.url_input or st.session_state.text_input or st.session_state.file_input:
         with st.container(border=True):
             st.markdown(
@@ -500,29 +465,47 @@ def render_intake() -> None:
             st.markdown(
                 "<div style='font-size:0.78rem;font-style:italic;color:var(--ink-muted);"
                 "margin-bottom:0.75rem;'>Different regions offer different protections. "
-                "Change this to focus the analysis on the right region.</div>",
+                "Pick your location to focus the analysis on the right region.</div>",
                 unsafe_allow_html=True,
             )
             col1, col2 = st.columns(2)
             with col1:
-                st.session_state.location_country = st.selectbox(
+                # index=None + placeholder requires Streamlit >= 1.27. This lets
+                # the select render truly blank on first paint instead of forcing
+                # a "United States" default.
+                current_country = st.session_state.location_country
+                country_idx = (
+                    COUNTRY_OPTIONS.index(current_country)
+                    if current_country in COUNTRY_OPTIONS
+                    else None
+                )
+                selected_country = st.selectbox(
                     "Country",
                     COUNTRY_OPTIONS,
-                    index=COUNTRY_OPTIONS.index(st.session_state.location_country),
+                    index=country_idx,
+                    placeholder="Select country",
                     label_visibility="collapsed",
                 )
+                # When the country changes, reset the region so we never carry a
+                # stale California/Texas/etc. selection into a non-US country.
+                if selected_country != st.session_state.location_country:
+                    st.session_state.location_country = selected_country
+                    st.session_state.location_state = None
             with col2:
+                # Region select only renders for the United States. Same blank
+                # default via index=None + placeholder.
                 if st.session_state.location_country == "United States":
                     current_state = st.session_state.location_state
-                    idx = (
+                    state_idx = (
                         US_STATE_OPTIONS.index(current_state)
                         if current_state in US_STATE_OPTIONS
-                        else 0
+                        else None
                     )
                     st.session_state.location_state = st.selectbox(
                         "Region",
                         US_STATE_OPTIONS,
-                        index=idx,
+                        index=state_idx,
+                        placeholder="Select state",
                         label_visibility="collapsed",
                     )
 
@@ -547,14 +530,21 @@ def run_analysis() -> None:
         return
 
     # The user's location choice is the source of truth for which jurisdictions
-    # to filter findings by. Inference (from URL TLD / policy text signals) is used
-    # only to pre-fill country/state defaults, not to override the user's explicit
-    # selection. Otherwise a user in California would see findings that apply only
-    # to Illinois or GDPR just because those signals appeared in the source policy.
+    # to filter findings by. Inference (from URL TLD / policy text signals) tells
+    # us what the POLICY talks about, not where the READER lives — never let it
+    # override the explicit selection or force a US-CA/GDPR default.
     jurisdictions = _location_to_jurisdictions(
         st.session_state.location_country,
         st.session_state.location_state,
     )
+    # No location chosen (or "Other" chosen) -> proceed with no filter, but let
+    # the reader know results won't be scoped to a specific region.
+    if not jurisdictions:
+        st.info(
+            "Analyzing without a regional filter. Findings may include rules "
+            "that don't apply to every jurisdiction. Pick a country in the "
+            "location card above to focus the analysis on a specific region."
+        )
 
     with st.spinner("Reading through the policy. This can take a minute."):
         result = call_analyze(
@@ -573,76 +563,6 @@ def run_analysis() -> None:
 
 
 # ── Results view ──────────────────────────────────────────────────────────────
-
-
-def _derive_action_items(result: dict) -> list[str]:
-    """Generate context-relevant, generic action items based on which categories appear in the findings.
-
-    Not service-specific. No hardcoded URLs. Points readers to general levers (opt-out,
-    deletion, supervisory authorities) tied to categories the tool actually detected.
-
-    Jurisdictions are drawn from session state (the request-side inferred_juris) because
-    the current AnalysisPayload schema does not echo the analyzed jurisdictions back.
-    """
-    findings = result.get("findings") or []
-    categories = {f.get("category", "") for f in findings}
-    # Jurisdictions live on the request side; look them up from session state as a fallback.
-    jurisdictions: set[str] = set(result.get("jurisdictions") or [])
-    if not jurisdictions:
-        session_juris = st.session_state.get("inferred_juris") or []
-        jurisdictions = set(session_juris)
-    lines: list[str] = []
-
-    if any(c in categories for c in ["Sale/Share", "Data Sale / Sharing"]):
-        if "US-CA" in jurisdictions:
-            lines.append(
-                "California residents can submit a \"Do Not Sell or Share My "
-                "Personal Information\" request through the service's privacy "
-                "settings or a designated privacy link."
-            )
-        else:
-            lines.append(
-                "Look for an opt-out of data sale/sharing in the service's privacy settings."
-            )
-
-    if any(c in categories for c in ["User Rights", "Data Rights", "Individual Rights", "Privacy Rights"]):
-        if "GDPR" in jurisdictions or "UK-GDPR" in jurisdictions:
-            lines.append(
-                "EU/UK residents can request data access, correction, and deletion "
-                "under GDPR / UK GDPR. Filed with the service directly; complaints "
-                "filed with the national data protection authority."
-            )
-        lines.append(
-            "A data download and account deletion path is usually available in "
-            "the service's account settings."
-        )
-
-    if any(c in categories for c in ["AI Training", "AI Training Opt-Out"]):
-        lines.append(
-            "Look for AI training opt-out settings in the service's privacy or "
-            "account controls. Not every service offers a full opt-out."
-        )
-
-    if any(c in categories for c in ["Automated Decision-Making", "ADM", "Consequential AI Decisions"]):
-        lines.append(
-            "Automated decisions with significant effect may be challengeable — "
-            "request human review through the service's support channels."
-        )
-
-    if any(c in categories for c in ["Children's Privacy", "COPPA Compliance", "Minors"]):
-        lines.append(
-            "For accounts involving children, look for parental supervision or "
-            "family-account tools. Underage accounts can be reported to the "
-            "service and, in the US, to the FTC."
-        )
-
-    if any(c in categories for c in ["Liability", "Unilateral Changes"]):
-        lines.append(
-            "For work/vendor use, escalate liability and unilateral-change "
-            "clauses to legal review before signing."
-        )
-
-    return lines[:5]  # cap at 5 items
 
 
 def _friendly_jurisdiction_labels(codes: list[str]) -> list[str]:
@@ -928,17 +848,19 @@ def render_results() -> None:
             )
 
     # Suggestions — tentative language per decision #2.
-    # Sourced from findings categories so text tracks the actual analysis result;
-    # never hardcoded to a specific service.
+    # Sourced from the backend response (AnalysisPayload.action_items) so the SPA
+    # fallback and API consumers get the same guidance and the derivation logic
+    # lives in one place. Falls back to a generic pointer when the field is empty
+    # or missing (older payloads / legacy backend).
     st.markdown(
         "<div class='pr-action-head'>Some things worth considering</div>",
         unsafe_allow_html=True,
     )
-    action_lines = _derive_action_items(result)
+    action_lines = result.get("action_items") or []
     if action_lines:
         for line in action_lines:
             st.markdown(
-                f'<div class="pr-action-item">{html.escape(line)}</div>',
+                f'<div class="pr-action-item">{html.escape(str(line))}</div>',
                 unsafe_allow_html=True,
             )
     else:
@@ -966,8 +888,14 @@ def render_results() -> None:
                         mime="application/pdf",
                         use_container_width=True,
                     )
-            except Exception:
-                pass
+                else:
+                    st.warning(
+                        f"PDF export unavailable (server returned {pdf_resp.status_code})."
+                    )
+            except requests.RequestException as exc:
+                # Surface the transport error to the reader rather than swallowing it
+                # (which used to leave the export bar silently missing a button).
+                st.warning(f"PDF export unavailable: {exc}")
     with export_cols[1]:
         if doc_id:
             try:
@@ -982,8 +910,12 @@ def render_results() -> None:
                         mime="application/json",
                         use_container_width=True,
                     )
-            except Exception:
-                pass
+                else:
+                    st.warning(
+                        f"JSON export unavailable (server returned {json_resp.status_code})."
+                    )
+            except requests.RequestException as exc:
+                st.warning(f"JSON export unavailable: {exc}")
     with export_cols[2]:
         if doc_id:
             try:
@@ -999,8 +931,12 @@ def render_results() -> None:
                         mime="text/csv",
                         use_container_width=True,
                     )
-            except Exception:
-                pass
+                else:
+                    st.warning(
+                        f"CSV export unavailable (server returned {csv_resp.status_code})."
+                    )
+            except requests.RequestException as exc:
+                st.warning(f"CSV export unavailable: {exc}")
     with export_cols[3]:
         # Share summary: a lightweight text export of just the verdict.
         summary_text = (verdict_headline + "\n\n" + verdict_sub).encode()

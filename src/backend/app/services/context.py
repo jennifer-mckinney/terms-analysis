@@ -27,7 +27,7 @@ compound their surfacing bias.
 
 from __future__ import annotations
 
-from ..schemas import ContextChip, Finding
+from ..schemas import CATEGORIES, ContextChip, Finding
 
 
 # Weight tier scale: 1.0 baseline · 2.0 boosted · 2.5 priority · 3.0 signature
@@ -114,6 +114,22 @@ VERDICT_LABEL: dict[ContextChip, dict[str, str]] = {
     "for_work": {"Go": "Workable", "Review": "Worth a legal pass", "Stop": "Not vendor-safe as written"},
     "just_curious": {"Go": "Clear", "Review": "Worth noting", "Stop": "Notable practices"},
 }
+
+
+# Validate that every category we weight is a known category. This fails loudly
+# at import time if ``CATEGORY_WEIGHTS`` drifts from the canonical taxonomy in
+# ``schemas.CATEGORIES`` (Fix 5, string-coupling guard).
+_unknown_weight_keys = {
+    cat
+    for chip_weights in CATEGORY_WEIGHTS.values()
+    for cat in chip_weights.keys()
+    if cat not in CATEGORIES
+}
+if _unknown_weight_keys:
+    raise RuntimeError(
+        f"CATEGORY_WEIGHTS references unknown categories: "
+        f"{sorted(_unknown_weight_keys)}. Update schemas.CATEGORIES."
+    )
 
 
 # Priority order when the user selects multiple chips (verdict copy only).

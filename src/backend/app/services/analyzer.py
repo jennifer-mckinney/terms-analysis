@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from ..config import settings
 from ..schemas import (
+    CATEGORIES,
     AnalysisPayload,
     ContextChip,
     DocType,
@@ -93,6 +94,17 @@ _DOMAIN_MAP = {
 }
 
 _DOMAIN_ORDER = ["Data", "Data use", "Terms of use", "Privacy rights"]
+
+
+# Validate _DOMAIN_MAP keys against the canonical category set at import time
+# (Fix 5 — cross-file string-coupling guard). Drift here would silently
+# mis-bucket findings, so fail loudly instead.
+_unknown_domain_keys = {cat for cat in _DOMAIN_MAP.keys() if cat not in CATEGORIES}
+if _unknown_domain_keys:
+    raise RuntimeError(
+        f"_DOMAIN_MAP references unknown categories: "
+        f"{sorted(_unknown_domain_keys)}. Update schemas.CATEGORIES."
+    )
 
 
 def _group_by_domain(
@@ -257,13 +269,103 @@ _INDUSTRY_BOOSTS: dict[str, dict[str, float]] = {
 
 _SEV_ORDER = {"Low": 0, "Medium": 1, "High": 2, "Critical": 3}
 _SEV_LIST = ["Low", "Medium", "High", "Critical"]
+_KNOWN_SEVERITIES: frozenset[str] = frozenset(_SEV_LIST)
+
+
+def _derive_action_items(
+    findings: List[Finding], jurisdictions: List[Jurisdiction]
+) -> List[str]:
+    """Return context-relevant, generic action items derived from findings.
+
+    Ported from ``webapp/app_streamlit_v2.py::_derive_action_items`` so the
+    frontend no longer has to duplicate the derivation rules. Not service-
+    specific; no hardcoded URLs. Points readers to general levers (opt-out,
+    deletion, supervisory authorities) tied to categories the analysis
+    actually detected. Capped at 5 items.
+    """
+    categories = {f.category for f in findings}
+    jurisdiction_set = set(jurisdictions or [])
+    lines: List[str] = []
+
+    if any(c in categories for c in ("Sale/Share", "Data Sale / Sharing")):
+        if "US-CA" in jurisdiction_set:
+            lines.append(
+                "California residents can submit a \"Do Not Sell or Share My "
+                "Personal Information\" request through the service's privacy "
+                "settings or a designated privacy link."
+            )
+        else:
+            lines.append(
+                "Look for an opt-out of data sale/sharing in the service's privacy settings."
+            )
+
+    if any(
+        c in categories
+        for c in ("User Rights", "Data Rights", "Individual Rights", "Privacy Rights")
+    ):
+        if "GDPR" in jurisdiction_set or "UK-GDPR" in jurisdiction_set:
+            lines.append(
+                "EU/UK residents can request data access, correction, and deletion "
+                "under GDPR / UK GDPR. Filed with the service directly; complaints "
+                "filed with the national data protection authority."
+            )
+        lines.append(
+            "A data download and account deletion path is usually available in "
+            "the service's account settings."
+        )
+
+    if any(c in categories for c in ("AI Training", "AI Training Opt-Out")):
+        lines.append(
+            "Look for AI training opt-out settings in the service's privacy or "
+            "account controls. Not every service offers a full opt-out."
+        )
+
+    if any(
+        c in categories
+        for c in (
+            "Automated Decision-Making",
+            "ADM",
+            "Consequential AI Decisions",
+        )
+    ):
+        lines.append(
+            "Automated decisions with significant effect may be challengeable — "
+            "request human review through the service's support channels."
+        )
+
+    if any(
+        c in categories
+        for c in ("Children's Privacy", "COPPA Compliance", "Minors")
+    ):
+        lines.append(
+            "For accounts involving children, look for parental supervision or "
+            "family-account tools. Underage accounts can be reported to the "
+            "service and, in the US, to the FTC."
+        )
+
+    if any(c in categories for c in ("Liability", "Unilateral Changes")):
+        lines.append(
+            "For work/vendor use, escalate liability and unilateral-change "
+            "clauses to legal review before signing."
+        )
+
+    return lines[:5]
 
 
 def _bump_severity(finding: Finding, boost: float) -> Finding:
-    """Return a copy of finding with severity bumped by one level if boost >= 0.2."""
+    """Return a copy of finding with severity bumped by one level if boost >= 0.2.
+
+    Fails fast on unknown severity values rather than silently defaulting to
+    "Low" — a bad severity signals a data-model drift the caller must fix.
+    """
+    if finding.severity not in _KNOWN_SEVERITIES:
+        raise ValueError(
+            f"Unknown severity: {finding.severity!r} "
+            f"(expected one of {sorted(_KNOWN_SEVERITIES)})"
+        )
     if boost < 0.2:
         return finding
-    current_idx = _SEV_ORDER.get(finding.severity, 0)
+    current_idx = _SEV_ORDER[finding.severity]
     new_idx = min(current_idx + 1, 3)
     if new_idx == current_idx:
         return finding
@@ -417,12 +519,21 @@ async def analyze_text(
         # matches the caller's list. Findings with an empty jurisdictions list
         # are dropped: an unclaimed jurisdiction can't be verified as
         # applicable, so we don't surface it. (PR #34 security review HIGH-2.)
+        #
+        # Fix 4 (global-tool contract): an empty requested ``jurisdictions``
+        # list means "no jurisdiction filter". Unclaimed LLM findings
+        # (``jurisdictions=[]``) are STILL dropped in that mode — an LLM
+        # finding without a declared jurisdiction remains unverifiable
+        # regardless of the caller's filter posture.
         if jurisdictions:
             jurisdiction_set = set(jurisdictions)
             llm_findings = [
                 f for f in llm_findings
                 if f.jurisdictions and any(j in jurisdiction_set for j in f.jurisdictions)
             ]
+        else:
+            # No jurisdiction filter, but still drop unclaimed findings.
+            llm_findings = [f for f in llm_findings if f.jurisdictions]
 
     # Add source_document to findings for batch processing
     if source_document:
@@ -462,6 +573,10 @@ async def analyze_text(
     # ``apply_category_weights`` so first eligible per domain is the highest.
     top_by_domain = _group_by_domain(merged)
 
+    # Backend-generated action items (Fix 8). Frontend no longer has to
+    # duplicate the derivation logic.
+    action_items = _derive_action_items(merged, list(jurisdictions) if jurisdictions else [])
+
     elapsed_time = time.time() - start_time
 
     payload = AnalysisPayload(
@@ -489,6 +604,7 @@ async def analyze_text(
         verdict_headline=verdict_headline(context_list, action_readiness),
         verdict_label=verdict_label(context_list, action_readiness),
         top_by_domain=top_by_domain,
+        action_items=action_items,
     )
     return AnalysisResult(payload=payload, issues=validation.issues)
 
@@ -559,17 +675,24 @@ def _merge_findings(
 
 
 def detect_high_severity_findings(text: str, jurisdictions: List[Jurisdiction]) -> List[Finding]:
-    """Quick mode: detect only high and critical severity findings."""
+    """Quick mode: detect only high and critical severity findings.
+
+    Empty ``jurisdictions`` == "no filter" — global-tool contract per Fix 4.
+    """
     from .rules import PATTERNS
 
+    jurisdiction_filter = set(jurisdictions) if jurisdictions else None
     findings: List[Finding] = []
     for pattern in PATTERNS:
         # Only include High and Critical severity patterns
         if pattern.severity not in ["High", "Critical"]:
             continue
 
-        # Check if pattern applies to any requested jurisdiction
-        if not any(j in pattern.jurisdictions for j in jurisdictions):
+        # Check if pattern applies to any requested jurisdiction. Empty
+        # requested list means "no filter" (global tool, unknown user location).
+        if jurisdiction_filter is not None and not any(
+            j in pattern.jurisdictions for j in jurisdiction_filter
+        ):
             continue
 
         for regex_pattern in pattern.patterns:

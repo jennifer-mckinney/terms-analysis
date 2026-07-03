@@ -21,7 +21,7 @@ Run via `/test-suite` or `cd src/backend && python -m pytest -v` (must activate 
 
 No automated test coverage exists for:
 - `src/webapp/app.js` — `setupJurisdictionBulkActions()`, `setupDocumentTextCounter()`, `escapeHtml()`-dependent rendering paths, theme toggling
-- `src/webapp/app_streamlit.py` — equivalent Streamlit-side logic
+- `src/webapp/app_streamlit_v2.py` — equivalent Streamlit-side logic (primary UI post-issue #19 redesign)
 
 No JS unit-test runner (vitest/jest) or Playwright test suite currently exists in the repo; `/webapp-testing` provides manual/live Playwright verification but isn't part of the automated regression suite. This is an intentional backlog item, not an oversight — see issue #30 for the decision to scope it deliberately rather than bolt on a partial harness.
 

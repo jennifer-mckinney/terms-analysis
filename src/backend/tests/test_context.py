@@ -290,3 +290,35 @@ def test_verdict_for_work():
     from app.services.context import verdict_headline, verdict_label
     assert "work use" in verdict_headline(["for_work"], "Review").lower()
     assert verdict_label(["for_work"], "Stop") == "Not vendor-safe as written"
+
+
+# ---------------------------------------------------------------------------
+# Fix 5: canonical categories — every CATEGORY_WEIGHTS key must be recognised
+# by schemas.CATEGORIES. Module-load validation already guards this at import,
+# but pin it here so refactors surface the intent.
+# ---------------------------------------------------------------------------
+
+
+def test_context_category_weights_keys_are_all_known_categories():
+    from app.schemas import CATEGORIES
+    from app.services.context import CATEGORY_WEIGHTS
+
+    unknown = {
+        cat
+        for chip_weights in CATEGORY_WEIGHTS.values()
+        for cat in chip_weights.keys()
+        if cat not in CATEGORIES
+    }
+    assert unknown == set(), (
+        f"CATEGORY_WEIGHTS references unknown categories: {sorted(unknown)}"
+    )
+
+
+def test_context_domain_map_keys_are_all_known_categories():
+    from app.schemas import CATEGORIES
+    from app.services.analyzer import _DOMAIN_MAP
+
+    unknown = {cat for cat in _DOMAIN_MAP.keys() if cat not in CATEGORIES}
+    assert unknown == set(), (
+        f"_DOMAIN_MAP references unknown categories: {sorted(unknown)}"
+    )

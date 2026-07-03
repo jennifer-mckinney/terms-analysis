@@ -192,3 +192,185 @@ def test_llm_jurisdiction_filter_keeps_matching_finding(monkeypatch):
     )
     categories = {finding.category for finding in result.payload.findings}
     assert "Cross-Border Transfer" in categories
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: empty jurisdictions == "no filter" (global-tool contract)
+# ---------------------------------------------------------------------------
+
+
+def test_analyzer_detect_findings_empty_jurisdictions_runs_all_rules():
+    """Empty jurisdictions list = no filter (global tool, unknown user location).
+
+    Compared with a UK-only run the empty-list result must include categories
+    from rules whose jurisdictions do NOT include UK-GDPR — proving no
+    filtering happened.
+    """
+    from app.services.rules import detect_findings
+
+    text = (
+        "We sell your personal information. We use automated decision-making. "
+        "We retain data indefinitely. Your rights include opt-out. Children under 13."
+    )
+
+    uk_only = detect_findings(text, ["UK-GDPR"])
+    no_filter = detect_findings(text, [])
+
+    uk_categories = {f.category for f in uk_only}
+    no_filter_categories = {f.category for f in no_filter}
+
+    # No-filter mode must be a superset of UK-only (nothing removed).
+    assert uk_categories.issubset(no_filter_categories)
+    # And must include categories UK-only would have filtered out.
+    assert no_filter_categories - uk_categories, (
+        "empty-jurisdictions run should include categories the UK-only filter drops"
+    )
+
+
+def test_analyzer_detect_high_severity_findings_empty_jurisdictions_no_filter():
+    """Quick-mode helper honours the global-tool empty-list contract."""
+    from app.services.analyzer import detect_high_severity_findings
+
+    text = "We sell your personal information. This includes sensitive biometric data."
+    no_filter = detect_high_severity_findings(text, [])
+    us_only = detect_high_severity_findings(text, ["US-CA"])
+    # No-filter must be at least as broad as US-only.
+    assert len({f.category for f in no_filter}) >= len({f.category for f in us_only})
+
+
+# ---------------------------------------------------------------------------
+# Fix 6: _bump_severity fail-fast on unknown severities
+# ---------------------------------------------------------------------------
+
+
+def test_analyzer_bump_severity_raises_on_unknown_severity():
+    from app.schemas import Evidence, Finding
+    from app.services.analyzer import _bump_severity
+
+    # Bypass pydantic's severity Literal by constructing then mutating with
+    # ``model_copy(update=...)``. Pydantic validates on construction but
+    # ``update`` re-runs validation, so use object.__setattr__ instead.
+    valid = Finding(
+        category="Sale/Share",
+        severity="High",
+        confidence=0.9,
+        excerpt="x",
+        explanation="x",
+        jurisdictions=["US-CA"],
+        evidence=Evidence(line_start=1, line_end=1, legal_basis=["x"]),
+        irp_score=0.5,
+    )
+    # Bypass pydantic validation to inject a bogus severity value.
+    object.__setattr__(valid, "severity", "Extreme")
+
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="Unknown severity"):
+        _bump_severity(valid, 0.3)
+
+
+def test_analyzer_bump_severity_still_bumps_valid_severity():
+    from app.schemas import Evidence, Finding
+    from app.services.analyzer import _bump_severity
+
+    finding = Finding(
+        category="Sale/Share",
+        severity="Medium",
+        confidence=0.9,
+        excerpt="x",
+        explanation="x",
+        jurisdictions=["US-CA"],
+        evidence=Evidence(line_start=1, line_end=1, legal_basis=["x"]),
+        irp_score=0.5,
+    )
+    bumped = _bump_severity(finding, 0.3)
+    assert bumped.severity == "High"
+
+
+# ---------------------------------------------------------------------------
+# Fix 8: backend-generated action_items on AnalysisPayload
+# ---------------------------------------------------------------------------
+
+
+def _make_finding_for_actions(category: str, jurisdictions=None):
+    from app.schemas import Evidence, Finding
+
+    return Finding(
+        category=category,
+        severity="High",
+        confidence=0.9,
+        excerpt="x",
+        explanation="x",
+        jurisdictions=jurisdictions or ["US-CA"],
+        evidence=Evidence(line_start=1, line_end=1, legal_basis=["x"]),
+        irp_score=0.5,
+    )
+
+
+def test_analyzer_derive_action_items_sale_share_us_ca():
+    from app.services.analyzer import _derive_action_items
+
+    items = _derive_action_items(
+        [_make_finding_for_actions("Sale/Share")], ["US-CA"]
+    )
+    assert any("Do Not Sell" in line for line in items)
+
+
+def test_analyzer_derive_action_items_sale_share_non_us_ca_uses_generic():
+    from app.services.analyzer import _derive_action_items
+
+    items = _derive_action_items(
+        [_make_finding_for_actions("Sale/Share")], ["GDPR"]
+    )
+    assert not any("Do Not Sell" in line for line in items)
+    assert any("opt-out of data sale" in line.lower() for line in items)
+
+
+def test_analyzer_derive_action_items_gdpr_rights_line_added():
+    from app.services.analyzer import _derive_action_items
+
+    items = _derive_action_items(
+        [_make_finding_for_actions("User Rights")], ["GDPR"]
+    )
+    assert any("GDPR" in line for line in items)
+
+
+def test_analyzer_derive_action_items_ai_training_line():
+    from app.services.analyzer import _derive_action_items
+
+    items = _derive_action_items(
+        [_make_finding_for_actions("AI Training")], ["US-CA"]
+    )
+    assert any("AI training opt-out" in line for line in items)
+
+
+def test_analyzer_derive_action_items_children_line():
+    from app.services.analyzer import _derive_action_items
+
+    items = _derive_action_items(
+        [_make_finding_for_actions("Children's Privacy")], ["US-CA"]
+    )
+    assert any("children" in line.lower() for line in items)
+
+
+def test_analyzer_derive_action_items_caps_at_five():
+    from app.services.analyzer import _derive_action_items
+
+    # All applicable categories at once — pre-cap this produces 6 items:
+    # Sale/Share, GDPR rights, generic-rights, AI training, ADM, Children, Liability.
+    findings = [
+        _make_finding_for_actions("Sale/Share"),
+        _make_finding_for_actions("User Rights"),
+        _make_finding_for_actions("AI Training"),
+        _make_finding_for_actions("Automated Decision-Making"),
+        _make_finding_for_actions("Children's Privacy"),
+        _make_finding_for_actions("Liability"),
+    ]
+    items = _derive_action_items(findings, ["US-CA", "GDPR"])
+    assert len(items) <= 5
+
+
+def test_analyzer_derive_action_items_empty_findings_returns_empty():
+    from app.services.analyzer import _derive_action_items
+
+    assert _derive_action_items([], ["US-CA"]) == []
