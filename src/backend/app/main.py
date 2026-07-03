@@ -248,16 +248,6 @@ async def _refresh_due_watchlist_items() -> int:
     return int(max(_WATCHLIST_LOOP_MIN_SLEEP_S, min(_WATCHLIST_LOOP_MAX_SLEEP_S, min(next_wakeup_deltas))))
 
 
-# Legacy shim: some tests / callers still invoke ``_refresh_all_watchlist_items``.
-# Delegate to the new per-item scheduler so semantics stay consistent.
-async def _refresh_all_watchlist_items() -> None:
-    if settings.watchlist_refresh_seconds <= 0:
-        # Preserve the historical "disabled means bail out" behavior for callers
-        # that assert this contract (test_database_and_main_coverage.py).
-        return
-    await _refresh_due_watchlist_items()
-
-
 def _clamp(value: float, lower: float = 0.0, upper: float = 10.0) -> float:
     return max(lower, min(upper, value))
 
@@ -1343,6 +1333,10 @@ _DEPRECATION_HEADERS = {
     "Deprecation": "true",
     "Sunset": "2026-10-01",
     "Link": '</watchlist>; rel="successor-version"',
+    # RFC 7234 Warning header — surfaced by the security reviewer P9 (F3) so
+    # clients that log Warning: on 308 responses see the concrete schema-drift
+    # cost of the rename before their POST replay hits /watchlist and 422s.
+    "Warning": '299 - "field rename: url -> source_url; refer to /watchlist schema"',
 }
 
 

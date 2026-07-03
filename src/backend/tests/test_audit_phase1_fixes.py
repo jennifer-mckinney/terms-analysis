@@ -71,28 +71,18 @@ class TestLE001LE002NoHardcodedJurisdictions:
         """The background refresh loop must call detect_findings with an
         empty list, not ["US-CA", "GDPR"].
 
-        OE-003 note (2026-07-03): the historical ``_refresh_all_watchlist_items``
-        function is now a thin legacy shim that delegates to
+        OE-003 note (2026-07-03): the historical
+        ``_refresh_all_watchlist_items`` helper was retired in reviewer P9
+        grumpy F11. Its body was a tautological delegate to
         ``_refresh_due_watchlist_items`` (the new per-item scheduler introduced
         when ``PolicyWatch`` merged into ``WatchlistItem``). The load-bearing
-        LE-001 assertion — no hardcoded ``["US-CA", "GDPR"]`` and
-        ``detect_findings(current_text, [])`` present — now lives on the
-        delegated helper. Both functions are checked to keep the contract
-        wherever the refresh path lands.
+        LE-001 assertion (no hardcoded ``["US-CA", "GDPR"]`` and
+        ``detect_findings(current_text, [])`` present) now lives on the
+        scheduler.
         """
         import app.main as main_module
 
-        # Legacy shim source (may just delegate — that's fine, but still must
-        # not hardcode the old jurisdictions).
-        legacy_code = self._code_lines(
-            inspect.getsource(main_module._refresh_all_watchlist_items)
-        )
-        assert '["US-CA", "GDPR"]' not in legacy_code, (
-            "_refresh_all_watchlist_items still hardcodes ['US-CA', 'GDPR'] — "
-            "this violates the global-tool contract (audit finding LE-001)."
-        )
-
-        # New per-item scheduler source — this is where the analyzer call now
+        # Per-item scheduler source: this is where the analyzer call now
         # lives after OE-003. Assert the contract on it.
         scheduler_code = self._code_lines(
             inspect.getsource(main_module._refresh_due_watchlist_items)
@@ -262,7 +252,8 @@ class TestLE003WatchlistLoopLogsErrors:
         async def failing_refresh():
             raise RuntimeError("simulated refresh failure")
 
-        monkeypatch.setattr(main_module, "_refresh_all_watchlist_items", failing_refresh)
+        # OE-003 / P9 F11: shim retired. Patch the scheduler the loop actually calls.
+        monkeypatch.setattr(main_module, "_refresh_due_watchlist_items", failing_refresh)
         monkeypatch.setattr(main_module.asyncio, "sleep", instant_sleep)
 
         # Make sure the uvicorn logger routes to caplog.

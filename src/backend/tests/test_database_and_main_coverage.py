@@ -9,7 +9,7 @@ Covers:
   - main.get_analysis success and 404 (GET /analyses/{id})
   - main.analyze_url error paths (ValueError, generic exception, empty text)
   - main.analyze_file error paths (empty file, bad doc_type, bad industry)
-  - main._refresh_all_watchlist_items (internal loop function)
+  - main._refresh_due_watchlist_items (per-item scheduler)
   - main._watchlist_loop_async (background loop)
   - main.export_analysis_pdf with findings (covers sev_counts, used_jurisdictions loop)
   - main._persist_analysis legacy pydantic path (line 157)
@@ -296,46 +296,10 @@ class TestAnalyzeFileErrors:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# _refresh_all_watchlist_items (internal function, called directly)
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestRefreshAllWatchlistItems:
-    # OE-003 (2026-07-03): ``_refresh_all_watchlist_items`` is now a legacy shim
-    # that delegates to ``_refresh_due_watchlist_items``. The tests below
-    # exercise the shim's disabled-early-return contract and the per-item
-    # scheduler's empty-watchlist path (both preserved from the pre-merge
-    # semantics).
-    def test_main_refresh_all_watchlist_items_no_items(self, db_session):
-        from app.main import _refresh_all_watchlist_items
-        from app.models import WatchlistItem as WatchlistItemModel
-        with patch("app.main.settings") as mock_settings:
-            mock_settings.watchlist_refresh_seconds = 60
-
-            with patch("app.main.db_session") as mock_db_ctx:
-                mock_db_ctx.return_value.__enter__ = lambda s: db_session
-                mock_db_ctx.return_value.__exit__ = MagicMock(return_value=False)
-                asyncio.run(_refresh_all_watchlist_items())
-
-        # With no WatchlistItems in DB, no rows should have been written
-        count = db_session.query(WatchlistItemModel).count()
-        assert count == 0
-
-    def test_main_refresh_all_watchlist_items_skips_when_disabled(self, db_session):
-        from app.main import _refresh_all_watchlist_items
-        # When watchlist_refresh_seconds <= 0, the shim returns early WITHOUT
-        # delegating to the scheduler. This preserves the historical
-        # "disabled means bail out" contract for callers that assert it.
-        with patch("app.main.settings") as mock_settings:
-            mock_settings.watchlist_refresh_seconds = 0
-            with patch("app.main.db_session") as mock_db_ctx:
-                mock_db_ctx.return_value.__enter__ = lambda s: db_session
-                mock_db_ctx.return_value.__exit__ = MagicMock(return_value=False)
-                asyncio.run(_refresh_all_watchlist_items())
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# _watchlist_loop_async (OE-003: now delegates to _refresh_due_watchlist_items,
-# not _refresh_all_watchlist_items)
+# _watchlist_loop_async (OE-003: delegates to _refresh_due_watchlist_items;
+# the tautological ``_refresh_all_watchlist_items`` shim was removed per
+# reviewer P9 grumpy F11 because it delegated with a bare enabled-check that
+# the scheduler already performs, so the shim was pure dead weight.)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestWatchlistLoopAsync:
@@ -712,7 +676,7 @@ class TestAnalyzeBatchPydanticValidation:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# _refresh_all_watchlist_items with actual items (covers main.py lines 107-137)
+# _refresh_due_watchlist_items with actual items (covers main.py lines 107-137)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestRefreshWatchlistItemsWithData:
