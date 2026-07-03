@@ -548,9 +548,14 @@ def main() -> None:
                 text_input = st.text_area(
                     "Text",
                     height=200,
+                    max_chars=50000,
                     placeholder="Paste the full text of the policy or agreement.",
                     label_visibility="collapsed",
                 )
+                counter_text = f"{len(text_input):,} / 50,000 characters"
+                if 0 < len(text_input) < 1000:
+                    counter_text += " — this text appears short. Is this the complete policy?"
+                st.caption(counter_text)
             with sub2:
                 url_input = st.text_input(
                     "URL",

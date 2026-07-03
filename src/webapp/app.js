@@ -484,6 +484,27 @@ function setupDocumentReview() {
     setupInputTabs();
     setupFileUpload();
     setupAnalyzeButton();
+    setupDocumentTextCounter();
+}
+
+function setupDocumentTextCounter() {
+    const textarea = document.getElementById('documentText');
+    const counter = document.getElementById('documentTextCounter');
+    if (!textarea || !counter) return;
+
+    const maxLength = parseInt(textarea.getAttribute('maxlength'), 10) || 50000;
+
+    const update = () => {
+        const length = textarea.value.length;
+        let text = `${length.toLocaleString()} / ${maxLength.toLocaleString()} characters`;
+        if (length > 0 && length < 1000) {
+            text += ' — this text appears short. Is this the complete policy?';
+        }
+        counter.textContent = text;
+    };
+
+    textarea.addEventListener('input', update);
+    update();
 }
 
 function setupInputTabs() {
