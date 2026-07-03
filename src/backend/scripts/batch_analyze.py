@@ -22,9 +22,21 @@ import csv
 import json
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List
+
+# Reviewer P9 (security F7): bound the response body read. urllib will happily
+# stream a hostile / misbehaving server's response into memory without limit,
+# which turns a batch helper into an OOM vector when pointed at an untrusted
+# API base. 100 MB is well above legitimate batch response sizes.
+MAX_RESPONSE_BYTES = 100 * 1024 * 1024
+
+# Non-local API bases are legitimate (remote FastAPI deployment) but warrant a
+# stderr warning so a copy-pasted CLI invocation against a random host prompts
+# the operator to think about trust before shipping content there.
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
 
 
 def read_input_csv(path: Path) -> List[Dict[str, str]]:
@@ -72,8 +84,33 @@ def build_batch_request(
     return body
 
 
+def _warn_if_non_local(api_base: str) -> None:
+    """Emit a stderr warning when ``api_base`` points at a non-local host.
+
+    Reviewer P9 (security F7): a local-only tool that will happily POST every
+    row of a CSV to an arbitrary URL should say something out loud when that
+    URL is not one of the standard loopback hosts.
+    """
+    try:
+        parsed = urllib.parse.urlparse(api_base)
+    except (ValueError, TypeError):
+        return
+    host = (parsed.hostname or "").lower()
+    if host and host not in _LOCAL_HOSTS:
+        print(
+            f"WARNING: --api is not local host: {api_base}. "
+            "Continue only if you trust it.",
+            file=sys.stderr,
+        )
+
+
 def call_batch_endpoint(api_base: str, body: Dict[str, Any]) -> Dict[str, Any]:
-    """POST the request body to /analyze/batch and return the parsed response."""
+    """POST the request body to /analyze/batch and return the parsed response.
+
+    The response body is read with a hard cap of ``MAX_RESPONSE_BYTES`` (100 MB).
+    Anything larger raises ``ValueError`` before decoding. Reviewer P9
+    (security F7) memory-exhaustion guardrail.
+    """
     url = api_base.rstrip("/") + "/analyze/batch"
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
@@ -81,7 +118,11 @@ def call_batch_endpoint(api_base: str, body: Dict[str, Any]) -> Dict[str, Any]:
     )
     try:
         with urllib.request.urlopen(req, timeout=600) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            # Read one byte past the cap so we can detect overflow deterministically.
+            raw = resp.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES:
+                raise ValueError("response exceeded 100 MB cap")
+            return json.loads(raw.decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise SystemExit(f"HTTP {exc.code} from {url}: {detail}") from exc
@@ -138,6 +179,10 @@ def main() -> int:
         help="Comma-separated context chips (e.g. 'for_work,want_understand')",
     )
     args = parser.parse_args()
+
+    # Reviewer P9 F7: warn early (before any file I/O) if --api points
+    # somewhere other than a local loopback host.
+    _warn_if_non_local(args.api)
 
     context = [c.strip() for c in args.context.split(",") if c.strip()]
     rows = read_input_csv(args.input)

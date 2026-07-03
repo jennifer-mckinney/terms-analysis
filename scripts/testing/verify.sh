@@ -72,6 +72,9 @@ fi
 
 # Resolve scope -> pytest arg list. Args are relative to $BACKEND_DIR.
 args=()
+# NOTE: scopes are hardcoded here. Do NOT let a caller-supplied scope name reach pytest args as an unquoted or interpolated string.
+# If dynamic scopes are ever needed, wrap in a strict whitelist before splatting into pytest.
+# Reviewer P9 (grumpy F5) command injection guard rail.
 case "${scope}" in
     full)
         args=("${TESTS_DIR}")

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # regen-manifest.sh
 # Regenerate .claude/_governance-manifest.json with current SHA256 hashes for
-# the four tracked governance files. Use ONLY after an intentional principle
+# the five tracked governance files. Use ONLY after an intentional principle
 # or governance change that has been reviewed via PR.
 #
 # Usage:
@@ -40,6 +40,7 @@ ENTRIES=(
     ".claude/library/LIB-PRINCIPLES.md|${REPO_ROOT}/.claude/library/LIB-PRINCIPLES.md|LIB-PRINCIPLES P8 v2 baseline; single source of truth for role principles."
     "\$HOME/.claude/CLAUDE.md|${HOME}/.claude/CLAUDE.md|Global user CLAUDE.md; changes here affect every project session."
     "\$HOME/.claude/library/PEAS.md|${HOME}/.claude/library/PEAS.md|PEAS agent design framework reference."
+    ".claude/governance/required-gitignore.txt|${REPO_ROOT}/.claude/governance/required-gitignore.txt|Reviewer P9 F9 SSoT for required .gitignore patterns read by both pre-commit hook and CI workflow."
 )
 
 AUTO_YES=0
@@ -70,48 +71,60 @@ done
 
 TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-# Emit JSON via python3 for correct escaping.
-TMP="$(mktemp)"
+# Reviewer P9 (grumpy F4): drop the tab-delimited intermediate. Compute each
+# entry's hash + size in shell, then hand (mpath, hash, size, note) tuples
+# straight to python3 as CLI args. python3 emits valid JSON — no risk of a
+# note containing a literal tab breaking the round-trip.
+PY_ARGS=("${MANIFEST}" "${TS}")
+for row in "${ENTRIES[@]}"; do
+    IFS='|' read -r mpath fpath note <<< "${row}"
+    hash="$(${SHA_CMD} "${fpath}" | awk '{print $1}')"
+    size="$(wc -c < "${fpath}" | tr -d ' ')"
+    PY_ARGS+=("${mpath}" "${hash}" "${size}" "${note}")
+done
 
-{
-    for row in "${ENTRIES[@]}"; do
-        IFS='|' read -r mpath fpath note <<< "${row}"
-        hash="$(${SHA_CMD} "${fpath}" | awk '{print $1}')"
-        size="$(wc -c < "${fpath}" | tr -d ' ')"
-        printf '%s\t%s\t%s\t%s\n' "${mpath}" "${hash}" "${size}" "${note}"
-    done
-} > "${TMP}"
+python3 - "${PY_ARGS[@]}" <<'PY'
+import json
+import sys
 
-python3 - "${MANIFEST}" "${TMP}" "${TS}" <<'PY'
-import json, sys
-manifest_path, tmp_path, ts = sys.argv[1], sys.argv[2], sys.argv[3]
+manifest_path = sys.argv[1]
+ts = sys.argv[2]
+rest = sys.argv[3:]
+if len(rest) % 4 != 0:
+    print(
+        "regen-manifest.sh: internal error — entry args not a multiple of 4",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
 entries = []
-with open(tmp_path) as f:
-    for line in f:
-        line = line.rstrip("\n")
-        if not line:
-            continue
-        parts = line.split("\t")
-        mpath, hash_, size, note = parts[0], parts[1], int(parts[2]), parts[3]
-        entries.append({
+for i in range(0, len(rest), 4):
+    mpath, sha, size, note = rest[i], rest[i + 1], rest[i + 2], rest[i + 3]
+    entries.append(
+        {
             "path": mpath,
-            "sha256": hash_,
-            "size_bytes": size,
+            "sha256": sha,
+            "size_bytes": int(size),
             "recorded_at": ts,
             "note": note,
-        })
+        }
+    )
+
 doc = {
     "schema_version": 1,
     "generated_at": ts,
-    "note": "Baseline captured after governance change. Paths beginning with $HOME/ are resolved at verify time via shell expansion; project-relative paths are resolved from the repo root.",
+    "note": (
+        "Baseline captured after governance change. Paths beginning with "
+        "$HOME/ are resolved at verify time via shell expansion; "
+        "project-relative paths are resolved from the repo root."
+    ),
     "entries": entries,
 }
+
 with open(manifest_path, "w") as f:
     json.dump(doc, f, indent=2)
     f.write("\n")
 PY
-
-rm -f "${TMP}"
 
 count="${#ENTRIES[@]}"
 echo "MANIFEST REGENERATED: ${count} entries"
