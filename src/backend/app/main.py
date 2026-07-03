@@ -451,14 +451,6 @@ def get_analysis(analysis_id: str, db: Session = Depends(get_db)):
     return AnalysisPayload(**data)
 
 
-@app.get("/exports/analysis/{analysis_id}")
-def export_analysis_json(analysis_id: str, db: Session = Depends(get_db)):
-    record = db.query(Analysis).filter(Analysis.id == analysis_id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Analysis not found")
-    return json.loads(record.result_json)
-
-
 @app.get("/exports/analyses.csv")
 def export_analyses_csv(db: Session = Depends(get_db)):
     records = db.query(Analysis).order_by(Analysis.created_at.desc()).all()
@@ -762,6 +754,19 @@ def export_analysis_pdf(analysis_id: str, db: Session = Depends(get_db)):
     doc.build(story)
     buffer.seek(0)
     return Response(content=buffer.read(), media_type="application/pdf")
+
+
+# Registered AFTER the .pdf route above: Starlette matches path routes in
+# registration order, and {analysis_id} would otherwise greedily match IDs
+# ending in ".pdf" too, silently shadowing the PDF export route (issue found
+# by independent UI/UX review — both frontends' "PDF export" were actually
+# hitting this JSON route and getting a 404 for a literal "<id>.pdf" lookup).
+@app.get("/exports/analysis/{analysis_id}")
+def export_analysis_json(analysis_id: str, db: Session = Depends(get_db)):
+    record = db.query(Analysis).filter(Analysis.id == analysis_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    return json.loads(record.result_json)
 
 
 @app.get("/reviews", response_model=list[ReviewItemPayload])

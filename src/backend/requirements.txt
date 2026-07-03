@@ -15,4 +15,3 @@ uvicorn
 langdetect
 rank_bm25
 numpy
-faiss-cpu

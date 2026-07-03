@@ -2,10 +2,8 @@
 # Law: New York SHIELD Act — PLACEHOLDER CORPUS
 # Source: PENDING — real fetch blocked this session, see issue #6
 # Effective Date: PENDING
-#
-# *** THIS FILE IS SYNTHETIC PLACEHOLDER TEXT, NOT REAL STATUTE TEXT. ***
-# Do NOT use for compliance decisions. Replace with real N.Y. Gen. Bus. Law
-# §899-aa, §899-bb text before this corpus is relied upon by analyze_text().
+# Status: PLACEHOLDER
+# Disclaimer: THIS FILE IS SYNTHETIC PLACEHOLDER TEXT, NOT REAL STATUTE TEXT. Do NOT use for compliance decisions. Replace with real N.Y. Gen. Bus. Law §899-aa, §899-bb text before this corpus is relied upon by analyze_text().
 
 ## Section 899-aa — Notification of a security breach
 [PLACEHOLDER] Any business that owns or licenses computerized data including private information of a New York resident must notify the resident of any breach of the security of the system following discovery.

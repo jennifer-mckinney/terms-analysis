@@ -1,13 +1,9 @@
-# Jurisdiction: EU
+# Jurisdiction: GDPR
 # Law: General Data Protection Regulation (GDPR) — PLACEHOLDER CORPUS
 # Source: PENDING — real fetch blocked this session, see issue #6 (WebFetch returned 403 on eur-lex.europa.eu, gdpr-info.eu, privacy-regulation.eu)
 # Effective Date: PENDING
-#
-# *** THIS FILE IS SYNTHETIC PLACEHOLDER TEXT, NOT REAL STATUTE TEXT. ***
-# It exists only to exercise the legal-KB chunking/embedding/retrieval pipeline
-# end-to-end. Do NOT use for compliance decisions. Replace with real GDPR
-# article text (fetched per .claude/skills/legal-kb/SKILL.md) before this
-# corpus is relied upon by analyze_text().
+# Status: PLACEHOLDER
+# Disclaimer: THIS FILE IS SYNTHETIC PLACEHOLDER TEXT, NOT REAL STATUTE TEXT. It exists only to exercise the legal-KB chunking/embedding/retrieval pipeline end-to-end. Do NOT use for compliance decisions. Replace with real GDPR article text (fetched per .claude/skills/legal-kb/SKILL.md) before this corpus is relied upon by analyze_text().
 
 ## Article 5 — Principles relating to processing of personal data
 [PLACEHOLDER] Personal data must be processed lawfully, fairly, and transparently; collected for specified, explicit, and legitimate purposes; adequate, relevant, and limited to what is necessary; accurate and kept up to date; kept in a form permitting identification for no longer than necessary; and processed with appropriate security.

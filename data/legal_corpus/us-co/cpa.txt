@@ -2,10 +2,8 @@
 # Law: Colorado Privacy Act (CPA) — PLACEHOLDER CORPUS
 # Source: PENDING — real fetch blocked this session, see issue #6
 # Effective Date: PENDING
-#
-# *** THIS FILE IS SYNTHETIC PLACEHOLDER TEXT, NOT REAL STATUTE TEXT. ***
-# Do NOT use for compliance decisions. Replace with real Colo. Rev. Stat.
-# § 6-1-1301 et seq. text before this corpus is relied upon by analyze_text().
+# Status: PLACEHOLDER
+# Disclaimer: THIS FILE IS SYNTHETIC PLACEHOLDER TEXT, NOT REAL STATUTE TEXT. Do NOT use for compliance decisions. Replace with real Colo. Rev. Stat. § 6-1-1301 et seq. text before this corpus is relied upon by analyze_text().
 
 ## Section 6-1-1306 — Consumer personal data rights
 [PLACEHOLDER] Consumers have the right to opt out of the processing of personal data for targeted advertising, sale, or profiling in furtherance of decisions producing legal or similarly significant effects.

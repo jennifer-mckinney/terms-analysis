@@ -1,5 +1,7 @@
 # LIB-LEGAL: Legal AI Stack & RAG Architecture
 
+**Note:** the LLM/Embedding/Inference tables below (SaulLM, Ollama, multilingual-e5, onnxruntime) describe an evaluated *candidate* stack, not what's actually running. The shipped LLM stack is LocalAI + Apertus-8B-Instruct/EuroLLM-22B-Instruct (`services/localai.py`), and the shipped legal-KB embeddings reuse that same `LocalAIClient.embed()` call rather than a separate sentence-transformers/onnxruntime pipeline. The **Vector Store**, **REJECTED Tools**, and **RAG Architecture** sections below are accurate to the current implementation (`services/legal_kb.py`) — numpy exhaustive search, FAISS explicitly rejected.
+
 ## Approved LLM/Embedding/Inference Tools
 
 All tools must pass: open source + no investor lawsuits + positive community + IRP Grade A.
@@ -61,29 +63,27 @@ Primary model must be multilingual — the tool covers US, EU, UK, Canada, Brazi
 
 ## RAG Architecture
 
+**Status: implemented** (`services/legal_kb.py`, wired into `analyzer.py::analyze_text()`), using the project's actual LLM stack (LocalAI/Apertus/EuroLLM) rather than the Ollama/SaulLM stack originally sketched below — corpus is currently placeholder text, not yet real statute text (see `data/legal_corpus/` file headers and issue #6).
+
 ```
-Legal Requirements DB
-  (GDPR articles, CCPA/CPRA sections, PIPEDA, US state laws)
+Legal Corpus (data/legal_corpus/<jurisdiction>/<law>.txt)
       |
       v
-  Chunk + Embed (modernbert-legal-8192)
+  Chunk + Embed (LocalAIClient.embed(), Apertus-8B model)
       |
       v
-  FAISS Vector Index (local)
+  numpy exhaustive vector matrix (local, .npy — no FAISS, see Vector Store above)
       |
       +--- User uploads ToS/Privacy Policy
       |        |
-      |     Chunk + Embed (same model)
+      |     Rule-engine detection (existing regex baseline) runs in parallel
       |        |
-      |     Retrieve top-k matching legal requirements
+      |     Retrieve top-k matching legal requirements (numpy cosine + BM25/RRF)
       |        |
       |     Augment prompt with retrieved legal context
       |        |
       v        v
-  SaulLM-7B-Instruct (via Ollama)
-      |
-      v
-  Rule Engine (existing regex baseline)
+  LocalAI (Apertus-8B-Instruct / EuroLLM-22B-Instruct, routed by language)
       |
       v
   Merge + Validate + Score (existing pipeline)
@@ -103,19 +103,19 @@ Legal Requirements DB
 
 **CAUTION:** Pile of Law is CC-BY-NC-SA-4.0 (non-commercial only). Do NOT use for commercial product.
 
-## New Services Needed
+## Services (implemented)
 
 | Service | File | Purpose |
 |---------|------|---------|
-| `embeddings.py` | `src/backend/app/services/` | Embedding service using sentence-transformers + modernbert-legal |
-| `legal_kb.py` | `src/backend/app/services/` | Legal knowledge base loader, chunker, FAISS indexer |
-| Refactor `lm_studio.py` | `src/backend/app/services/` | Rename to generic LLM client, point at Ollama + SaulLM |
+| `embedding.py` | `src/backend/app/services/` | Document-chunk BM25 + dense + RRF ensemble (not yet wired into `analyzer.py` — see `docs/architecture-diagrams.md`) |
+| `legal_kb.py` | `src/backend/app/services/` | Legal knowledge base: corpus parser, numpy exhaustive index builder, BM25/RRF retrieval — wired into `analyzer.py::analyze_text()` |
+| `localai.py` | `src/backend/app/services/` | LLM client targeting LocalAI (Apertus-8B/EuroLLM-22B); this was never named `lm_studio.py` in the actual codebase |
 
-## New Dependencies Needed
+## Dependencies (actually added for this)
 
 | Package | License | Purpose |
 |---------|---------|---------|
-| sentence-transformers | Apache 2.0 | Embedding model loading |
-| faiss-cpu | MIT | Vector similarity search |
-| torch | BSD-3 | Model inference runtime |
-| rank-bm25 | Apache 2.0 | Hybrid retrieval (BM25 + dense) |
+| rank_bm25 | Apache 2.0 | Sparse retrieval (BM25) — already a dependency before the legal-KB work |
+| numpy | BSD | Exact/exhaustive vector similarity for legal-KB retrieval |
+
+No `sentence-transformers`, `torch`, or `faiss-cpu` were added — dense embeddings reuse the existing `LocalAIClient.embed()` HTTP call (Apertus-8B), and the vector index is a plain numpy matrix (see Vector Store above).

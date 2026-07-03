@@ -21,14 +21,20 @@ def build_user_prompt(
     jurisdiction_text = ", ".join(jurisdictions)
     legal_section = ""
     if legal_context:
-        passages = "\n".join(
-            f"[{c.get('jurisdiction', 'Law')} {c.get('section') or ''}] {c['text']}"
-            for c in legal_context
-        )
+        def _format_passage(c: dict) -> str:
+            warning = (
+                "[UNVERIFIED PLACEHOLDER — not real statute text, do not cite as authoritative] "
+                if c.get("status", "").lower() == "placeholder"
+                else ""
+            )
+            return f"{warning}[{c.get('jurisdiction', 'Law')} {c.get('section') or ''}] {c['text']}"
+
+        passages = "\n".join(_format_passage(c) for c in legal_context)
         legal_section = (
             "\nRelevant legal requirements retrieved from the legal knowledge base "
             "(use these to support legal_basis citations, do not assume they are "
-            "exhaustive):\n"
+            "exhaustive; NEVER cite a passage marked UNVERIFIED PLACEHOLDER as a "
+            "real legal basis):\n"
             f"{passages}\n"
         )
     return (

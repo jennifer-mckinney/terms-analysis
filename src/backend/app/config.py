@@ -52,6 +52,9 @@ class Settings:
 
     # ── Legal knowledge base (RAG) ──────────────────────────────────────────
     # Source corpus: data/legal_corpus/<jurisdiction>/<law>.txt (see .claude/skills/legal-kb)
+    # Vector index: plain numpy matrix, exact exhaustive cosine search — no
+    # FAISS (Meta-origin, excluded by the project's dependency no-go list;
+    # unnecessary at this corpus size anyway).
     legal_corpus_dir: Path = field(
         default_factory=lambda: Path(
             os.getenv("LEGAL_CORPUS_DIR", str(_data_dir() / "legal_corpus"))
@@ -59,7 +62,7 @@ class Settings:
     )
     legal_kb_index_path: Path = field(
         default_factory=lambda: Path(
-            os.getenv("LEGAL_KB_INDEX_PATH", str(_data_dir() / "legal_kb.faiss"))
+            os.getenv("LEGAL_KB_INDEX_PATH", str(_data_dir() / "legal_kb.npy"))
         )
     )
     legal_kb_metadata_path: Path = field(

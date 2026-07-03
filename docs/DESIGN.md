@@ -1,23 +1,24 @@
 # Design Overview
 
 ## Goals and Scope
-- Local-only analysis with LM Studio on the LAN.
-- Jurisdictions: US-CA (CCPA/CPRA) and GDPR.
+- Local-only analysis with LocalAI on the LAN.
+- Jurisdictions: 30 codes including US-CA (CCPA/CPRA) and GDPR (see `schemas.py`).
 - Human-in-the-loop review for confidence < 0.80.
 
 ## Architecture
-- `src/webapp/`: static UI (HTML/CSS/JS) served via local HTTP server.
-- `src/backend/`: FastAPI backend for ingestion, analysis, and storage.
-- LM Studio: Local LLM inference server at `LM_STUDIO_BASE_URL` (default `http://localhost:1234/v1`).
-- Local data: SQLite at `data/terms_analysis.db` (gitignored).
+- `src/webapp/`: Streamlit UI (primary) + static vanilla JS SPA (fallback), both served locally.
+- `src/backend/`: FastAPI backend for ingestion, analysis, legal-KB retrieval, and storage.
+- LocalAI: Local LLM inference server at `LOCALAI_BASE_URL` (default `http://localhost:8080/v1`), routing between Apertus-8B-Instruct and EuroLLM-22B-Instruct.
+- Local data: SQLite at `data/terms_analysis.db` (gitignored); legal corpus source text at `data/legal_corpus/` (tracked).
 
 ## Data Flow
 1. User submits URL, file, or pasted text in the UI.
 2. FastAPI ingests and normalizes the document (HTML/PDF/DOCX/RTF/TXT).
 3. Rule-based detections run for baseline signals.
-4. LLM analysis runs via LM Studio with line-numbered context.
-5. Results are merged, validated, and scored for confidence.
-6. If confidence < 0.80, a review item is created.
+4. Legal-KB retrieval fetches relevant statute passages for the selected jurisdictions.
+5. LLM analysis runs via LocalAI with line-numbered context plus legal-KB citations.
+6. Results are merged, validated, and scored for confidence.
+7. If confidence < 0.80, a review item is created.
 7. Analysis results are stored and surfaced in the UI.
 
 ## Storage
@@ -188,7 +189,8 @@ Step key:
 8. API confirms deletion.
 
 ## Configuration
-- `LM_STUDIO_BASE_URL`, `LM_STUDIO_MODEL`
+- `LOCALAI_BASE_URL`, `MODEL_WORLD`, `MODEL_EU`
+- `LEGAL_CORPUS_DIR`, `LEGAL_KB_INDEX_PATH`, `LEGAL_KB_METADATA_PATH`, `LEGAL_KB_TOP_K`
 - `DATABASE_URL`
 - `REVIEW_THRESHOLD` (default 0.80)
 - `ALLOWED_ORIGINS` (CORS)

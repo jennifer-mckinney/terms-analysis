@@ -70,6 +70,12 @@ echo "Starting fallback UI (vanilla JS SPA)..."
 (cd "$APP_DIR" && "$VENV_PATH/bin/python" -m http.server "$PORT") &
 FALLBACK_PID=$!
 
+echo "Starting primary UI (Streamlit)..."
+(cd "$APP_DIR" && "$VENV_PATH/bin/python" -m streamlit run app_streamlit.py \
+  --server.port "$STREAMLIT_PORT" \
+  --server.headless true) &
+STREAMLIT_PID=$!
+
 cleanup() {
   if [[ -n "${BACKEND_PID:-}" ]]; then
     kill "$BACKEND_PID" >/dev/null 2>&1 || true
@@ -77,11 +83,13 @@ cleanup() {
   if [[ -n "${FALLBACK_PID:-}" ]]; then
     kill "$FALLBACK_PID" >/dev/null 2>&1 || true
   fi
+  if [[ -n "${STREAMLIT_PID:-}" ]]; then
+    kill "$STREAMLIT_PID" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
-echo "Starting primary UI (Streamlit)..."
-cd "$APP_DIR"
-"$VENV_PATH/bin/python" -m streamlit run app_streamlit.py \
-  --server.port "$STREAMLIT_PORT" \
-  --server.headless true
+# Wait on all three so the script (and thus the EXIT trap) stays alive until
+# one exits or the script is signaled — this ensures cleanup() actually runs
+# for all three processes even under a non-interactive SIGTERM, not just Ctrl+C.
+wait -n "$BACKEND_PID" "$FALLBACK_PID" "$STREAMLIT_PID"

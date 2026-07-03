@@ -5,31 +5,32 @@
 | Key | Value |
 |-----|-------|
 | Purpose | Analyze ToS/Privacy Policies for compliance risks using rule-based + LLM + RAG detection |
-| Stack | FastAPI backend, vanilla JS SPA, SQLite, SaulLM-7B (local legal LLM), FAISS (embeddings) |
-| Jurisdictions | US-CA (CCPA/CPRA), EU (GDPR), Canada (PIPEDA), US-CO, US-CT, US-NY |
-| Risk Method | IRP Score = 0.5*(I/5) + 0.4*(L/5) - 0.3*(S/5) |
+| Stack | FastAPI backend, Streamlit UI (primary) + vanilla JS SPA (fallback), SQLite, LocalAI (Apertus-8B/EuroLLM-22B), numpy exhaustive search (legal-KB embeddings — not FAISS, see Hard Requirements) |
+| Jurisdictions | 30 codes including US-CA (CCPA/CPRA), GDPR, PIPEDA, US-CO, US-CT, US-NY (full list in `schemas.py`) |
+| Risk Method | Severity-weighted average (see `analyzer.py::calculate_risk_score`); an Impact/Likelihood/Safeguards "IRP" formula is a planned, not-yet-implemented enhancement |
 | Status | Beta — backend on `claude/analyze-project-1Q21W`, tests on `claude/improve-test-coverage-DGT1c` |
 
 ## Hard Requirements
 
 - **IMPORTANT:** All dependencies must be open source (Apache 2.0, MIT, BSD preferred).
-- **IMPORTANT:** No tools/services from companies facing investor lawsuits.
+- **IMPORTANT:** No tools/services from companies facing investor lawsuits (this excludes Meta-origin packages, e.g. FAISS — the legal-KB vector index uses numpy exhaustive search instead).
 - **IMPORTANT:** All dependencies must score IRP Grade A or higher.
 - **IMPORTANT:** All data stays local. No external API calls.
 - **IMPORTANT:** LLM failures must always fall back to rule-only findings with reduced confidence.
-- **IMPORTANT:** No OpenAI dependency. LLM inference is local-only via Ollama + SaulLM.
+- **IMPORTANT:** No OpenAI dependency. LLM inference is local-only via LocalAI (Apertus-8B/EuroLLM-22B).
 - Confidence < 0.80 triggers human-in-the-loop review.
-- Rule confidence is clamped to [0.35, 0.95].
-- Risk scores map to grades: A (0-3), B (3-5), C+ (5-7), C (7-8), D+ (8-9), D (9-10).
+- Rule confidence (active path, `_confidence_rules_based`) is clamped to [0.90, 0.95].
+- Risk scores (0-10 scale, higher = worse) map to grades: A (<3.5), A- (3.5-4.5), B (4.5-5.5), B- (5.5-6.5), C+ (6.5-7.5), C (7.5-8.5), D+ (>=8.5).
 
 ## Project Map
 
 | Path | Purpose |
 |------|---------|
-| `src/webapp/` | Static SPA: `index.html`, `app.js`, `style.css` |
-| `src/backend/app/` | FastAPI app: `main.py` (16 endpoints), `services/`, `schemas.py`, `models.py` |
-| `src/backend/app/services/` | Core logic: `rules.py`, `analyzer.py`, `validation.py`, `ingest.py`, `lm_studio.py`, `diffing.py`, `prompts.py` |
+| `src/webapp/` | Streamlit UI (primary, `app_streamlit.py`) + static SPA fallback: `index.html`, `app.js`, `style.css` |
+| `src/backend/app/` | FastAPI app: `main.py` (24 endpoints + `/health`), `services/`, `schemas.py`, `models.py` |
+| `src/backend/app/services/` | Core logic: `rules.py`, `analyzer.py`, `validation.py`, `ingest.py`, `localai.py`, `embedding.py`, `legal_kb.py`, `diffing.py`, `prompts.py` |
 | `src/backend/tests/` | pytest suite |
+| `data/legal_corpus/` | Legal-KB source text (tracked; currently placeholder pending real statute ingestion, see `.claude/skills/legal-kb`) |
 | `src/backend/evaluation/` | Gold dataset + F1/Kappa evaluation scripts |
 | `docs/` | `DESIGN.md`, `TODO.md`, `reports/`, `specs/`, `wireframes/` |
 | `docs/plans/` | Architecture analysis, agent/skills audit, roadmap documents |

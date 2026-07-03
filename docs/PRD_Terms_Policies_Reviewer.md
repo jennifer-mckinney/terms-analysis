@@ -235,6 +235,19 @@ Build a privacy-first web application that empowers individuals and small organi
 
 ---
 
+## Implementation Status Note (2026-07-03)
+
+An independent UI/UX validation pass (live Playwright run against both shipped UIs) found several feature-requirement gaps between this spec and the actual running app, summarized here rather than annotated inline on every checkbox below:
+
+- **F1.3 (character count, short-text warning)**: not implemented in either UI — both use a plain `<textarea>` with no live counter.
+- **F2.1 (30-code jurisdiction multi-select with flags/Select-All/Clear-All)**: Streamlit exposes a single-select dropdown with 10 codes; the JS SPA exposes only 2 (US-CA, GDPR) as pre-checked cards. The rule engine itself supports all 30 — this is a UI-surface gap, not a detection-capability gap.
+- **F3.1/F4.1 (grade/score display)**: correctly implemented in the JS SPA; **not implemented at all in Streamlit** (no grade, score, or gauge anywhere in `app_streamlit.py`) despite the backend returning both correctly.
+- **F4.3 (Verify View)**: implemented as a modal in the JS SPA (line-numbered text, highlighted matches, no prev/next navigation); **not implemented in Streamlit**.
+- **F5.1 (PDF export)**: was broken in both UIs by a backend route-ordering bug (fixed, see issue #16); the JS SPA's primary "Export Report" button downloads JSON rather than PDF (still open, issue #17).
+- **Dark mode**: JS SPA has a non-functional toggle (saves a preference, applies no styling); Streamlit has none.
+
+Given this, **Streamlit's "primary UI" designation reflects an intentional product decision, not current feature completeness** — the JS SPA fallback is presently more complete on several P0 acceptance criteria. See issue #17 for the tracked backlog to close this gap.
+
 ## Feature Requirements
 
 ### F1: Document Ingestion
@@ -1099,7 +1112,7 @@ uuid1,"Example Privacy Policy",f2,Retention,Medium,0.82,"We keep data...",145,15
 │  │  Ingestion   │  │  Analysis    │  │ Legal KB  │ │
 │  │  (ingest.py) │→ │ (analyzer.py)│←→│(legal_kb  │ │
 │  │              │  │              │  │  .py)     │ │
-│  │ - URL fetch  │  │ - Rule-based │  │ FAISS +   │ │
+│  │ - URL fetch  │  │ - Rule-based │  │ numpy +   │ │
 │  │ - File parse │  │ - LLM calls  │  │ BM25/RRF  │ │
 │  │ - Text norm  │  │ - Scoring    │  │           │ │
 │  └──────────────┘  └──────────────┘  └───────────┘ │
@@ -1493,7 +1506,7 @@ These exist in `main.py` and are documented here for completeness (JSON shapes f
 - Model loaded (recommended: LocalAI model (Apertus 8B or EuroLLM 22B))
 - API endpoint: `http://localhost:8080/v1` (configurable via `LOCALAI_BASE_URL`)
 - Model env vars: `MODEL_WORLD` for Apertus 8B, `MODEL_EU` for EuroLLM 22B
-- **Legal-KB augmentation:** before the LLM call, `analyzer.py` retrieves relevant legal-corpus passages via `legal_kb.py` (FAISS + BM25/RRF over `data/legal_corpus/`) and injects them into the prompt as citable context (see `prompts.py::build_user_prompt`'s `legal_context` parameter). Degrades to no augmentation if the index hasn't been built or LocalAI is unreachable.
+- **Legal-KB augmentation:** before the LLM call, `analyzer.py` retrieves relevant legal-corpus passages via `legal_kb.py` (numpy-exhaustive + BM25/RRF over `data/legal_corpus/`) and injects them into the prompt as citable context (see `prompts.py::build_user_prompt`'s `legal_context` parameter). Degrades to no augmentation if the index hasn't been built or LocalAI is unreachable.
 - **Operational note:** `run.sh`/`.env.example` previously set unrelated `LM_STUDIO_*` variables that never wired into these settings — fixed so `run.sh` now exports `LOCALAI_BASE_URL`/`MODEL_WORLD`/`MODEL_EU` directly.
 
 **Model Selection Criteria:**

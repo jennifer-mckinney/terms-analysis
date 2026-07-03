@@ -61,8 +61,10 @@ cp .env.example .env
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LM_STUDIO_BASE_URL` | `http://localhost:1234/v1` | LM Studio API endpoint |
-| `DATABASE_URL` | `sqlite:///./data/terms.db` | Database location |
+| `LOCALAI_BASE_URL` | `http://localhost:8080/v1` | LocalAI API endpoint |
+| `MODEL_WORLD` | `apertus-8b-instruct` | World/multilingual model |
+| `MODEL_EU` | `eurollm-22b-instruct` | EU legal-specialist model |
+| `DATABASE_URL` | `sqlite:///./data/terms_analysis.db` | Database location |
 
 ## Architecture
 

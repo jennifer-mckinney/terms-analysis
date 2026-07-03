@@ -8,18 +8,23 @@ Architecture:
   Corpus   — data/legal_corpus/<jurisdiction>/<law>.txt (see .claude/skills/legal-kb)
   Chunking — reuses embedding.py::chunk_text, preserving "## Article/Section N —
              Title" boundaries where present so each chunk stays citable.
-  Dense    — Apertus embeddings via LocalAIClient.embed(), stored in a FAISS
-             IndexFlatIP (exact inner-product search on L2-normalized vectors,
-             i.e. exact cosine similarity — no approximation, since false
-             negatives in a legal risk tool have compliance consequences).
+  Dense    — Apertus embeddings via LocalAIClient.embed(), L2-normalized and
+             persisted as a plain numpy matrix. Similarity is exact cosine
+             (normalized dot product) computed exhaustively over the
+             jurisdiction-filtered pool — no approximate/ANN index (FAISS was
+             considered and rejected: it is Meta-origin, which the project's
+             own dependency no-go list excludes, and at this corpus size
+             exhaustive search costs nothing).
   Sparse   — BM25 (rank_bm25, via embedding.py::bm25_scores) over the same
-             chunk text, for exact citation/defined-term matches.
+             pool, for exact citation/defined-term matches.
   Fusion   — Reciprocal Rank Fusion (embedding.py::rrf_fuse), same k as the
              document-chunk ensemble.
 
-Falls back to an empty result set if the index hasn't been built yet or the
-embedding endpoint is unreachable — analyze_text() must never be blocked by
-legal-KB availability (same fallback philosophy as embedding.py/localai.py).
+Falls back to an empty result set if the index hasn't been built yet, the
+embedding endpoint is unreachable, or retrieval fails for any other reason
+(e.g. a stale index built with a different embedding dimension) —
+analyze_text() must never be blocked by legal-KB availability (same fallback
+philosophy as embedding.py/localai.py).
 """
 
 import json
@@ -36,25 +41,24 @@ from .localai import LocalAIClient
 
 logger = logging.getLogger("uvicorn.error")
 
-try:
-    import faiss
-
-    _FAISS_AVAILABLE = True
-except ImportError:  # pragma: no cover - exercised only when faiss is absent
-    _FAISS_AVAILABLE = False
-    logger.warning("faiss not installed — legal knowledge base disabled")
-
 _SECTION_HEADER = re.compile(r"^##\s+(.+)$", re.MULTILINE)
 _META_LINE = re.compile(r"^#\s*([\w ]+):\s*(.+)$")
+
+# Placeholder-status chunks must always carry this warning into the LLM
+# prompt — see build_user_prompt() in prompts.py.
+PLACEHOLDER_STATUS = "placeholder"
 
 
 def _parse_corpus_file(path: Path) -> List[Dict[str, Any]]:
     """Parse one data/legal_corpus/<jurisdiction>/<law>.txt file into chunks.
 
     Leading "# Key: Value" lines are file-level metadata applied to every
-    chunk. Each "## Article/Section N — Title" block becomes one or more
-    chunks (split via chunk_text if it exceeds the chunk window); files
-    without section headers are chunked as a single block.
+    chunk (including a "# Status: PLACEHOLDER" line, if present, which must
+    survive into every chunk so retrieval callers can flag non-authoritative
+    text — see prompts.py::build_user_prompt). Each "## Article/Section N —
+    Title" block becomes one or more chunks (split via chunk_text if it
+    exceeds the chunk window); files without section headers are chunked as
+    a single block.
     """
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
@@ -113,10 +117,10 @@ def _normalize(vector: List[float]) -> Optional[np.ndarray]:
 
 
 class LegalKnowledgeBase:
-    """FAISS-backed exact search over an embedded legal corpus."""
+    """Exact (exhaustive, non-approximate) search over an embedded legal corpus."""
 
     def __init__(self) -> None:
-        self._index = None
+        self._matrix: Optional[np.ndarray] = None  # shape (n_chunks, dim), L2-normalized
         self._chunks: List[Dict[str, Any]] = []
 
     @property
@@ -126,15 +130,11 @@ class LegalKnowledgeBase:
     async def build(
         self, client: LocalAIClient, corpus_dir: Optional[Path] = None
     ) -> int:
-        """Chunk + embed the corpus, build the FAISS index, persist to disk.
+        """Chunk + embed the corpus, persist the vector matrix + metadata to disk.
 
-        Returns the number of chunks indexed (0 if faiss is unavailable, the
-        corpus directory is empty, or the embedding endpoint is unreachable).
+        Returns the number of chunks indexed (0 if the corpus directory is
+        empty or the embedding endpoint is unreachable).
         """
-        if not _FAISS_AVAILABLE:
-            logger.warning("faiss not installed — cannot build legal knowledge base")
-            return 0
-
         directory = corpus_dir or settings.legal_corpus_dir
         chunks: List[Dict[str, Any]] = []
         for file_path in _iter_corpus_files(directory):
@@ -161,35 +161,40 @@ class LegalKnowledgeBase:
             return 0
 
         matrix = np.stack(vectors).astype("float32")
-        index = faiss.IndexFlatIP(matrix.shape[1])
-        index.add(matrix)
 
         settings.legal_kb_index_path.parent.mkdir(parents=True, exist_ok=True)
-        faiss.write_index(index, str(settings.legal_kb_index_path))
+        np.save(settings.legal_kb_index_path, matrix)
         settings.legal_kb_metadata_path.write_text(
             json.dumps(kept_chunks, indent=2), encoding="utf-8"
         )
 
-        self._index = index
+        self._matrix = matrix
         self._chunks = kept_chunks
         logger.info("Legal KB built: %d chunks from %s", len(kept_chunks), directory)
         return len(kept_chunks)
 
     def _load(self) -> bool:
-        if self._index is not None:
+        if self._matrix is not None:
             return True
-        if not _FAISS_AVAILABLE:
-            return False
         index_path = settings.legal_kb_index_path
         metadata_path = settings.legal_kb_metadata_path
         if not index_path.exists() or not metadata_path.exists():
             return False
         try:
-            self._index = faiss.read_index(str(index_path))
+            self._matrix = np.load(index_path)
             self._chunks = json.loads(metadata_path.read_text(encoding="utf-8"))
         except Exception as exc:
             logger.warning("Failed to load legal KB index: %s", exc)
-            self._index = None
+            self._matrix = None
+            self._chunks = []
+            return False
+        if self._matrix.shape[0] != len(self._chunks):
+            logger.warning(
+                "Legal KB index/metadata mismatch (%d vectors, %d chunks) — ignoring",
+                self._matrix.shape[0],
+                len(self._chunks),
+            )
+            self._matrix = None
             self._chunks = []
             return False
         return True
@@ -203,23 +208,42 @@ class LegalKnowledgeBase:
     ) -> List[Dict[str, Any]]:
         """Return top-k relevant legal chunks, optionally filtered by jurisdiction.
 
-        Returns [] if the index hasn't been built or the embedding endpoint is
-        unreachable — callers must treat legal-KB context as optional.
+        Returns [] if the index hasn't been built, the embedding endpoint is
+        unreachable, or retrieval fails for any reason (e.g. a stale index
+        built with a different embedding dimension) — callers must treat
+        legal-KB context as optional, never load-bearing for analyze_text().
         """
+        try:
+            return await self._retrieve(query, client, jurisdictions, top_k)
+        except Exception as exc:
+            logger.warning("Legal KB retrieval failed, returning no context: %s", exc)
+            return []
+
+    async def _retrieve(
+        self,
+        query: str,
+        client: LocalAIClient,
+        jurisdictions: Optional[List[str]],
+        top_k: Optional[int],
+    ) -> List[Dict[str, Any]]:
         if not self._load() or not self._chunks:
             return []
 
         if jurisdictions:
             wanted = {j.lower() for j in jurisdictions}
-            pool = {
+            pool = [
                 i
                 for i, c in enumerate(self._chunks)
                 if c.get("jurisdiction", "").lower() in wanted
-            }
+            ]
             if not pool:
-                pool = set(range(len(self._chunks)))
+                logger.warning(
+                    "No legal KB chunks match jurisdictions=%s — searching full corpus",
+                    jurisdictions,
+                )
+                pool = list(range(len(self._chunks)))
         else:
-            pool = set(range(len(self._chunks)))
+            pool = list(range(len(self._chunks)))
 
         query_embedding = await client.embed(query, model=settings.model_world)
         if query_embedding is None:
@@ -228,28 +252,26 @@ class LegalKnowledgeBase:
         if query_vec is None:
             return []
 
-        k = top_k or settings.legal_kb_top_k
-        search_k = min(len(self._chunks), max(k * 5, k))
-        scores, indices = self._index.search(query_vec.reshape(1, -1), search_k)
-
-        dense_hits = [
-            (int(idx), float(score))
-            for idx, score in zip(indices[0], scores[0])
-            if idx != -1 and int(idx) in pool
-        ]
-        if not dense_hits:
+        if query_vec.shape[0] != self._matrix.shape[1]:
+            logger.warning(
+                "Legal KB embedding dimension mismatch (query=%d, index=%d) — "
+                "index likely stale for the current embedding model",
+                query_vec.shape[0],
+                self._matrix.shape[1],
+            )
             return []
 
-        candidate_texts = [self._chunks[idx]["text"] for idx, _ in dense_hits]
-        bm25 = bm25_scores(query, candidate_texts)
-        dense_scores = [score for _, score in dense_hits]
+        # Exact (exhaustive) cosine similarity over the full jurisdiction-filtered
+        # pool — no top-K truncation before filtering/fusion, so relevant chunks
+        # in a minority jurisdiction can't be silently dropped.
+        pool_matrix = self._matrix[pool]
+        dense_scores = (pool_matrix @ query_vec).tolist()
+        pool_texts = [self._chunks[idx]["text"] for idx in pool]
+        bm25 = bm25_scores(query, pool_texts)
         fused = rrf_fuse([dense_scores, bm25], k=settings.rrf_k)
 
-        ranked = sorted(
-            zip((idx for idx, _ in dense_hits), fused),
-            key=lambda pair: pair[1],
-            reverse=True,
-        )[:k]
+        k = top_k or settings.legal_kb_top_k
+        ranked = sorted(zip(pool, fused), key=lambda pair: pair[1], reverse=True)[:k]
 
         return [{**self._chunks[idx], "score": score} for idx, score in ranked]
 

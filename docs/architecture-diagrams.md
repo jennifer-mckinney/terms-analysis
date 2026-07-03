@@ -24,7 +24,7 @@ graph TB
 
         subgraph AI ["AI / ML Layer"]
             LLM["LocalAI\nApertus-8B-Instruct · EuroLLM-22B-Instruct"]:::ai
-            LKB["Legal KB\nFAISS + BM25/RRF\n(wired into analyze_text)"]:::ai
+            LKB["Legal KB\nnumpy-exhaustive + BM25/RRF\n(wired into analyze_text)"]:::ai
             EMB["Doc-chunk Embedding Ensemble\nBM25 + dense + RRF\n(NOT wired into analyze_text)"]:::ai
             RULES["Rule Engine\n64 patterns · ~50 categories · 30 jurisdictions"]:::ai
         end
@@ -110,7 +110,7 @@ graph TB
         RUL["rules.py\ndetect_findings()\n64 patterns · ~50 categories · 30 jurisdictions\nconfidence clamp 0.90–0.95"]:::svc
         VAL["validation.py\nvalidate_findings()"]:::svc
         DIF["diffing.py\ncontent_hash()\ndiff_tokens()\ndiff_summary()"]:::svc
-        LKB["legal_kb.py\nLegalKnowledgeBase\nbuild() / retrieve()\nFAISS IndexFlatIP + BM25/RRF"]:::svc
+        LKB["legal_kb.py\nLegalKnowledgeBase\nbuild() / retrieve()\nnumpy-exhaustive + BM25/RRF"]:::svc
         EMB["embedding.py\nchunk_text() / bm25_scores() / rrf_fuse()\nselect_relevant_chunks() — NOT called by analyzer.py"]:::dead
         LOC["localai.py\nLocalAIClient\n_select_model() · embed()"]:::svc
     end
@@ -205,7 +205,7 @@ flowchart TD
         subgraph LEGALKB_PASS ["Legal-KB Retrieval  legal_kb.py"]
             LK1["Query = jurisdictions + doc excerpt"]:::ai
             LK2["Embed query via LocalAIClient"]:::ai
-            LK3["FAISS IndexFlatIP search\n(exact cosine similarity)"]:::ai
+            LK3["Numpy exhaustive dot-product\n(exact cosine similarity, no FAISS)"]:::ai
             LK4["BM25 + RRF fusion\nover dense hits"]:::ai
             LK5["Top-K legal passages\n(jurisdiction-filtered)"]:::ai
         end
@@ -295,7 +295,7 @@ sequenceDiagram
             SVC -->> API: rule findings + confidence (0.90–0.95 clamp)
         and Legal-KB retrieval
             API ->> LKB : retrieve(query, client, jurisdictions)
-            LKB -->> API: top-K legal passages (FAISS + BM25/RRF), or [] if index/endpoint unavailable
+            LKB -->> API: top-K legal passages (numpy-exhaustive + BM25/RRF), or [] if index/endpoint unavailable
         and LLM pass
             API ->> SVC  : _select_model(text) → language route
             SVC ->> AI   : prompt + rule findings + legal-KB context

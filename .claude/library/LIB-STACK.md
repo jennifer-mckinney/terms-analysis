@@ -21,15 +21,11 @@ See @.claude/library/LIB-LEGAL.md for LLM/embedding/inference tool approvals.
 | reportlab | BSD | A+ | PDF export generation |
 | pytesseract | Apache-2.0 | A+ | OCR fallback for scanned PDFs |
 | pillow | HPND | A+ | Image processing for OCR |
+| langdetect | BSD | A+ | Language routing (Apertus vs. EuroLLM) |
+| rank_bm25 | Apache 2.0 | A+ | Sparse retrieval (BM25) for document-chunk and legal-KB ensembles |
+| numpy | BSD | A+ | Exact/exhaustive vector similarity (legal-KB retrieval — see Rejected Dependencies for why not FAISS) |
 
-## Python Dependencies (Planned — RAG Pipeline)
-
-| Package | License | IRP Grade | Purpose |
-|---------|---------|-----------|---------|
-| sentence-transformers | Apache 2.0 | A+ | Legal embedding model loading |
-| faiss-cpu | MIT | A+ | Vector similarity search |
-| torch | BSD-3 | A+ | Model inference runtime |
-| rank-bm25 | Apache 2.0 | A+ | Hybrid retrieval (BM25 + dense) |
+RAG pipeline is implemented (`services/legal_kb.py`, `services/embedding.py`) using the packages above plus the existing LocalAI client for dense embeddings — no sentence-transformers/torch/FAISS were added; see Rejected Dependencies.
 
 ## Test Dependencies
 
@@ -44,10 +40,11 @@ See @.claude/library/LIB-LEGAL.md for LLM/embedding/inference tool approvals.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `LLM_BASE_URL` | `http://localhost:11434/v1` | Ollama endpoint |
-| `LLM_MODEL` | `saullm-7b-instruct` | Legal LLM model name |
-| `EMBEDDING_MODEL` | `freelawproject/modernbert-embed-base_finetune_8192` | Legal embedding model |
-| `FAISS_INDEX_PATH` | `data/legal_kb.faiss` | Vector index location |
+| `LOCALAI_BASE_URL` | `http://localhost:8080/v1` | LocalAI endpoint |
+| `MODEL_WORLD` / `MODEL_EU` | `apertus-8b-instruct` / `eurollm-22b-instruct` | LLM model names (language-routed) |
+| `LEGAL_CORPUS_DIR` | `data/legal_corpus` | Legal-KB source corpus directory |
+| `LEGAL_KB_INDEX_PATH` | `data/legal_kb.npy` | Legal-KB vector index location (numpy, not FAISS) |
+| `LEGAL_KB_METADATA_PATH` | `data/legal_kb_metadata.json` | Legal-KB chunk metadata |
 | `DATABASE_URL` | `sqlite:///data/terms_analysis.db` | SQLite path |
 | `REVIEW_THRESHOLD` | `0.80` | Confidence threshold for HITL review |
 | `LLM_REQUEST_TIMEOUT_S` | `60` | LLM request timeout |
@@ -59,7 +56,8 @@ See @.claude/library/LIB-LEGAL.md for LLM/embedding/inference tool approvals.
 
 | Tech | Purpose |
 |------|---------|
-| Vanilla HTML/CSS/JS | No build step, no bundler |
+| Streamlit | Primary UI (`app_streamlit.py`, served on :8501 by `run.sh`) |
+| Vanilla HTML/CSS/JS | Fallback UI (`index.html`/`app.js`/`style.css`, :8000) — no build step, no bundler |
 | Font Awesome | Icons (CSS-only) |
 | CSS custom properties | Design tokens, light/dark theming |
 | Fetch API | Backend communication |
@@ -74,3 +72,5 @@ See @.claude/library/LIB-LEGAL.md for LLM/embedding/inference tool approvals.
 | Ollama GUI/Turbo | Unclear license / proprietary |
 | Voyage AI | API-only, proprietary |
 | Pile of Law | CC-BY-NC-SA-4.0 (non-commercial) |
+| FAISS / faiss-cpu | Meta/Facebook origin — ANY Meta-origin dependency is rejected, no exceptions. Legal-KB uses numpy exhaustive search instead (`services/legal_kb.py`). |
+| torch / PyTorch | Meta origin — same rejection, no exceptions. |

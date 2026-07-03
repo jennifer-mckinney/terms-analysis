@@ -22,7 +22,7 @@ The AI Terms & Policies Reviewer is a privacy-focused web application that analy
 - Industry-specific analysis profiles
 - FastAPI backend with SQLite storage
 - Streamlit primary UI + vanilla JS SPA fallback
-- Legal-knowledge-base RAG retrieval (FAISS + BM25/RRF), shipped with placeholder corpus text pending real statute ingestion
+- Legal-knowledge-base RAG retrieval (numpy-exhaustive + BM25/RRF), shipped with placeholder corpus text pending real statute ingestion
 
 ### Strategic Goals
 
@@ -339,10 +339,11 @@ The AI Terms & Policies Reviewer addresses this gap through:
 
 **Technology Stack:**
 
-**Frontend — two UIs, Streamlit primary:**
-- **Streamlit** (`src/webapp/app_streamlit.py`) — primary UI, launched by `run.sh` on port 8501
+**Frontend — two UIs, Streamlit designated primary:**
+- **Streamlit** (`src/webapp/app_streamlit.py`) — primary UI by product decision, launched by `run.sh` on port 8501
 - **Vanilla JS SPA** (`src/webapp/index.html` / `app.js` / `style.css`) — fallback UI, launched by `run.sh` on port 8000, no build step or bundler
 - 4-space indentation (HTML/JS), 2-space (CSS)
+- **Known gap:** an independent UI/UX validation pass (live Playwright run, 2026-07-03) found the JS SPA fallback currently has more complete feature coverage than the "primary" Streamlit UI — notably, Streamlit displays no grade/risk score anywhere and has no Verify View, both of which the JS SPA implements. Tracked in issue #17; "primary" reflects the intended product direction, not current feature parity.
 
 **Backend:**
 - FastAPI (Python 3.11+)
@@ -353,7 +354,7 @@ The AI Terms & Policies Reviewer addresses this gap through:
 **AI/ML:**
 - LocalAI inference (Apache 2.0) routing between Apertus-8B-Instruct (world/multilingual) and EuroLLM-22B-Instruct (EU legal specialist), selected per-document by language detection
 - API endpoint: `http://localhost:8080/v1` (`LOCALAI_BASE_URL`)
-- Legal-knowledge-base retrieval (`legal_kb.py`): FAISS-backed exact search over an embedded statute corpus (`data/legal_corpus/`), fused with BM25 via Reciprocal Rank Fusion, injecting citable legal passages into the LLM prompt. Ships with placeholder corpus text pending real statute ingestion (see Appendix A note).
+- Legal-knowledge-base retrieval (`legal_kb.py`): numpy-exhaustive exact search over an embedded statute corpus (`data/legal_corpus/`), fused with BM25 via Reciprocal Rank Fusion, injecting citable legal passages into the LLM prompt. Ships with placeholder corpus text pending real statute ingestion (see Appendix A note).
 
 **Document Processing:**
 - PDF, DOCX, RTF, HTML, plain text support (OCR fallback for scanned PDFs)
@@ -1160,7 +1161,7 @@ terms-analysis/
 │   │   │   │   ├── validation.py
 │   │   │   │   ├── diffing.py    # Watchlist change detection
 │   │   │   │   ├── embedding.py  # BM25 + dense RRF chunk selection
-│   │   │   │   ├── legal_kb.py   # Legal-KB retrieval (FAISS + BM25/RRF)
+│   │   │   │   ├── legal_kb.py   # Legal-KB retrieval (numpy-exhaustive + BM25/RRF)
 │   │   │   │   └── localai.py    # LLM client (Apertus/EuroLLM routing)
 │   │   │   ├── models.py         # Database models
 │   │   │   └── config.py         # Configuration

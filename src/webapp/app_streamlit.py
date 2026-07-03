@@ -646,7 +646,7 @@ def main() -> None:
                     st.caption("Executive summary, severity table, and annotated findings.")
                     if doc_id:
                         try:
-                            pdf_resp = requests.get(f"{API_BASE}/analyses/{doc_id}/export/pdf", timeout=30)
+                            pdf_resp = requests.get(f"{API_BASE}/exports/analysis/{doc_id}.pdf", timeout=30)
                             if pdf_resp.status_code == 200:
                                 st.download_button(
                                     label="Download PDF",

@@ -1,12 +1,9 @@
-# Jurisdiction: Canada
+# Jurisdiction: PIPEDA
 # Law: Personal Information Protection and Electronic Documents Act (PIPEDA) — PLACEHOLDER CORPUS
 # Source: PENDING — real fetch blocked this session, see issue #6
 # Effective Date: PENDING
-#
-# *** THIS FILE IS SYNTHETIC PLACEHOLDER TEXT, NOT REAL STATUTE TEXT. ***
-# Do NOT use for compliance decisions. Replace with real Schedule 1 (Fair
-# Information Principles) text from S.C. 2000, c. 5 before this corpus is
-# relied upon by analyze_text().
+# Status: PLACEHOLDER
+# Disclaimer: THIS FILE IS SYNTHETIC PLACEHOLDER TEXT, NOT REAL STATUTE TEXT. Do NOT use for compliance decisions. Replace with real Schedule 1 (Fair Information Principles) text from S.C. 2000, c. 5 before this corpus is relied upon by analyze_text().
 
 ## Principle 1 — Accountability
 [PLACEHOLDER] An organization is responsible for personal information under its control and must designate an individual accountable for compliance.
