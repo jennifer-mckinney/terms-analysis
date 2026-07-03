@@ -90,8 +90,11 @@ tmp/
 temp/
 *.tmp
 
-# Local data
-data/
+# Local data — runtime DB and generated legal-KB index/metadata are ignored,
+# but the legal_corpus/ source text is checked in like any other source asset.
+data/*
+!data/legal_corpus/
+!data/legal_corpus/**
 *.db
 
 # Archive backups (already in archive/ but ignore if generated)

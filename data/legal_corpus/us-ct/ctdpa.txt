@@ -1,0 +1,15 @@
+# Jurisdiction: US-CT
+# Law: Connecticut Data Privacy Act (CTDPA) — PLACEHOLDER CORPUS
+# Source: PENDING — real fetch blocked this session, see issue #6
+# Effective Date: PENDING
+#
+# *** THIS FILE IS SYNTHETIC PLACEHOLDER TEXT, NOT REAL STATUTE TEXT. ***
+# Do NOT use for compliance decisions. Replace with real Public Act 22-15 /
+# Conn. Gen. Stat. § 42-515 et seq. text before this corpus is relied upon
+# by analyze_text().
+
+## Section 4 — Consumer rights
+[PLACEHOLDER] Consumers have the right to confirm processing, access, correct, delete, obtain a portable copy of their personal data, and opt out of targeted advertising, sale, and profiling.
+
+## Section 6 — Controller responsibilities
+[PLACEHOLDER] Controllers must limit data collection to what is adequate and relevant, establish reasonable security practices, and not process sensitive data without consent.

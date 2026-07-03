@@ -6,11 +6,11 @@ import json
 from typing import List, Optional
 from uuid import uuid4
 import time
-import asyncio
 import re
 
 from ..config import settings
 from ..schemas import AnalysisPayload, DocType, Finding, IndustryProfile, Jurisdiction, Evidence
+from .legal_kb import get_legal_kb
 from .localai import LocalAIClient
 from .rules import detect_findings
 from .validation import validate_findings
@@ -225,10 +225,16 @@ async def analyze_text(
             else:
                 formatted_rules.append(json.loads(finding.json()))
 
+        legal_query = " ".join(jurisdictions) + " " + cleaned[:500]
+        legal_context = await get_legal_kb().retrieve(
+            legal_query, client, jurisdictions=jurisdictions
+        )
+
         llm_payload = await client.analyze(
             numbered_text=numbered_text,
             jurisdictions=jurisdictions,
             rule_findings=formatted_rules,
+            legal_context=legal_context,
         )
 
         llm_findings: List[Finding] = []

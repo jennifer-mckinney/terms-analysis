@@ -1,0 +1,30 @@
+# Jurisdiction: US-CA
+# Law: California Consumer Privacy Act / CPRA — PLACEHOLDER CORPUS
+# Source: PENDING — real fetch blocked this session, see issue #6 (WebFetch returned 403)
+# Effective Date: PENDING
+#
+# *** THIS FILE IS SYNTHETIC PLACEHOLDER TEXT, NOT REAL STATUTE TEXT. ***
+# Exists only to exercise the legal-KB pipeline end-to-end. Do NOT use for
+# compliance decisions. Replace with real Cal. Civ. Code § 1798.100 et seq.
+# text before this corpus is relied upon by analyze_text().
+
+## Section 1798.100 — General duties of businesses that collect personal information
+[PLACEHOLDER] A business that controls the collection of a consumer's personal information must, at or before the point of collection, inform consumers of the categories of personal information to be collected and the purposes for which they will be used.
+
+## Section 1798.105 — Consumers' right to delete personal information
+[PLACEHOLDER] A consumer has the right to request that a business delete any personal information about the consumer which the business has collected, subject to specified exceptions.
+
+## Section 1798.115 — Right to know about third-party sale/sharing
+[PLACEHOLDER] A consumer has the right to request that a business disclose the categories of third parties to whom the business sold or shared personal information.
+
+## Section 1798.120 — Right to opt out of sale/sharing
+[PLACEHOLDER] A consumer has the right, at any time, to direct a business that sells or shares personal information to third parties not to sell or share the consumer's personal information.
+
+## Section 1798.121 — Right to limit use of sensitive personal information
+[PLACEHOLDER] A consumer has the right to direct a business to limit its use of sensitive personal information to that necessary to perform the services reasonably expected by an average consumer.
+
+## Section 1798.125 — Non-discrimination
+[PLACEHOLDER] A business shall not discriminate against a consumer for exercising any of their rights under this title, including denying goods or services or charging different prices.
+
+## Section 1798.140 — Definitions
+[PLACEHOLDER] Defines "sale," "share," "sensitive personal information," and related terms used throughout the title.

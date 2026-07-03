@@ -16,8 +16,21 @@ def build_user_prompt(
     numbered_text: str,
     jurisdictions: List[Jurisdiction],
     rule_findings: List[dict],
+    legal_context: List[dict] | None = None,
 ) -> str:
     jurisdiction_text = ", ".join(jurisdictions)
+    legal_section = ""
+    if legal_context:
+        passages = "\n".join(
+            f"[{c.get('jurisdiction', 'Law')} {c.get('section') or ''}] {c['text']}"
+            for c in legal_context
+        )
+        legal_section = (
+            "\nRelevant legal requirements retrieved from the legal knowledge base "
+            "(use these to support legal_basis citations, do not assume they are "
+            "exhaustive):\n"
+            f"{passages}\n"
+        )
     return (
         "Analyze the document for privacy and terms risks for jurisdictions: "
         f"{jurisdiction_text}.\n\n"
@@ -46,7 +59,8 @@ def build_user_prompt(
         "- Every finding must include at least one legal_basis citation.\n"
         "- Only include issues supported by the text.\n"
         "- Keep categories short (e.g., Sale/Share, ADM, Retention, Rights).\n"
-        "- If there are no issues, return an empty findings list.\n\n"
+        "- If there are no issues, return an empty findings list.\n"
+        f"{legal_section}\n"
         "Rule-based detections (for context, may be partial):\n"
         f"{rule_findings}\n\n"
         "Document (with line numbers):\n"
