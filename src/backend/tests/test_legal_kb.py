@@ -303,3 +303,12 @@ def test_cli_main_indexes_corpus_and_prints_count(patched_paths, monkeypatch, ca
 
     captured = capsys.readouterr()
     assert "Indexed 1 legal KB chunks" in captured.out
+
+
+def test_cli_main_rejects_invalid_action(monkeypatch):
+    """argparse validation still runs even though the parsed args aren't
+    bound to a variable (only "index" is a valid CLI action)."""
+    monkeypatch.setattr(sys, "argv", ["legal_kb.py", "not-a-real-action"])
+
+    with pytest.raises(SystemExit):
+        asyncio.run(_main())

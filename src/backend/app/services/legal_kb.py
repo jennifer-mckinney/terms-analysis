@@ -297,7 +297,7 @@ async def _main() -> None:
             "full rebuild is simplest/correct at this corpus size."
         ),
     )
-    args = parser.parse_args()
+    parser.parse_args()
 
     kb = get_legal_kb()
     client = LocalAIClient()
