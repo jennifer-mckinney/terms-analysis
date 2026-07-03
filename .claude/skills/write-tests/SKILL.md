@@ -8,7 +8,7 @@ allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 
 ## Phase 1: Understand the Target
 
-1. **Identify the module** from `$ARGUMENTS` (e.g., "rules", "validation", "analyzer", "ingest", "lm_studio", "diffing", "prompts", "schemas", "config", "api")
+1. **Identify the module** from `$ARGUMENTS` (e.g., "rules", "validation", "analyzer", "ingest", "localai", "diffing", "prompts", "schemas", "config", "api")
 2. **Read the source file**: `src/backend/app/services/$ARGUMENTS.py` (or `app/$ARGUMENTS.py` for schemas/config, `app/main.py` for api)
 3. **Read existing tests**: check `src/backend/tests/test_$ARGUMENTS.py` if it exists
 4. **Read the coverage gap analysis**: @.claude/library/LIB-TEST.md — find the module's section
