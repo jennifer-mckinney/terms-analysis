@@ -1,10 +1,13 @@
-# LIB-CONTEXT: Context Chip Taxonomy & Surfacing Bias
+# LIB-CONTEXT — context chip taxonomy, weight tiers, sort semantics, verdict copy
+loads: on-trigger
+scope: project
+xref: [[LIB-VOICE]] [[LIB-RULES#IRP]] [[LIB-PRINCIPLES#P6]] [[docs/wireframes/issue-19-design-decisions.md]]
 
-> **Status (2026-07-03):** shipped in PR #34 (issue #19 redesign). This documents the context-chip system as implemented in `src/backend/app/services/context.py` and consumed by `src/webapp/app_streamlit_v2.py`. Treat this as ground truth for reader-intent modeling.
+status: shipped PR #34 (issue #19 redesign). ground truth for `services/context.py` + `src/webapp/app_streamlit_v2.py`.
 
-## The five chips
+## chips
 
-Copy is taken verbatim from `CONTEXT_CHIPS` in `src/webapp/app_streamlit_v2.py`. `value` is the stable id used in the backend contract; `label` is the chip text; `sub` is the italic help copy shown under the label.
+Copy verbatim from `CONTEXT_CHIPS` in `src/webapp/app_streamlit_v2.py`. `value` = stable backend id; `label` = chip text; `sub` = italic help under label.
 
 | value | label | italic sub-line |
 |-------|-------|-----------------|
@@ -14,9 +17,11 @@ Copy is taken verbatim from `CONTEXT_CHIPS` in `src/webapp/app_streamlit_v2.py`.
 | `for_work` | For work or a vendor pick | *A tool the team might use, or an agreement to sign.* |
 | `just_curious` | Just curious | *Sometimes it is good to just know. No pressure either way.* |
 
-The chips are the canonical `ContextChip` Literal in `src/backend/app/schemas.py`. `main.py::_VALID_CHIPS` is derived at module load via `frozenset(get_args(ContextChip))` so drift fails at import.
+### CTX1: chips-are-canonical-Literal
+rule: chips are the canonical `ContextChip` Literal in `src/backend/app/schemas.py`; `main.py::_VALID_CHIPS` derived at module load via `frozenset(get_args(ContextChip))`
+because: drift fails at import
 
-## Priority order (verdict copy only)
+## priority-order
 
 ```python
 _CHIP_PRIORITY: list[ContextChip] = [
@@ -28,24 +33,29 @@ _CHIP_PRIORITY: list[ContextChip] = [
 ]
 ```
 
-Rationale: **personal-stakes lenses win the headline over professional lenses.** When someone selects both `for_child` and `for_work`, the child lens frames the verdict — the professional context is a secondary concern. Reason: if a parent is checking a policy on behalf of their child at work (an EdTech vendor pick, say), the harm horizon on the child side is more consequential than the vendor-onboarding side. If the reader disagrees, they can deselect the child chip.
+### CTX2: personal-stakes-win-headline
+rule: personal-stakes lenses win the verdict headline over professional lenses
+apply: when multi-select includes both `for_child` and `for_work`, child lens frames the verdict
+because: parent checking on behalf of child at work → child harm horizon more consequential; reader can deselect the child chip if disagreement
+scope: controls verdict copy ONLY (headline + label); does NOT control surfacing order (surfacing sums weights, see CTX5)
 
-This priority controls **verdict copy only** (which headline + label the reader sees). It does **not** control surfacing order — surfacing sums weights across all selected chips (see below).
-
-## Weight tier scale
+## weight-tier-scale
 
 | Tier | Weight | Semantics |
 |------|--------|-----------|
-| Baseline | 1.0 | Category is not specifically privileged for this chip. IRP drives its order. |
+| Baseline | 1.0 | Category not specifically privileged for this chip. IRP drives its order. |
 | Boosted | 2.0 | Category is meaningful in this context; surfaces above IRP-equal baseline items. |
-| Priority | 2.5 | Category is one of the top handful the reader should notice for this context. |
-| Signature | 3.0 | Category is the defining risk for this context. Always surfaces first if present. |
+| Priority | 2.5 | Top handful for this context. |
+| Signature | 3.0 | Defining risk for this context. Always surfaces first if present. |
 
-`for_work` uses one intermediate rung not in the base tier scale (2.2, 2.4, 2.6, 2.8) to differentiate the vendor-review categories at finer granularity — Liability at 3.0, Unilateral Changes at 2.8, Data Security at 2.6, Breach Notification at 2.5, Cross-Border Transfer at 2.4, ADM at 2.2. This is the only chip that uses sub-tier weights.
+### CTX3: for_work-sub-tier-weights
+rule: `for_work` uses intermediate rungs (2.2, 2.4, 2.6, 2.8) not in base scale
+detail: Liability 3.0, Unilateral Changes 2.8, Data Security 2.6, Breach Notification 2.5, Cross-Border Transfer 2.4, ADM 2.2
+because: only chip that needs finer vendor-review differentiation
 
-## Full `CATEGORY_WEIGHTS` reference
+## category-weights
 
-Dumped verbatim from `services/context.py` — treat this table as authoritative and re-generate if the file changes.
+Dumped verbatim from `services/context.py` — authoritative.
 
 ```python
 CATEGORY_WEIGHTS: dict[ContextChip, dict[str, float]] = {
@@ -89,13 +99,19 @@ CATEGORY_WEIGHTS: dict[ContextChip, dict[str, float]] = {
 }
 ```
 
-Two chips (`want_understand` and `just_curious`) are **intentionally empty**. They collapse to IRP-driven order — the reader has expressed no specific lens, so the tool defaults to "show what the composite risk score says matters."
+### CTX4: baseline-chips-are-empty
+rule: `want_understand` and `just_curious` weight maps MUST be empty
+because: reader expressed no specific lens; collapse to IRP-driven order
 
-Every key in this dict is validated against `schemas.CATEGORIES` at module load. If a category name changes in `schemas.py` and this dict is not updated, `context.py` raises at import.
+### CTX5: category-weight-drift-guard
+rule: every key in `CATEGORY_WEIGHTS` MUST be validated against `schemas.CATEGORIES` at module load
+enforcement: raises at import if unknown key; drift fails before serve
+xref: [[LIB-RULES#category-taxonomy]]
 
-## Multi-select semantics
+## multi-select
 
-**Weights are summed across all selected chips, capped at 3.0.** From `_merge_weights` in `context.py`:
+### CTX6: sum-and-cap
+rule: weights sum across selected chips, capped at 3.0
 
 ```python
 def _merge_weights(context: list[ContextChip]) -> dict[str, float]:
@@ -108,17 +124,13 @@ def _merge_weights(context: list[ContextChip]) -> dict[str, float]:
     return merged
 ```
 
-Example: reader selects `for_child` AND `for_care`.
-- `Dark Patterns` = 2.0 (child) + 3.0 (care) = **3.0** (capped)
-- `Data Sale / Sharing` = 2.0 (child) + 2.0 (care) = **3.0** (capped)
-- `Children's Privacy` = 3.0 (child) + 0 (care) = **3.0**
-- `Health Data` = 0 (child) + 2.5 (care) = **2.5**
+example: `for_child` + `for_care` → Dark Patterns = 2.0 + 3.0 = **3.0 (capped)**; Data Sale/Sharing = 2.0 + 2.0 = **3.0 (capped)**; Children's Privacy = 3.0 + 0 = **3.0**; Health Data = 0 + 2.5 = **2.5**
+because: cap prevents multi-select from dominating; picking every chip degrades to "everything important" → IRP takes over
 
-The cap prevents multi-select from producing weights that dominate every other consideration. It also means the reader can't game the system by picking every chip — the effective ordering degrades to "everything is important" and IRP takes over.
+## sort-key
 
-## Sort key (tier-first)
-
-From `apply_category_weights` in `context.py`:
+### CTX7: tier-first-sort
+rule: sort key is `(weight, irp_score, severity_rank)`, all descending
 
 ```python
 def sort_key(f: Finding) -> tuple[float, float, int]:
@@ -129,20 +141,23 @@ def sort_key(f: Finding) -> tuple[float, float, int]:
 return sorted(findings, key=sort_key, reverse=True)
 ```
 
-**All three dimensions descending.** Sort is **tier-first**:
-1. **Category weight leads.** A category weighted 3.0 for the reader's context always outranks a category weighted 2.0, regardless of IRP or severity. This is the entire point — the reader told the tool what mattered to them, and the tool honors that as the top-priority dimension.
-2. **IRP breaks ties within a weight tier.** Among two `for_child`-tagged Children's Privacy findings, the higher-IRP one surfaces first.
-3. **Severity rank is the final tie-breaker.** Rare, but disambiguates when both weight and IRP are equal.
+order:
+1. context weight leads — 3.0-weighted category always outranks 2.0, regardless of IRP or severity
+2. IRP breaks ties within a weight tier
+3. severity rank is final tie-breaker
 
-Baseline chips (`want_understand`, `just_curious`) collapse all categories to weight 1.0, so IRP drives the entire sort.
+baseline_chips: `want_understand`, `just_curious` collapse all categories to 1.0 → IRP drives entire sort
 
-`_severity_fallback` provides an IRP approximation for legacy findings without `irp_score`: `{"Critical": 0.9, "High": 0.75, "Medium": 0.5, "Low": 0.25}`.
+### CTX8: severity-fallback-for-legacy
+rule: legacy findings without `irp_score` use `_severity_fallback`: `{"Critical": 0.9, "High": 0.75, "Medium": 0.5, "Low": 0.25}`
 
-Category-not-found defaults to weight `1.0` — an unweighted category is baseline, not zero. Zero would exile it below every weighted item, which is wrong for `just_curious`-style baseline chips.
+### CTX9: category-not-found-default
+rule: category-not-found defaults to weight `1.0`, NOT zero
+because: unweighted category is baseline; zero would exile below every weighted item — wrong for `just_curious`-style baselines
 
-## Verdict headline templates
+## verdict-headlines
 
-`VERDICT_HEADLINE` in `context.py`, keyed by `(context_chip, action_readiness)`. Copy is intentionally observational and tentative — see LIB-VOICE for the rules that generated this copy.
+`VERDICT_HEADLINE` in `context.py`, keyed by `(context_chip, action_readiness)`. Observational + tentative — see LIB-VOICE for rules.
 
 | Chip | Go | Review | Stop |
 |------|----|--------|------|
@@ -152,9 +167,9 @@ Category-not-found defaults to weight `1.0` — an unweighted category is baseli
 | `for_work` | For work use, this policy holds up better than most. | For work use, a few clauses here deserve a second look before sign-off. | For work use, several clauses here could put the business on the hook. |
 | `just_curious` | This policy is relatively clear. | There are a few things worth noting here. | This policy has several notable practices. |
 
-## Verdict chip labels
+## verdict-labels
 
-`VERDICT_LABEL` in `context.py`. Short, actionable, never grades. The design decision was that labels should tell the reader **what to do next**, not what letter grade the policy earned. See LIB-VOICE §"Verdict labels are actionable" for the rationale.
+`VERDICT_LABEL` in `context.py`. Short, actionable, never grades. See LIB-VOICE §V9.
 
 | Chip | Go | Review | Stop |
 |------|----|--------|------|
@@ -164,16 +179,16 @@ Category-not-found defaults to weight `1.0` — an unweighted category is baseli
 | `for_work` | Workable | Worth a legal pass | Not vendor-safe as written |
 | `just_curious` | Clear | Worth noting | Notable practices |
 
-## Public API of `services/context.py`
+## public-api
 
-- `resolve_context(context: list[ContextChip]) -> ContextChip` — picks the strongest chip from a multi-select using `_CHIP_PRIORITY`. Returns `want_understand` if the list is empty (default intake framing).
-- `apply_category_weights(findings: list[Finding], context: list[ContextChip]) -> list[Finding]` — returns a re-sorted list, **does not mutate** the findings' `irp_score`.
-- `verdict_headline(context: list[ContextChip], action_readiness: str) -> str` — the long verdict sentence.
-- `verdict_label(context: list[ContextChip], action_readiness: str) -> str` — the short chip label.
+| Function | Purpose |
+|----------|---------|
+| `resolve_context(context: list[ContextChip]) -> ContextChip` | picks strongest chip from multi-select via `_CHIP_PRIORITY`; returns `want_understand` if empty |
+| `apply_category_weights(findings, context) -> list[Finding]` | returns re-sorted list; does NOT mutate `irp_score` |
+| `verdict_headline(context, action_readiness) -> str` | long verdict sentence |
+| `verdict_label(context, action_readiness) -> str` | short chip label |
 
-## Import-time drift guard
-
-`CATEGORY_WEIGHTS` keys are validated against `schemas.CATEGORIES` at module load:
+## import-time-drift-guard
 
 ```python
 _unknown_weight_keys = {
@@ -189,9 +204,15 @@ if _unknown_weight_keys:
     )
 ```
 
-If a category is renamed in `schemas.py` and this file isn't updated, the backend refuses to start. Same guard exists in `analyzer.py` for its category-keyed dicts. See `.claude/rules/testing.md` §Rule 1 for the general pattern.
+### CTX10: same-guard-in-analyzer
+rule: `analyzer.py` has the same import-time guard for its category-keyed dicts
+xref: [[.claude/rules/testing.md#R1]]
 
-## Deferred / open
+## deferred
 
-- `for_compliance_review` and `already_agreed` chips were considered but deferred pending usage data on the five shipped chips (see `docs/wireframes/issue-19-design-decisions.md`).
-- Backend LLM top-things generation is currently derived client-side from `finding.explanation` in `app_streamlit_v2.py`. Backend-driven generation is a follow-up.
+### CTX11: chips-under-consideration
+rule: `for_compliance_review` and `already_agreed` deferred pending usage data on the shipped 5
+xref: [[docs/wireframes/issue-19-design-decisions.md]]
+
+### CTX12: backend-top-things-followup
+rule: backend LLM top-things generation currently derived client-side from `finding.explanation` in `app_streamlit_v2.py`; backend-driven generation is a follow-up

@@ -1,8 +1,11 @@
-# LIB-API: API Endpoints & Contracts
+# LIB-API — endpoints, request/response schemas, error contracts
+loads: on-trigger
+scope: project
+xref: [[LIB-ARCH]] [[LIB-RULES]] [[LIB-CONTEXT]] [[.claude/rules/testing.md#R2]]
 
-> **Status (2026-07-03):** endpoint map corrected — 24 business routes + `/health` = 25 total, verified against `main.py`'s `@app.*` decorators. Previous version of this file only listed 16 (missing batch analysis, snapshots, diff, and policy-watch).
+status (2026-07-03): endpoint map = 24 business routes + `/health` = 25 total, verified against `main.py` `@app.*` decorators.
 
-## Endpoint Map
+## endpoint-map
 
 | Method | Path | Auth | Request | Response | Notes |
 |--------|------|------|---------|----------|-------|
@@ -10,31 +13,40 @@
 | POST | `/analyze` | None | `AnalyzeRequest` (JSON) | `AnalysisPayload` | Text analysis |
 | POST | `/analyze/url` | None | `AnalyzeUrlRequest` (JSON) | `AnalysisPayload` | URL fetch + analysis |
 | POST | `/analyze/file` | None | multipart: `file`, `name?`, `doc_type?`, `jurisdictions?` | `AnalysisPayload` | File upload |
-| POST | `/analyze/batch` | None | `AnalyzeBatchRequest` (JSON: `items: List[BatchItem]`) | `dict` (per-item results) | Batch of URLs/files |
+| POST | `/analyze/batch` | None | `AnalyzeBatchRequest` | `dict` (per-item) | Batch of URLs/files |
 | GET | `/analyses` | None | query: `skip`, `limit` | `List[AnalysisSummary]` | Paginated list |
 | GET | `/rubric` | None | — | `RubricScores \| None` | Computed from all analyses |
-| GET | `/analyses/{id}` | None | path: `id` | `AnalysisPayload` | Single analysis (404 if missing) |
-| GET | `/exports/analyses.csv` | None | — | CSV file download | |
-| GET | `/exports/analysis/{id}.pdf` | None | path: `id` | PDF file download | Requires reportlab; route registered *before* the JSON export route below it so it isn't shadowed |
-| GET | `/exports/analysis/{id}` | None | path: `id` | JSON file download | |
+| GET | `/analyses/{id}` | None | path: `id` | `AnalysisPayload` | 404 if missing |
+| GET | `/exports/analyses.csv` | None | — | CSV download | |
+| GET | `/exports/analysis/{id}.pdf` | None | path: `id` | PDF download | Requires reportlab; route registered BEFORE JSON export below so not shadowed |
+| GET | `/exports/analysis/{id}` | None | path: `id` | JSON download | |
 | GET | `/reviews` | None | — | `List[ReviewItemPayload]` | Pending reviews |
-| POST | `/reviews/{id}` | None | `ReviewUpdate` (JSON) | `ReviewItemPayload` | Approve/reject |
-| GET | `/watchlist` | None | — | `List[WatchlistItemPayload]` | All watchlist items |
-| POST | `/watchlist` | None | `WatchlistCreateRequest` (JSON) | `WatchlistItemPayload` | Add vendor |
+| POST | `/reviews/{id}` | None | `ReviewUpdate` | `ReviewItemPayload` | Approve/reject |
+| GET | `/watchlist` | None | — | `List[WatchlistItemPayload]` | All items |
+| POST | `/watchlist` | None | `WatchlistCreateRequest` | `WatchlistItemPayload` | Add vendor |
 | DELETE | `/watchlist/{id}` | None | path: `id` | `{detail}` | Remove vendor |
 | POST | `/watchlist/{id}/refresh` | None | path: `id` | `WatchlistItemPayload` | Re-fetch + diff |
-| GET | `/snapshots` | None | — | `List[PolicySnapshotListItem]` | Lightweight list (no `raw_text`) |
-| GET | `/snapshots/detail/{id}` | None | path: `id` | `PolicySnapshotPayload` | Full snapshot incl. `raw_text` |
-| POST | `/snapshots` | None | body: `{url}` | `PolicySnapshotPayload` | Fetch + hash + store a snapshot |
-| GET | `/diff/{id1}/{id2}` | None | path: two snapshot ids | `DiffResult` | Token-level added/removed diff |
-| POST | `/policy-watch` | None | `PolicyWatchCreateRequest` (JSON) | `PolicyWatchPayload` | Register a recurring watch |
-| GET | `/policy-watch` | None | — | `List[PolicyWatchPayload]` | All registered watches |
-| DELETE | `/policy-watch/{id}` | None | path: `id` | `{detail}` | Remove a watch |
-| POST | `/policy-watch/{id}/snapshot` | None | path: `id` | `PolicySnapshotPayload` | Manually trigger a snapshot for a watch |
+| GET | `/snapshots` | None | — | `List[PolicySnapshotListItem]` | Lightweight (no `raw_text`) |
+| GET | `/snapshots/detail/{id}` | None | path: `id` | `PolicySnapshotPayload` | Full incl. `raw_text` |
+| POST | `/snapshots` | None | body: `{url}` | `PolicySnapshotPayload` | Fetch + hash + store |
+| GET | `/diff/{id1}/{id2}` | None | path: two snapshot ids | `DiffResult` | Token-level diff |
+| POST | `/policy-watch` | None | `PolicyWatchCreateRequest` | `PolicyWatchPayload` | Register watch |
+| GET | `/policy-watch` | None | — | `List[PolicyWatchPayload]` | All watches |
+| DELETE | `/policy-watch/{id}` | None | path: `id` | `{detail}` | Remove watch |
+| POST | `/policy-watch/{id}/snapshot` | None | path: `id` | `PolicySnapshotPayload` | Manually trigger snapshot |
 
-No route currently requires authentication (`Auth` column is `None` throughout) — there is no API-key or session-based auth layer in the shipped backend.
+### API1: no-auth-currently
+rule: no route requires authentication; there is no API-key or session auth layer in the shipped backend
 
-## Key Request Schemas
+### API2: pdf-route-ordering
+rule: `/exports/analysis/{id}.pdf` MUST be registered BEFORE `/exports/analysis/{id}` in `main.py`
+because: FastAPI would otherwise shadow the PDF route with the JSON route
+
+### API3: cross-endpoint-field-parity
+rule: a field validated on `/analyze` MUST be validated identically on `/analyze/url`, `/analyze/file`, `/analyze/batch`
+xref: [[.claude/rules/testing.md#R2]]
+
+## request-schemas
 
 ### AnalyzeRequest
 ```json
@@ -65,11 +77,13 @@ No route currently requires authentication (`Auth` column is `None` throughout) 
 ```json
 {"url": "https://...", "user_id?": "...", "check_frequency": 86400}
 ```
-`check_frequency` is in seconds, constrained to `[300, 604800]` (5 minutes to 7 days).
 
-## Key Response Schemas
+### API4: check_frequency-bounds
+rule: `check_frequency` in seconds, constrained to `[300, 604800]` (5 min to 7 days)
 
-### Finding (nested in AnalysisPayload)
+## response-schemas
+
+### Finding
 ```json
 {
   "category": "Sale/Share",
@@ -82,7 +96,7 @@ No route currently requires authentication (`Auth` column is `None` throughout) 
 }
 ```
 
-### AnalysisPayload (key fields)
+### AnalysisPayload
 ```json
 {
   "id": "uuid", "status": "completed|needs_review", "review_required": false,
@@ -104,9 +118,12 @@ No route currently requires authentication (`Auth` column is `None` throughout) 
 ```json
 {"id": "uuid", "url": "https://...", "content_hash": "sha256...", "captured_at": "...", "raw_text?": "..."}
 ```
-`raw_text` is included on `GET /snapshots/detail/{id}` and `POST /snapshots`, but omitted from the lightweight `GET /snapshots` list to save bandwidth.
 
-## Error Responses
+### API5: raw_text-inclusion
+rule: `raw_text` included on `GET /snapshots/detail/{id}` and `POST /snapshots`; omitted from lightweight `GET /snapshots` list
+because: bandwidth
+
+## errors
 
 | Status | When |
 |--------|------|

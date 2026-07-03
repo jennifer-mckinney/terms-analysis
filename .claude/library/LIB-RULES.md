@@ -1,22 +1,35 @@
-# LIB-RULES: Rule Engine Patterns & Scoring
+# LIB-RULES — rule engine, confidence formulas, IRP scoring, hybrid merge
+loads: on-trigger
+scope: project
+xref: [[LIB-ARCH]] [[LIB-CONTEXT]] [[LIB-EVAL]] [[.claude/CLAUDE.md#hard-requirements]]
 
-> **Status (2026-07-03):** rewritten to match `services/rules.py` and `services/analyzer.py` exactly. The previous version of this file described a 9-category/dead-clamp/precedence-merge/"IRP" model that diverged from the live code on every one of those points — see git history if the old conceptual framework is useful context, but treat everything below as ground truth for the current implementation.
+status (2026-07-03): matches `services/rules.py` and `services/analyzer.py`. Previous version diverged (9-category/dead-clamp/"IRP" model) — see git history if needed but treat everything below as ground truth.
 
-## Risk Categories: ~50 categories, 64 patterns
+## risk-categories
 
-`PATTERNS` in `rules.py` has grown far past the original 9-category framework. It now covers ~50 distinct `category` values across 64 `RulePattern` entries, spanning:
-- The original core set: Sale/Share, ADM, Dark Patterns, Retention, User Rights, Minors, Sensitive Data, Unilateral Changes, Liability.
-- AI Act sub-categories: AI Training (Opt-Out), AI Non-Discrimination, AI-Generated Content, Algorithmic Accountability, Automated Decision-Making, Consequential AI Decisions, GPAI / Generative AI, High-Risk AI, Human Oversight, Prohibited AI.
-- Industry/regulation-specific blocks: COPPA Compliance, FERPA Compliance, HIPAA Compliance, PCI DSS Compliance, Health Data, Financial Data, Breach Notification, Children's Privacy.
-- Per-jurisdiction international blocks: APP Privacy (Australia), APPI Disclosure (Japan), DPDP Consent (India), LGPD Rights (Brazil), PIPA/PIPEDA/POPIA Processing, UK Data Rights, Cross-Border Transfer, Serious Privacy Invasion, Privacy as Human Right.
-- General categories: Collection Notice, Data Rights, Data Security, Deceptive Practices, Individual Rights, Marketing Communications, Privacy Rights, Purpose Limitation, Sensitive Data / Opt-Out, Tracking & Consent.
+### R1: ~50-categories-64-patterns
+rule: `PATTERNS` in `rules.py` covers ~50 distinct `category` values across 64 `RulePattern` entries
+coverage:
+  core: Sale/Share, ADM, Dark Patterns, Retention, User Rights, Minors, Sensitive Data, Unilateral Changes, Liability
+  ai_act: AI Training (Opt-Out), AI Non-Discrimination, AI-Generated Content, Algorithmic Accountability, Automated Decision-Making, Consequential AI Decisions, GPAI / Generative AI, High-Risk AI, Human Oversight, Prohibited AI
+  industry_regulation: COPPA Compliance, FERPA Compliance, HIPAA Compliance, PCI DSS Compliance, Health Data, Financial Data, Breach Notification, Children's Privacy
+  jurisdiction: APP Privacy (AU), APPI Disclosure (JP), DPDP Consent (IN), LGPD Rights (BR), PIPA/PIPEDA/POPIA Processing, UK Data Rights, Cross-Border Transfer, Serious Privacy Invasion, Privacy as Human Right
+  general: Collection Notice, Data Rights, Data Security, Deceptive Practices, Individual Rights, Marketing Communications, Privacy Rights, Purpose Limitation, Sensitive Data / Opt-Out, Tracking & Consent
 
-Each `RulePattern` carries: `category`, `severity` (Low/Medium/High/Critical), `jurisdictions` (list of applicable `Jurisdiction` codes), one or more regex `patterns`, and a legal-basis citation. `detect_findings()` only evaluates a rule if its `jurisdictions` intersects the requested jurisdiction list.
+### R2: RulePattern-shape
+rule: each `RulePattern` MUST carry `category`, `severity` (Low/Medium/High/Critical), `jurisdictions` (list of `Jurisdiction` codes), one or more regex `patterns`, and a legal-basis citation
 
-## Rule-Based Confidence Formula (active path: `_confidence_rules_based`)
+### R3: jurisdiction-intersection-required
+rule: `detect_findings()` evaluates a rule only if its `jurisdictions` intersects the requested jurisdiction list
+
+## rule-confidence-formula
+
+### R4: active-path-clamp
+rule: rule-based finding confidence clamped to [0.90, 0.95] via `_confidence_rules_based`
+because: rules are pattern-matched → inherently high-confidence
 
 ```python
-base = SEVERITY_BASE.get(severity, 0.6)  # {"Low": 0.45, "Medium": 0.6, "High": 0.75, "Critical": 0.9} — computed but currently unused in the return value
+base = SEVERITY_BASE.get(severity, 0.6)  # {"Low": 0.45, "Medium": 0.6, "High": 0.75, "Critical": 0.9} — currently unused in return
 hit_ratio = pattern_hits / pattern_total if pattern_total else 0.0
 if pattern_hits >= pattern_total * 0.5:
     confidence = 0.93 + (0.02 * min(1.0, hit_ratio))   # 0.93-0.95
@@ -25,47 +38,62 @@ else:
 return max(0.90, min(0.95, confidence))
 ```
 
-Rule-based finding confidence is always clamped to **[0.90, 0.95]** — rules are pattern-matched, so they're treated as inherently high-confidence. There is a separate, unused `_confidence()` helper elsewhere in `rules.py` from an earlier design (clamped to `[0.35, 0.95]` with a different formula involving `density`); it is dead code, not the active path.
+### R5: dead-alternate-confidence-helper
+rule: the separate `_confidence()` helper (clamped to [0.35, 0.95] with density term) is dead code from an earlier design
+apply: do NOT wire back into the active path without ADR
 
-## Hybrid Merge Strategy (`analyzer.py::_merge_findings`)
+## hybrid-merge
 
-Rule findings and LLM findings are matched by key `(category.lower(), excerpt.strip()[:120].lower())` — **not** a simple "LLM wins ties" precedence rule:
+### R6: match-key
+rule: rule + LLM findings matched by `(category.lower(), excerpt.strip()[:120].lower())` — NOT precedence
 
-- **Match on both sides:** confidence becomes a weighted average — `0.6 * rule_confidence + 0.4 * llm_confidence`, clamped to `[0.0, 1.0]`. `needs_review` is set if the hybrid confidence is `< 0.6`.
-- **Rule-only match:** kept as-is (confidence stays in the [0.90, 0.95] rule-based range).
-- **LLM-only match:** kept as-is, with `needs_review` set if `llm_confidence < 0.6`.
+### R7: match-on-both-sides
+rule: when both match → confidence = `0.6 * rule_confidence + 0.4 * llm_confidence`, clamped [0.0, 1.0]; `needs_review` set if hybrid < 0.6
 
-LLM findings with no `evidence.legal_basis` are dropped entirely before merging (tracked as `dropped_for_legal`).
+### R8: rule-only-match
+rule: kept as-is (confidence stays in [0.90, 0.95])
 
-## Top-Level Analysis Confidence (distinct from per-finding confidence)
+### R9: llm-only-match
+rule: kept as-is; `needs_review` set if `llm_confidence < 0.6`
 
-`analyze_text()` computes an overall `confidence` for the `AnalysisPayload` — this is a different value from any individual finding's confidence:
+### R10: llm-must-have-legal-basis
+rule: LLM findings with no `evidence.legal_basis` MUST be dropped before merging
+tracking: counted as `dropped_for_legal`
+
+## top-level-analysis-confidence
+
+### R11: analysis-confidence-formula
+rule: `analyze_text()` computes an overall `AnalysisPayload.confidence`, distinct from per-finding confidence
 
 ```python
 confidence = mean(validation.confidence, llm_overall_confidence)  # llm_overall_confidence only if present
 if mode == "quick":
     confidence *= 0.85
 else:
-    if summary is None:              # no LLM payload came back at all
+    if summary is None:              # no LLM payload
         confidence *= 0.8
-    elif not llm_findings:           # LLM responded but found nothing
+    elif not llm_findings:           # LLM responded, found nothing
         confidence *= 0.85
     if dropped_for_legal:
         confidence *= max(0.5, 1 - (0.1 * dropped_for_legal))
 confidence = max(0.0, min(1.0, confidence))
 ```
 
-Confidence `< 0.80` (see `config.py::review_threshold`) triggers human-in-the-loop review at the analysis level, independent of any individual finding's `needs_review` flag.
+### R12: HITL-at-analysis-level
+rule: `confidence < 0.80` (see `config.py::review_threshold`) triggers HITL review at analysis level
+independent_of: any individual finding's `needs_review` flag
 
-## Risk Score & Grade (`analyzer.py::calculate_risk_score` / `_grade`)
+## risk-score-and-grade
 
+### R13: risk-score-formula
 ```python
 weights = {"Low": 0.2, "Medium": 0.5, "High": 0.8, "Critical": 1.0}
-risk_score = round((sum(weights[f.severity] for f in findings) / len(findings)) * 10, 2)  # 0-10 scale
+risk_score = round((sum(weights[f.severity] for f in findings) / len(findings)) * 10, 2)  # 0-10
 ```
 
+### R14: grade-thresholds
 ```python
-def _grade(score):  # score is 0-10, higher = worse
+def _grade(score):  # 0-10, higher = worse
     if score >= 8.5: return "D+"
     if score >= 7.5: return "C"
     if score >= 6.5: return "C+"
@@ -75,15 +103,13 @@ def _grade(score):  # score is 0-10, higher = worse
     return "A"
 ```
 
-## IRP Scoring (active as of 2026-07-03)
+## IRP
 
-An Impact/Likelihood/Safeguards formula is **fully implemented** across the pipeline:
+### R15: irp-formula
+rule: `irp_score = clamp(0.5*(impact/5) + 0.4*(likelihood/5) - 0.3*(safeguard_score/5), 0, 1)`
 
-```
-irp_score = clamp(0.5*(impact/5) + 0.4*(likelihood/5) - 0.3*(safeguard_score/5), 0, 1)
-```
-
-### Per-finding IRP fields (in `Finding` schema)
+### R16: irp-fields
+rule: `Finding` schema carries these fields
 
 | Field | Type | Default | Range | Meaning |
 |-------|------|---------|-------|---------|
@@ -92,22 +118,25 @@ irp_score = clamp(0.5*(impact/5) + 0.4*(likelihood/5) - 0.3*(safeguard_score/5),
 | `safeguard_score` | int | 0 | 0-5 | Existing mitigations in the document |
 | `irp_score` | float? | None | 0-1 | Composite IRP score |
 
-### Score range
+score_range:
+- Max risk (impact=5, likelihood=5, safeguard=0): 0.90
+- Fully mitigated (impact=1, likelihood=1, safeguard=5): 0.0 (clamped from -0.12)
+- Typical Sale/Share (impact=4, likelihood=5, safeguard=0): 0.80
+- Prohibited AI (impact=5, likelihood=1, safeguard=0): 0.58
 
-- Max risk (impact=5, likelihood=5, safeguard=0): **0.90**
-- Fully mitigated (impact=1, likelihood=1, safeguard=5): **0.0** (clamped from -0.12)
-- Typical Sale/Share (impact=4, likelihood=5, safeguard=0): **0.80**
-- Prohibited AI (impact=5, likelihood=1, safeguard=0): **0.58** (high harm, rare)
+### R17: rule-irp-seed
+rule: rule-based findings seed IRP from `_CATEGORY_IRP_DEFAULTS` (38 categories mapped) via `_seed_irp(category)`
+default: `safeguard_score=0` at detection time (no mitigations assumed)
 
-### Where IRP is seeded
+### R18: llm-irp-request
+rule: LLM prompt MUST request `impact`, `likelihood`, `safeguard_score` per finding; `irp_score` computed from those fields after parsing
 
-- **Rule-based findings** (`rules.py::detect_findings` and `detect_high_severity_findings`): seeded automatically from `_CATEGORY_IRP_DEFAULTS` (38 categories mapped) via `_seed_irp(category)`. `safeguard_score=0` at detection time (no mitigations assumed).
-- **LLM findings**: the LLM prompt now requests `impact`, `likelihood`, `safeguard_score` per finding. `irp_score` is computed from these fields after parsing.
-- **Hybrid findings**: rule `impact`/`likelihood` used as baseline; `safeguard_score = max(rule, llm)` (benefit of the doubt for user protections); `irp_score` recomputed.
+### R19: hybrid-irp
+rule: hybrid findings use rule `impact`/`likelihood` as baseline; `safeguard_score = max(rule, llm)`; `irp_score` recomputed
+because: benefit of the doubt for user protections
 
-### Risk score update
-
-`calculate_risk_score()` now uses `irp_score` when present, falls back to severity weight for findings without IRP (e.g., legacy stored findings):
+### R20: risk-score-uses-irp-when-present
+rule: `calculate_risk_score()` uses `irp_score` when present; falls back to severity weight for legacy findings without IRP
 
 ```python
 scores = [
@@ -115,14 +144,16 @@ scores = [
     else severity_weights.get(f.severity, 0.5)
     for f in findings
 ]
-risk_score = round((sum(scores) / len(scores)) * 10, 2)  # 0-10 scale
+risk_score = round((sum(scores) / len(scores)) * 10, 2)  # 0-10
 ```
 
-Grade thresholds are unchanged (A < 3.5, ... D+ >= 8.5).
+### R21: grade-thresholds-unchanged
+rule: grade thresholds unchanged when IRP-driven (A < 3.5, ... D+ >= 8.5) — see R14
 
-## Sort: tier-first (`context.py::apply_category_weights`)
+## sort-tier-first
 
-Findings surface in a **tier-first** order once a context chip is selected. Sort key is `(weight, irp_score, severity_rank)`, all descending:
+### R22: sort-key
+rule: sort key = `(weight, irp_score, severity_rank)`, all descending
 
 ```python
 def sort_key(f: Finding) -> tuple[float, float, int]:
@@ -131,24 +162,35 @@ def sort_key(f: Finding) -> tuple[float, float, int]:
     return (weight, irp, _SEVERITY_RANK.get(f.severity, 0))
 ```
 
-1. **Context weight leads.** A category weighted 3.0 for the reader's context always outranks a category weighted 2.0, regardless of IRP. The reader told the tool what mattered; the tool honors that first.
-2. **IRP breaks ties within a weight tier.** Among two `for_child`-tagged Children's Privacy findings, the higher-IRP one surfaces first.
-3. **Severity rank is the final tie-breaker.**
+order:
+1. context weight leads — 3.0-weighted category always outranks 2.0, regardless of IRP
+2. IRP breaks ties within a weight tier
+3. severity rank is final tie-breaker
 
-Baseline chips (`want_understand`, `just_curious`) collapse all categories to weight 1.0, so IRP alone drives the sort. See LIB-CONTEXT for the full weight table and multi-chip merge semantics.
+baseline_chips: `want_understand`, `just_curious` collapse all categories to 1.0 → IRP drives entire sort
+xref: [[LIB-CONTEXT#CTX7]]
 
-## Category taxonomy: pinned via `schemas.CATEGORIES` frozenset
+## category-taxonomy
 
-The canonical finding-category strings live as `CATEGORIES: frozenset[str]` in `src/backend/app/schemas.py`. `services/context.py::CATEGORY_WEIGHTS` and `services/analyzer.py::_CATEGORY_IRP_DEFAULTS` both validate their keys against this frozenset at module load — any drift raises `RuntimeError` before the server starts.
+### R23: pin-via-frozenset
+rule: canonical finding categories live as `CATEGORIES: frozenset[str]` in `src/backend/app/schemas.py`
+guard: `services/context.py::CATEGORY_WEIGHTS` and `services/analyzer.py::_CATEGORY_IRP_DEFAULTS` validate keys against this frozenset at module load
+enforcement: drift raises `RuntimeError` before server starts
 
-If a category is added to the rule engine, it must also be added to `schemas.CATEGORIES` and, if it belongs in an IRP-defaults map or a context weight map, added there too. Otherwise the backend refuses to import.
+### R24: add-category-checklist
+rule: adding a rule-engine category MUST also update `schemas.CATEGORIES`; if it belongs in IRP-defaults or context weights, add there too
+because: otherwise backend refuses to import
 
-## Global-tool contract: empty jurisdictions = "no filter"
+## global-tool-contract
 
-`jurisdictions=[]` (empty list) is treated as **"no filter"** across the entire pipeline:
+### R25: empty-jurisdictions-no-filter
+rule: `jurisdictions=[]` treated as "no filter" across entire pipeline
+detail:
+  - `rules.py::detect_findings` evaluates every rule if requested list empty
+  - LLM post-filter passes every finding through if empty
+  - Streamlit resolves empty selection to "no filter"
 
-- `rules.py::detect_findings` evaluates every rule if the requested jurisdictions list is empty.
-- LLM post-filter passes every finding through when the list is empty.
-- Streamlit resolves an empty selection to "no filter" rather than substituting a US-CA + GDPR default.
-
-There is **no default jurisdiction fallback anywhere** in the code. The old behavior (silently substituting US-CA + GDPR when the reader didn't pick) was removed in PR #34 — global tool, blank defaults, reader specifies (or doesn't).
+### R26: no-default-jurisdiction-fallback
+rule: NO default jurisdiction fallback anywhere
+forbidden: silently substituting US-CA + GDPR when reader hasn't picked
+because: removed in PR #34 — global tool, blank defaults, reader specifies (or doesn't)

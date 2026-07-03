@@ -1,19 +1,23 @@
-# LIB-STACK: Tech Stack & Configuration
+# LIB-STACK — tech stack, dependencies, config
+loads: on-trigger
+scope: project
+xref: [[.claude/CLAUDE.md#hard-requirements]] [[LIB-LEGAL]] [[LIB-TEST]]
 
-## Dependency Policy
+## dependency-policy
 
-All dependencies must be: open source (Apache 2.0/MIT/BSD), no investor lawsuits, IRP Grade A+.
-See @.claude/library/LIB-LEGAL.md for LLM/embedding/inference tool approvals.
+### S1: policy
+rule: all deps MUST be open source (Apache 2.0/MIT/BSD), no investor lawsuits, IRP Grade A+
+xref: [[LIB-LEGAL]] [[.claude/CLAUDE.md#HR1]]
 
-## Python Dependencies (Current)
+## python-deps
 
-| Package | License | IRP Grade | Purpose |
-|---------|---------|-----------|---------|
+| Package | License | IRP | Purpose |
+|---------|---------|-----|---------|
 | fastapi | MIT | A+ | Web framework |
 | uvicorn | BSD-3 | A+ | ASGI server |
 | pydantic | MIT | A+ | Data validation, schemas |
 | sqlalchemy | MIT | A+ | ORM, database |
-| httpx | BSD-3 | A+ | Async HTTP client (LLM, URL fetch) |
+| httpx | BSD-3 | A+ | Async HTTP (LLM, URL fetch) |
 | beautifulsoup4 | MIT | A+ | HTML text extraction |
 | pypdf | BSD-3 | A+ | PDF text extraction |
 | python-docx | MIT | A+ | DOCX text extraction |
@@ -22,65 +26,80 @@ See @.claude/library/LIB-LEGAL.md for LLM/embedding/inference tool approvals.
 | pytesseract | Apache-2.0 | A+ | OCR fallback for scanned PDFs |
 | pillow | HPND | A+ | Image processing for OCR |
 | python-dotenv | BSD-3 | A+ | .env config loading |
-| python-multipart | Apache-2.0 | A | File upload parsing — **pin >= 0.0.18** (CVE-2024-24762, CVE-2024-53981 patched) |
-| langdetect | BSD | A+ | Language routing (Apertus vs. EuroLLM) — unmaintained since 2021; graceful fallback exists |
-| rank_bm25 | Apache 2.0 | A+ | Sparse retrieval (BM25) for document-chunk and legal-KB ensembles |
-| numpy | BSD | A+ | Exact/exhaustive vector similarity (legal-KB retrieval — see Rejected Dependencies for why not FAISS) |
+| python-multipart | Apache-2.0 | A | File upload parsing |
+| langdetect | BSD | A+ | Language routing (Apertus vs. EuroLLM); unmaintained since 2021; graceful fallback exists |
+| rank_bm25 | Apache 2.0 | A+ | Sparse retrieval (BM25) for doc-chunk + legal-KB ensembles |
+| numpy | BSD | A+ | Exact/exhaustive vector similarity (legal-KB — see rejected below) |
 
-RAG pipeline is implemented (`services/legal_kb.py`, `services/embedding.py`) using the packages above plus the existing LocalAI client for dense embeddings — no sentence-transformers/torch/FAISS/onnxruntime/sqlite-vec were added; those were an evaluated candidate stack, not what shipped (see `@.claude/library/LIB-LEGAL.md` for that history).
+### S2: python-multipart-pin
+rule: pin `python-multipart >= 0.0.18`
+because: CVE-2024-24762, CVE-2024-53981 patched at that version
 
-## Test Dependencies
+### S3: RAG-uses-existing-LLM-client
+rule: RAG pipeline (`services/legal_kb.py`, `services/embedding.py`) uses packages above + existing LocalAI client for dense embeddings
+forbidden: sentence-transformers, torch, FAISS, onnxruntime, sqlite-vec
+because: those were evaluated candidates, not shipped stack (see LIB-LEGAL)
+
+## test-deps
 
 | Package | License | Purpose |
 |---------|---------|---------|
 | pytest | MIT | Test runner |
 | pytest-cov | MIT | Coverage reporting |
 
-**Not installed** (despite being conventional choices): `pytest-asyncio`, `respx`. Async tests use plain `asyncio.run(...)` inside a regular (non-`async def`) test function instead of `@pytest.mark.asyncio`; `httpx` mocking uses `httpx.MockTransport` patched into `httpx.AsyncClient.__init__` via `monkeypatch` instead of `respx`. See `.claude/library/LIB-TEST.md` and `test_ingest.py`'s `_patch_transport()` helper for the pattern — adding the `@pytest.mark.asyncio` marker without installing the plugin silently skips the test with a `PytestUnknownMarkWarning` rather than failing loudly.
+### S4: not-installed
+rule: `pytest-asyncio` and `respx` are NOT installed
+alternative_async: call from regular (non-`async def`) test via `asyncio.run(...)`
+alternative_httpx: patch `httpx.AsyncClient.__init__` with `monkeypatch` to inject `httpx.MockTransport`
+because: adding `@pytest.mark.asyncio` without the plugin silently skips as `PytestUnknownMarkWarning`
+xref: [[LIB-TEST]] [[.claude/rules/testing.md#T1]] [[.claude/rules/testing.md#T6]]
 
-## Configuration (env vars)
+## env-vars
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `LOCALAI_BASE_URL` | `http://localhost:8080/v1` | LocalAI endpoint (zero VC, Apache 2.0) |
-| `MODEL_EU` | `eurollm-22b-instruct` | EU language model — EuroLLM 22B Instruct (EU Horizon/EuroHPC, Apache 2.0) |
-| `MODEL_WORLD` | `apertus-8b-instruct` | World/multilingual model — Apertus 8B Instruct (Swiss AI Initiative, Apache 2.0) |
-| `EU_LANGUAGE_CODES` | `bg,cs,da,de,el,en,…` | ISO 639-1 codes that route to EuroLLM; all others → Apertus |
+| `LOCALAI_BASE_URL` | `http://localhost:8080/v1` | LocalAI endpoint (Apache 2.0) |
+| `MODEL_EU` | `eurollm-22b-instruct` | EuroLLM 22B Instruct (EU Horizon/EuroHPC, Apache 2.0) |
+| `MODEL_WORLD` | `apertus-8b-instruct` | Apertus 8B Instruct (Swiss AI Initiative, Apache 2.0) |
+| `EU_LANGUAGE_CODES` | `bg,cs,da,de,el,en,…` | ISO 639-1 codes routed to EuroLLM; all others → Apertus |
 | `LANGUAGE_DETECTION_ENABLED` | `true` | Enable language-based model routing |
-| `RRF_K` | `60` | Reciprocal Rank Fusion constant for embedding ensemble |
+| `RRF_K` | `60` | Reciprocal Rank Fusion constant |
 | `LEGAL_CORPUS_DIR` | `data/legal_corpus` | Legal-KB source corpus directory |
-| `LEGAL_KB_INDEX_PATH` | `data/legal_kb.npy` | Legal-KB vector index location (numpy, not FAISS) |
+| `LEGAL_KB_INDEX_PATH` | `data/legal_kb.npy` | Legal-KB vector index (numpy, not FAISS) |
 | `LEGAL_KB_METADATA_PATH` | `data/legal_kb_metadata.json` | Legal-KB chunk metadata |
 | `DATABASE_URL` | `sqlite:///data/terms_analysis.db` | SQLite path |
-| `REVIEW_THRESHOLD` | `0.80` | Confidence threshold for HITL review |
+| `REVIEW_THRESHOLD` | `0.80` | HITL confidence threshold |
 | `LM_REQUEST_TIMEOUT_S` | `60` | LocalAI request timeout (seconds) |
 | `MAX_INPUT_CHARS` | `20000` | Max document text length before truncation |
 | `MAX_UPLOAD_BYTES` | `10485760` | Max HTTP response / upload size (10 MB) |
 | `MAX_PDF_PAGES` | `100` | Max pages processed per PDF (OCR path) |
-| `ALLOWED_ORIGINS` | `http://localhost:8000,...` | CORS allowed origins |
+| `ALLOWED_ORIGINS` | `http://localhost:8501,...` | CORS allowed origins |
 | `WATCHLIST_REFRESH_SECONDS` | `0` | Background refresh interval (0 = off) |
-| `API_KEY` | *(empty)* | Endpoint auth key — empty disables auth (local dev) |
-| `TERMS_ANALYSIS_DATA_DIR` | `<repo>/data` | Override data directory for SQLite + exports |
+| `API_KEY` | *(empty)* | Endpoint auth key; empty disables auth (local dev) |
+| `TERMS_ANALYSIS_DATA_DIR` | `<repo>/data` | Override data dir for SQLite + exports |
 
-## Frontend Stack
+## frontend-stack
 
 | Tech | Purpose |
 |------|---------|
-| Streamlit | Primary UI (`app_streamlit_v2.py`, served on :8501 by `run.sh`; `app_streamlit_legacy.py` retained for reference) |
-| Vanilla HTML/CSS/JS | Fallback UI (`index.html`/`app.js`/`style.css`, :8000) — no build step, no bundler |
-| Font Awesome | Icons (CSS-only) |
-| CSS custom properties | Design tokens, light/dark theming |
-| Fetch API | Backend communication |
-| localStorage | Theme persistence, optional analytics rollup |
+| Streamlit | Sole UI (`app_streamlit_v2.py` on :8501 via `run.sh`; `app_streamlit_legacy.py` v1 rollback via `STREAMLIT_UI=v1`) |
+| Streamlit theming | `.streamlit/config.toml` — primary color, background, font, cache controls |
 
-## Rejected Dependencies
+## rejected-deps
 
-| Package/Tool | Reason |
-|-------------|--------|
-| FAISS / faiss-cpu | Meta/Facebook origin — ANY Meta-origin dependency is rejected, no exceptions. Legal-KB uses numpy exhaustive search instead (`services/legal_kb.py`). See LIB-LEGAL.md. |
-| torch / PyTorch | Meta origin — same rejection, no exceptions. |
-| LM Studio | Proprietary closed source |
-| Stability AI models | Investor lawsuits |
-| Ollama GUI/Turbo | Unclear license / proprietary |
-| Voyage AI | API-only, proprietary |
-| Pile of Law | CC-BY-NC-SA-4.0 (non-commercial) |
+### S5: no-meta-origin
+rule: reject FAISS/faiss-cpu, torch/PyTorch (Meta origin) — no exceptions
+alternative: legal-KB uses numpy exhaustive search (`services/legal_kb.py`)
+xref: [[LIB-LEGAL]]
+
+### S6: no-proprietary-inference-runners
+rule: reject LM Studio (proprietary closed source), Ollama GUI/Turbo (unclear license/proprietary)
+
+### S7: no-lawsuit-model-orgs
+rule: reject Stability AI models (investor lawsuits)
+
+### S8: no-proprietary-api-embeddings
+rule: reject Voyage AI (API-only, proprietary)
+
+### S9: no-non-commercial-corpora
+rule: reject Pile of Law (CC-BY-NC-SA-4.0, non-commercial)
