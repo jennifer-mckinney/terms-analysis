@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .database import db_session, get_db, init_db
 from .models import Analysis, PolicySnapshot, ReviewItem, WatchlistItem
+from .exceptions import CorpusMismatchError
 from .schemas import (
     AnalysisPayload,
     AnalysisSummary,
@@ -29,7 +30,6 @@ from .schemas import (
     AnalyzeUrlRequest,
     BatchAnalysisResult,
     ContextChip,
-    CorpusMismatchError,
     DiffResult,
     DiffToken,
     DocType,
@@ -111,9 +111,12 @@ async def corpus_mismatch_handler(
     """Return HTTP 503 with a structured body when a bundle version mismatch is
     detected.  The ``X-Corpus-Mismatch`` header surfaces which MANIFEST field
     failed so callers can act on it without parsing the body."""
+    # Log the full mismatch detail server-side; expose only the dimension in the
+    # response body to avoid leaking internal version strings to clients.
+    logger.warning("Corpus mismatch: %s", exc)
     return JSONResponse(
         status_code=503,
-        content={"detail": str(exc)},
+        content={"detail": f"Corpus version mismatch on: {exc.dimension}"},
         headers={"X-Corpus-Mismatch": exc.dimension},
     )
 

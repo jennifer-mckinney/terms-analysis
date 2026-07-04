@@ -135,6 +135,8 @@ def test_load_from_bundle_raises_on_chunk_count_mismatch(tmp_path: Path) -> None
     with pytest.raises(CorpusMismatchError) as exc_info:
         kb.load_from_bundle(bundle_dir)
     assert exc_info.value.dimension == "chunk_count"
+    assert exc_info.value.expected == "2"   # metadata chunk count
+    assert exc_info.value.actual == "3"     # matrix row count
 
 
 def test_load_from_bundle_no_version_check_passes(tmp_path: Path) -> None:
@@ -145,13 +147,23 @@ def test_load_from_bundle_no_version_check_passes(tmp_path: Path) -> None:
     assert kb.chunk_count == 3
 
 
+def test_load_from_bundle_raises_on_empty_manifest(tmp_path: Path) -> None:
+    """Empty MANIFEST.yaml must raise CorpusMismatchError, not AttributeError."""
+    bundle_dir = tmp_path / "bundle"
+    (bundle_dir / "index").mkdir(parents=True)
+    (bundle_dir / "MANIFEST.yaml").write_text("", encoding="utf-8")
+    kb = LegalKnowledgeBase()
+    with pytest.raises(CorpusMismatchError) as exc_info:
+        kb.load_from_bundle(bundle_dir)
+    assert exc_info.value.dimension == "manifest_structure"
+
+
 def test_load_from_bundle_error_message_contains_dimension(tmp_path: Path) -> None:
-    """CorpusMismatchError __str__ includes dimension, expected, actual."""
+    """CorpusMismatchError structured attrs carry dimension, expected, actual."""
     bundle_dir = _make_bundle(tmp_path, chunker_version="v1.0.0")
     kb = LegalKnowledgeBase()
     with pytest.raises(CorpusMismatchError) as exc_info:
         kb.load_from_bundle(bundle_dir, expected_chunker_version="v9.0.0")
-    err_str = str(exc_info.value)
-    assert "chunker_version" in err_str
-    assert "v9.0.0" in err_str
-    assert "v1.0.0" in err_str
+    assert exc_info.value.dimension == "chunker_version"
+    assert exc_info.value.expected == "v9.0.0"
+    assert exc_info.value.actual == "v1.0.0"
