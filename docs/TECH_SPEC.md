@@ -78,12 +78,13 @@ Restated verbatim from [.claude/CLAUDE.md §Hard Requirements] and [LIB-PRINCIPL
 - Rule confidence (active path) clamped to [0.90, 0.95] [LIB-RULES §Rule-Based Confidence Formula].
 - Risk scores map to grades: A (<3.5), A- (3.5–4.5), B (4.5–5.5), B- (5.5–6.5), C+ (6.5–7.5), C (7.5–8.5), D+ (>=8.5) [`src/backend/app/services/analyzer.py:426`].
 
-Two hard scope limits are non-negotiable per [LIB-PRINCIPLES §Principle 4] and appear verbatim in the results scope box (§11):
+One hard scope limit is non-negotiable per [LIB-PRINCIPLES §Principle 4 (revised 2026-07-03)] and appears verbatim in the results "what else worth checking" note (§11):
 
-- **Hardware permissions** (camera, microphone, contacts, location) — not analyzed; the tool reads policy text, not manifests.
-- **Real-world practice divergence** — not analyzed; the tool assesses what the policy says, not what the company does.
+- **Runtime permissions** (camera, microphone, contacts, location) — the tool reads policy text, not install-time app permission requests. Readers are directed to (a) the app's Terms of Use, (b) the App Store Privacy Nutrition Label or Play Store Data Safety section, and (c) install-time permissions in device Settings.
 
-Any request that would appear to lift these limits is drift per [LIB-PRINCIPLES §Principle 3] and must be surfaced.
+Any request that would appear to lift this limit is drift per [LIB-PRINCIPLES §Principle 3] and must be surfaced.
+
+The previous "real-world practice divergence" clause was dropped 2026-07-03 — analyzing the policy IS analyzing the contract; behavior monitoring is a separate discipline outside this tool's scope. See docs/plans/2026-07-03-results-view-revamp-report-card.md §7 D-Q9.
 
 ---
 
@@ -1574,7 +1575,7 @@ Selected mappings between BRD/PRD requirements, spec sections, and code location
 | Domain grouping | — | — [not documented] | §10 | `analyzer.py:37, 110` |
 | Verdict headline + label | — | — [not documented] | §9.6 | `context.py:79, 109` |
 | Action items | — | — [not documented] | §11.3 | `analyzer.py:275` |
-| Hard scope limits (hardware, real-world divergence) | — [LIB-PRINCIPLES] | — | §1.4, §10.4, §11.3 | `app_streamlit_v2.py:762` (scope box) |
+| Hard scope limit (runtime permissions) | — [LIB-PRINCIPLES] | — | §1.4, §10.4, §11.3 | `app_streamlit_v2.py:762` (scope box) |
 
 Rows without a BRD or PRD anchor are flagged for follow-up: either (a) update BRD/PRD to name the requirement, or (b) treat as intentional undocumented internal design.
 

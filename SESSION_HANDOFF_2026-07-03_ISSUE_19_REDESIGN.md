@@ -80,6 +80,7 @@ These are non-negotiables discovered during the session. Encode them in copy rev
 - **Global tool, no US default** — Empty `jurisdictions=[]` means "no filter," not "US-CA + GDPR fallback." Location dropdowns default blank (`index=None`) and never presume reader location.
 - **Blank location defaults** — Do not pre-fill any location dropdown from browser IP, `Accept-Language`, or any other inference of reader location. The reader picks (or doesn't).
 - **Hardware permissions are a scope caveat only** — Camera, mic, contacts, location permissions get surfaced verbatim in the always-visible scope box, never as a chip or a domain group with findings. Hard scope limit. Same rule applies to real-world practice divergence.
+> **(SUPERSEDED 2026-07-03 by LIB-PRINCIPLES P4 amendment — real-world-practice-divergence clause dropped; see docs/plans/2026-07-03-results-view-revamp-report-card.md §7 D-Q9 and commit 4e8ccc9)**
 - **Verdict labels are actionable, not grades** — "Worth a closer read," not "USE CAUTION." "Not vendor-safe as written," not "STOP." Letter grades still exist on `AnalysisPayload.grade` for machine consumption but are not the primary UI verdict.
 - **Scope box always visible** — Never collapsible below the fold. Never optional. The tool must be honest about what wasn't checked before the reader trusts what was checked.
 

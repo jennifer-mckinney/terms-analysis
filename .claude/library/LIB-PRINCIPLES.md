@@ -49,7 +49,7 @@ limit_runtime_permissions: camera / microphone / contacts / location — tool re
 requests_to_expand_these: drift under P3 — surface and ask
 because: analyzing the policy IS analyzing the contract. "Real-world practice divergence" was previously listed as a second limit; dropped 2026-07-03 per user directive on grounds that behavior monitoring is a separate discipline (compliance monitoring, breach research, investigative journalism), not a scope limit of a policy-analysis tool. Conflating tool scope with due-diligence-in-general read defensive and mixed categories.
 retro_anchor: user review 2026-07-03 following Phase 5.d E2E; codified in docs/plans/2026-07-03-results-view-revamp-report-card.md §7 D-Q9
-xref: [[LIB-VOICE#V11]] [[terms_analysis_scope_limits.md]]
+xref: [[LIB-VOICE#V11]]
 
 ### P5: local-only-open-source-only
 rule: hard requirements restated from `.claude/CLAUDE.md`
