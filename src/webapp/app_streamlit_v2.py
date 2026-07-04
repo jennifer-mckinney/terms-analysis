@@ -525,40 +525,21 @@ def render_intake() -> None:
             st.session_state.input_mode = "file"
         st.caption("PDF, DOCX, RTF, HTML, or TXT. Up to 10MB. Text is extracted locally.")
 
-    # Optional context cards. Design uses selectable cards; Streamlit doesn't
-    # have those natively so we use a bordered container + checkbox + styled sub.
-    st.markdown(
-        "<div class='pr-opt-label'>A little context "
-        "<span class='pr-opt-hint'>(optional, choose any that fit)</span></div>",
-        unsafe_allow_html=True,
-    )
-
-    selections: list[str] = []
-    for chip in CONTEXT_CHIPS:
-        with st.container(border=True):
-            checked = st.checkbox(
-                chip["label"],
-                key=f"ctx_{chip['value']}",
-                value=chip["value"] in st.session_state.context_selections,
-            )
-            st.markdown(
-                f"<div class='pr-card-sub'>{html.escape(chip['sub'])}</div>",
-                unsafe_allow_html=True,
-            )
-            if checked:
-                selections.append(chip["value"])
-    st.session_state.context_selections = selections
-
     # Inference is about the POLICY jurisdictions we detected in the text/URL —
     # NOT about where the reader is. We surface these signals in results (so the
     # reader can see what the policy talks about) but never use them to pre-fill
     # or override the reader's location choice. The reader's location is a
     # separate, explicit decision that must always come from the reader.
+    #
+    # Inference runs BEFORE the intake form so it can react dynamically to the
+    # user pasting a URL/text. Widgets inside st.form(...) do not trigger reruns
+    # until submit, so inference-driven UI (like `location_needed`) has to be
+    # resolved outside the form. See issue #82 / Phase 5.d UI-1.
     if st.session_state.url_input or st.session_state.text_input:
         inferred = call_infer(
             st.session_state.url_input or None,
             st.session_state.text_input or None,
-            selections,
+            list(st.session_state.context_selections),
         )
         if inferred:
             st.session_state.inferred_juris = inferred.get("jurisdictions")
@@ -624,8 +605,48 @@ def render_intake() -> None:
                     )
 
     st.markdown("<div style='margin-top:1.5rem;'></div>", unsafe_allow_html=True)
-    if st.button("Take a look →", type="primary", use_container_width=True):
-        run_analysis()
+
+    # Context chips + submit live inside st.form(...) so they submit atomically.
+    # Before this, a user could tick a chip and click "Take a look" within the
+    # same paint cycle; Streamlit's per-widget rerun model meant the submit
+    # button ref could resolve against a stale (pre-chip) state and drop the
+    # chip from the POST /analyze body. Wrapping both widgets in a form makes
+    # the chip state at submit-time captured together with the submit event.
+    # See issue #82 / Phase 5.d E2E UI-1 (HIGH).
+    #
+    # Design uses selectable cards; Streamlit doesn't have those natively so we
+    # use a bordered container + checkbox + styled sub inside the form.
+    with st.form(key="intake_form", clear_on_submit=False):
+        st.markdown(
+            "<div class='pr-opt-label'>A little context "
+            "<span class='pr-opt-hint'>(optional, choose any that fit)</span></div>",
+            unsafe_allow_html=True,
+        )
+
+        selections: list[str] = []
+        for chip in CONTEXT_CHIPS:
+            with st.container(border=True):
+                checked = st.checkbox(
+                    chip["label"],
+                    key=f"ctx_{chip['value']}",
+                    value=chip["value"] in st.session_state.context_selections,
+                )
+                st.markdown(
+                    f"<div class='pr-card-sub'>{html.escape(chip['sub'])}</div>",
+                    unsafe_allow_html=True,
+                )
+                if checked:
+                    selections.append(chip["value"])
+
+        submitted = st.form_submit_button(
+            "Take a look →",
+            type="primary",
+            use_container_width=True,
+        )
+        if submitted:
+            # Capture chip state atomically on submit, then dispatch analysis.
+            st.session_state.context_selections = selections
+            run_analysis()
 
     st.markdown(
         "<p class='pr-privacy-note'>Processed locally. Policy text is not stored. "
