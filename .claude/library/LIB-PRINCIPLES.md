@@ -44,10 +44,11 @@ examples:
   drift_to_update: PDF export beyond PRD spec — update PRD to name format, then implement
 
 ### P4: hard-scope-limits-non-negotiable
-rule: tool analyzes document text only; two limits surface verbatim, always, in scope box
-limit_hardware_permissions: camera / microphone / contacts / location — tool reads policy text, not manifests
-limit_practice_divergence: tool assesses what policy says, not what company does
+rule: tool analyzes document text only; the runtime-permission scope limit surfaces verbatim, always, in the "what else worth checking" note in results
+limit_runtime_permissions: camera / microphone / contacts / location — tool reads policy text, not install-time permission requests; readers directed to (a) the app's Terms of Use, (b) App Store Privacy Nutrition Label / Play Store Data Safety section, (c) install-time permissions in device Settings
 requests_to_expand_these: drift under P3 — surface and ask
+because: analyzing the policy IS analyzing the contract. "Real-world practice divergence" was previously listed as a second limit; dropped 2026-07-03 per user directive on grounds that behavior monitoring is a separate discipline (compliance monitoring, breach research, investigative journalism), not a scope limit of a policy-analysis tool. Conflating tool scope with due-diligence-in-general read defensive and mixed categories.
+retro_anchor: user review 2026-07-03 following Phase 5.d E2E; codified in docs/plans/2026-07-03-results-view-revamp-report-card.md §7 D-Q9
 xref: [[LIB-VOICE#V11]] [[terms_analysis_scope_limits.md]]
 
 ### P5: local-only-open-source-only
