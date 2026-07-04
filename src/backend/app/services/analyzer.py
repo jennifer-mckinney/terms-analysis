@@ -5,7 +5,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, get_args
 from uuid import uuid4
 
 from ..config import settings
@@ -354,6 +354,13 @@ _KNOWN_SEVERITIES: frozenset[str] = frozenset(_SEV_LIST)
 # Voice constraint: chip items MUST honor LIB-VOICE V2 (no you/we/our/your
 # at the load-bearing level; per-finding-observation exception does not
 # apply to action_items). All items are em-dash free (LIB-VOICE V7).
+#
+# Multi-chip priority ordering: chips are iterated via
+# ``typing.get_args(ContextChip)`` in ``_derive_action_items`` so the schema
+# (``schemas.ContextChip``) is the single source of truth for order. This
+# dict's insertion order is NOT load-bearing; add or reorder keys freely as
+# long as every ContextChip value has an entry. Missing entries fall through
+# to an empty tuple.
 # --------------------------------------------------------------------------
 
 _ACTION_ITEMS_UNIVERSAL: List[str] = [
@@ -413,19 +420,28 @@ def _derive_action_items(
     that predate the chip taxonomy; in that case only universal + category-
     derived items fire.
     """
+    # Zero findings means nothing to act on: return empty even if a chip is
+    # set. Short-circuit up-front so we skip universal/chip/category assembly
+    # entirely (fixes grumpy F1: prior placement wasted allocations and made
+    # the "universal always fires" comment inaccurate).
+    if not findings:
+        return []
+
     categories = {f.category for f in findings}
     jurisdiction_set = set(jurisdictions or [])
     context_set: set[str] = set(context or [])
     lines: List[str] = []
 
-    # 1. Universal items always fire (unless zero findings, handled below).
+    # 1. Universal items always fire when findings exist.
     lines.extend(_ACTION_ITEMS_UNIVERSAL)
 
-    # 2. Chip-specific items: one block per active chip, in taxonomy order
-    # (defined by _ACTION_ITEMS_BY_CHIP dict insertion order).
-    for chip, items in _ACTION_ITEMS_BY_CHIP.items():
+    # 2. Chip-specific items: one block per active chip, iterated in the
+    # ContextChip schema order so multi-chip priority is bound to the schema
+    # rather than to _ACTION_ITEMS_BY_CHIP dict-insertion order (fixes grumpy
+    # F2: schema is the single source of truth for chip ordering).
+    for chip in get_args(ContextChip):
         if chip in context_set:
-            lines.extend(items)
+            lines.extend(_ACTION_ITEMS_BY_CHIP.get(chip, ()))
 
     # 3. Category-derived items: the previous chip-invariant set, kept for
     # backward compatibility with callers that don't pass context and for
@@ -496,11 +512,6 @@ def _derive_action_items(
     # was reading. That copy now lives in _ACTION_ITEMS_BY_CHIP["for_work"]
     # and only surfaces when the reader is actually in a work context. This
     # is exactly the swap Phase 5.d flagged for just_curious (CONTENT-1).
-
-    # Zero findings means nothing to act on: return empty even if a chip is
-    # set. Preserves the empty-findings contract prior consumers relied on.
-    if not findings:
-        return []
 
     # Dedupe in insertion order, then cap. Chip and category items can name
     # overlapping levers (e.g. for_work's liability item vs the category

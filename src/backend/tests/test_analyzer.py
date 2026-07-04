@@ -477,16 +477,81 @@ def test_analyzer_action_items_no_context_backward_compat():
     assert any("Do Not Sell" in line for line in items)
 
 
-def test_analyzer_action_items_dedupes_when_chip_and_category_overlap():
-    """If a chip item and a category-derived item say substantially the
-    same thing, the return list must dedupe by exact-string. Regression
-    guard against readers seeing near-identical items back to back."""
+def test_analyzer_action_items_dedupes_when_chip_and_category_overlap(monkeypatch):
+    """If a chip item and a category-derived item are byte-for-byte identical,
+    the return list must dedupe. Grumpy F3: prior test used non-overlapping
+    strings so it would have passed even with the dedupe step deleted. Now
+    monkeypatches a real duplicate of a category-derived string into
+    ``_ACTION_ITEMS_BY_CHIP`` and asserts the output contains the string once.
+    """
+    from app.services import analyzer
     from app.services.analyzer import _derive_action_items
 
-    items = _derive_action_items(_mixed_findings(), ["US-CA"], ["for_child"])
-    # All items are unique strings.
+    # Exact category string emitted for Sale/Share + US-CA (see analyzer.py).
+    ca_sale_share_line = (
+        "California residents can submit a \"Do Not Sell or Share My "
+        "Personal Information\" request through the service's privacy "
+        "settings or a designated privacy link."
+    )
+
+    # Inject an exact duplicate into the for_work chip block.
+    original = analyzer._ACTION_ITEMS_BY_CHIP["for_work"]
+    monkeypatch.setitem(
+        analyzer._ACTION_ITEMS_BY_CHIP,
+        "for_work",
+        list(original) + [ca_sale_share_line],
+    )
+
+    items = _derive_action_items(
+        _mixed_findings(), ["US-CA"], ["for_work"]
+    )
+
+    # Baseline unique-strings guard (kept from prior test).
     assert len(items) == len(set(items)), (
         f"duplicate strings in action_items: {items}"
+    )
+    # Load-bearing: the exact duplicated string appears exactly once, proving
+    # the dedupe step is doing real work (not just the fixture avoiding overlap).
+    assert items.count(ca_sale_share_line) == 1, (
+        f"duplicate category/chip line not deduped: {items}"
+    )
+
+
+def test_analyzer_action_items_chip_order_follows_schema():
+    """Multi-chip priority ordering MUST follow ``schemas.ContextChip`` order,
+    not ``_ACTION_ITEMS_BY_CHIP`` dict-insertion order. Grumpy F2: if the
+    chip dict is reordered, the reader-facing output must NOT change. Locks
+    the schema as the single source of truth for priority.
+    """
+    from typing import get_args
+
+    from app.schemas import ContextChip
+    from app.services.analyzer import _ACTION_ITEMS_BY_CHIP, _derive_action_items
+
+    # Pick two chips whose blocks are distinct and both have items.
+    # for_child appears before for_work in the ContextChip Literal.
+    schema_order = list(get_args(ContextChip))
+    assert schema_order.index("for_child") < schema_order.index("for_work"), (
+        "test fixture assumes schemas.ContextChip lists for_child before for_work"
+    )
+
+    # Findings that trigger no category-item that overlaps chip items, so the
+    # ordering between for_child and for_work blocks is observable.
+    findings = [
+        _make_finding_for_actions("Liability"),
+    ]
+    items = _derive_action_items(findings, [], ["for_work", "for_child"])
+
+    # Grab the first item from each chip block that survived cap+dedupe.
+    for_child_first = _ACTION_ITEMS_BY_CHIP["for_child"][0]
+    for_work_first = _ACTION_ITEMS_BY_CHIP["for_work"][0]
+
+    assert for_child_first in items and for_work_first in items, (
+        f"expected both chip signature items present: {items}"
+    )
+    assert items.index(for_child_first) < items.index(for_work_first), (
+        "chip ordering must follow schemas.ContextChip order (for_child before "
+        f"for_work), not caller order or dict insertion order; got: {items}"
     )
 
 
