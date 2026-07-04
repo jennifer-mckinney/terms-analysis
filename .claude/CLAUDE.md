@@ -129,6 +129,39 @@ xref: [[.claude/rules/testing.md]] [[LIB-PRINCIPLES#P9]]
 rule: `test_regressions_pr34.py` — 30 tests covering cross-endpoint consistency via `typing.get_args()` runtime iteration, schema-Literal allowlist parity, XSS defense-in-depth (blocks `javascript:`, `data:`, `vbscript:` schemes), malformed inputs, ReDoS canary on `inference.py`, domain-grouping edges, sort stability
 xref: [[.claude/rules/testing.md]]
 
+## session-outcomes-2026-07-04
+
+### SO11: p9-loop-pattern-active
+rule: every push runs the parallel security+grumpy review loop. ANY finding of ANY severity triggers a fix-Coder dispatch; iterate to fixed-point (both PASS zero findings) before writing signoff and pushing
+codified: `.git/reviews/<sha>.signoff.json` schema in `automations/p9-pre-push.md`; hook validates signoff before allowing push
+because: user directive 2026-07-04 extends P9 zero-tolerance-security to zero-tolerance-grumpy
+whack-a-mole warning: when name-based deny-lists keep growing across rounds, switch to structural fix (pattern-based rules, schema-driven ordering, input normalization). Two structural-fix wins this session:
+  - SO12 F2 (chip order): switched `_ACTION_ITEMS_BY_CHIP.items()` → `typing.get_args(ContextChip)`
+  - ingester rounds 6-9: added `_REDACT_SUFFIXES` + `_normalize_key(camelCase→snake_case)` instead of growing exact-name list further
+xref: [[LIB-PRINCIPLES#P9]] [[automations/p9-pre-push.md]]
+
+### SO12: revamp-branch-shipped
+rule: `revamp/results-report-card` pushed to `origin/revamp/results-report-card` at `ae3dda2`. 4 P9 loop rounds converged
+commits: `569260b` (st.form intake), `a4b4c66` (chip-tune action_items), `f1d8ca3` (corpus plans landed), `9bc3dbc` (grumpy F1-F3 fixes: short-circuit + schema-order + real dedupe), `3db1d0e` (grumpy F4: drop stale context arg from call_infer), `f5065cd` (mirror P9 hook), `ae3dda2` (P9_ENFORCEMENT_GUIDE.md updated for hard-gate)
+detail: `/infer` handler verified to ignore context arg (main.py:340-349, inference.py:535) — arg dropped from call_infer signature + docstring explains why
+xref: [[automations/p9-pre-push.md]] [[SO11]]
+
+### SO13: p9-hard-gate-mirrored
+rule: `.githooks/pre-push` is the P9 hard-gate (mirrored from legal-corpus-ingester at commit `3fb017e`). Refuses push unless `.git/reviews/<HEAD_SHA>.signoff.json` exists with security_engineer.verdict=PASS + grumpy_developer.verdict=PASS (or override.used=true with reason + authorized_by)
+existing: `.githooks/pre-commit` unchanged (project-specific gitignore-SSoT + graveyard + case-insensitive .env guards)
+deleted: `.githooks/pre-push-p9-check` (dormant interactive checklist superseded by the hard gate)
+replaced: `scripts/install-hooks.sh` — was stale copy-based, now `core.hooksPath`-based (idempotent glob-chmod + `.git/reviews/` ensure)
+docs: `automations/p9-pre-push.md` + `docs/P9_ENFORCEMENT_GUIDE.md` (both updated 2026-07-04)
+classifier friction: subagent + Write both blocked when writing signoff files. Workaround: hand user a paste-block containing mkdir + cat heredoc + git push
+xref: [[SO11]]
+
+### SO14: sibling-project-legal-corpus-ingester
+rule: new sibling project `~/Documents/05_Technical_Development/01_AUTOMATION/01_Claude_Projects/legal-corpus-ingester/` was bootstrapped 2026-07-04. Phase 0.0 tasks P1-P7 shipped
+remote: `jennifer-mckinney/legal-corpus-ingester` (private) at `main=a8365d5` (P7 commit `98a6f06` local-only pending next-session push)
+plan: `docs/plans/2026-07-04-legal-corpus-ingester.md` (this repo) — Phase 0.0 P1-P10 then Phase 0.1 tasks 1-40
+consumer contract: `src/backend/app/services/legal_kb.py` — will consume corpus bundles from ingester per plan Task 28
+xref: [[docs/plans/2026-07-04-legal-corpus-ingester.md]]
+
 ## reference-library
 
 Access via `@.claude/library/<file>` when deeper context is needed.
@@ -167,9 +200,10 @@ because: catches silent governance drift between sessions
 xref: [[LIB-PRINCIPLES#P8]]
 
 ### G3: pre-push-independent-review
-rule: enforce LIB-PRINCIPLES P9 — dispatch security-engineer + grumpy-developer before any push
-gate: CRITICAL or HIGH finding from either agent blocks push until resolved or user-overridden
-xref: [[LIB-PRINCIPLES#P9]]
+rule: enforce LIB-PRINCIPLES P9 — dispatch security-engineer + grumpy-developer before any push. Zero-tolerance for BOTH per 2026-07-04 user directive: ANY finding of ANY severity triggers a fix-Coder + re-review loop until both PASS
+automation: `.githooks/pre-push` hard-gate refuses push without `.git/reviews/<sha>.signoff.json` (see [[SO11]] [[SO13]])
+gate: ANY finding of ANY severity blocks push until resolved or user-overridden via `override.used=true` with reason + authorized_by
+xref: [[LIB-PRINCIPLES#P9]] [[SO11]] [[SO13]] [[automations/p9-pre-push.md]]
 
 ## plans-and-analysis
 
