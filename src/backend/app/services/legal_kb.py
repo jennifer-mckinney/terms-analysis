@@ -34,8 +34,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+import yaml
 
 from ..config import settings
+from ..schemas import CorpusMismatchError
 from .embedding import bm25_scores, chunk_text, rrf_fuse
 from .localai import LocalAIClient
 
@@ -198,6 +200,83 @@ class LegalKnowledgeBase:
             self._chunks = []
             return False
         return True
+
+    def load_from_bundle(
+        self,
+        bundle_dir: Path,
+        expected_chunker_version: Optional[str] = None,
+        expected_embedder_model: Optional[str] = None,
+        expected_embedder_revision: Optional[str] = None,
+    ) -> None:
+        """Load corpus from an ingester-produced bundle directory.
+
+        Reads MANIFEST.yaml, validates version fields against expected values,
+        then loads ``index/legal_kb.npy`` + ``index/legal_kb_metadata.json``
+        into ``self._matrix`` and ``self._chunks``.
+
+        Raises:
+            FileNotFoundError: if MANIFEST.yaml, legal_kb.npy, or
+                legal_kb_metadata.json are absent from ``bundle_dir``.
+            CorpusMismatchError: if a version field in the MANIFEST does not
+                match the corresponding ``expected_*`` argument, or if the
+                row count of the loaded matrix does not match the metadata
+                chunk count.
+        """
+        manifest_path = bundle_dir / "MANIFEST.yaml"
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"MANIFEST.yaml not found in {bundle_dir}")
+
+        manifest: Dict[str, Any] = yaml.safe_load(
+            manifest_path.read_text(encoding="utf-8")
+        )
+
+        # Validate version fields against caller expectations when provided
+        if expected_chunker_version and manifest.get("chunker_version") != expected_chunker_version:
+            raise CorpusMismatchError(
+                dimension="chunker_version",
+                expected=expected_chunker_version,
+                actual=str(manifest.get("chunker_version")),
+            )
+        if expected_embedder_model and manifest.get("embedder_model") != expected_embedder_model:
+            raise CorpusMismatchError(
+                dimension="embedder_model",
+                expected=expected_embedder_model,
+                actual=str(manifest.get("embedder_model")),
+            )
+        if expected_embedder_revision and manifest.get("embedder_revision") != expected_embedder_revision:
+            raise CorpusMismatchError(
+                dimension="embedder_revision",
+                expected=expected_embedder_revision,
+                actual=str(manifest.get("embedder_revision")),
+            )
+
+        index_path = bundle_dir / "index" / "legal_kb.npy"
+        metadata_path = bundle_dir / "index" / "legal_kb_metadata.json"
+
+        if not index_path.exists():
+            raise FileNotFoundError(f"index/legal_kb.npy not found in {bundle_dir}")
+        if not metadata_path.exists():
+            raise FileNotFoundError(f"index/legal_kb_metadata.json not found in {bundle_dir}")
+
+        matrix = np.load(str(index_path))
+        chunks: List[Dict[str, Any]] = json.loads(
+            metadata_path.read_text(encoding="utf-8")
+        )
+
+        # Guard against a mismatch between the persisted matrix row count and
+        # the metadata list length — both must agree for retrieval to be safe.
+        if matrix.shape[0] != len(chunks):
+            raise CorpusMismatchError(
+                dimension="chunk_count",
+                expected=str(len(chunks)),
+                actual=str(matrix.shape[0]),
+            )
+
+        self._matrix = matrix
+        self._chunks = chunks
+        logger.info(
+            "Legal KB loaded from bundle: %d chunks from %s", len(chunks), bundle_dir
+        )
 
     async def retrieve(
         self,

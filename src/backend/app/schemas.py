@@ -145,6 +145,18 @@ ContextChip = Literal[
 ]
 
 
+class CorpusMismatchError(Exception):
+    """Corpus bundle MANIFEST does not match expected state."""
+
+    def __init__(self, dimension: str, expected: str, actual: str) -> None:
+        self.dimension = dimension
+        self.expected = expected
+        self.actual = actual
+        super().__init__(
+            f"Corpus mismatch on {dimension}: expected {expected!r}, got {actual!r}"
+        )
+
+
 class Evidence(BaseModel):
     line_start: int = Field(..., ge=1)
     line_end: int = Field(..., ge=1)
