@@ -2,6 +2,8 @@
 
 Implementation of **LIB-PRINCIPLES P9: pre-push-independent-review** for terms-analysis project.
 
+> See `automations/p9-pre-push.md` for the current signoff-based gate reference. The prior interactive-checklist reminder hook has been retired; the authoritative local gate is now `.githooks/pre-push`, which validates a signoff file at `.git/reviews/<HEAD_SHA>.signoff.json`.
+
 ## What is P9?
 
 P9 mandates that before ANY push to main, two independent agents must review the assembled commits:
@@ -20,30 +22,20 @@ P9 mandates that before ANY push to main, two independent agents must review the
 
 ## Enforcement Layers
 
-### Layer 1: Local Git Hook (`.githooks/pre-push-p9-check`)
+### Layer 1: Local Hard Gate (`.githooks/pre-push`)
 
-**Triggers**: Before any push to `main`
+**Triggers**: `git push` (any remote, any ref); runs locally before the transport step, so nothing leaves the machine until the gate passes.
 
 **Behavior**:
-- Displays P9 reminder with review scope
-- Asks user to confirm they have P9 reviews documented
-- Can be bypassed by user (not automated enforcement)
+- Reads current `HEAD` SHA via `git rev-parse HEAD`.
+- Looks for `.git/reviews/<HEAD_SHA>.signoff.json`.
+- If the signoff is missing, malformed, or the `head_sha` field does not match, the push is refused.
+- If both `security_engineer.verdict` and `grumpy_developer.verdict` are `PASS` (or `override.used == true`), the hook exits 0.
+- Override signoffs print the reason and authorizer to stderr and remain auditable via `.git/reviews/`.
 
-**Usage**: Automatic on `git push origin main`
+**Usage**: Automatic on `git push`. To satisfy the gate, ask the orchestrator to run the P9 review pair; the review agents write the signoff file to `.git/reviews/<HEAD_SHA>.signoff.json`.
 
-**Example output**:
-```
-════════════════════════════════════════════════════════════════
-⚠️  P9 REVIEW REMINDER: Before Pushing to Main
-════════════════════════════════════════════════════════════════
-
-P9 (LIB-PRINCIPLES) Requirement:
-  Before ANY push to main, you MUST have reviewed commits with:
-    1. security-engineer agent (STRIDE threat-model review)
-    2. grumpy-developer agent (code-quality review)
-...
-Continue? (y/n):
-```
+**Authoritative reference**: `automations/p9-pre-push.md` documents the signoff schema, verdict rules, override path, and failure modes. That doc is the source of truth; this section is a pointer.
 
 ### Layer 2: GitHub Actions Workflow (`.github/workflows/enforce-p9-review.yml`)
 
@@ -118,20 +110,30 @@ Continue? (y/n):
 The `.githooks` directory is configured in git:
 
 ```bash
-git config core.hooksPath
-# Output: .githooks
+git config --get core.hooksPath
+# Expected: .githooks
 ```
 
-This was set automatically. To verify:
+The installer (`bash scripts/install-hooks.sh`) is idempotent and sets this automatically. To verify the hard gate is in place:
 
 ```bash
-# Check hook is executable
-ls -l .githooks/pre-push-p9-check
-# Should show: -rwxr-xr-x ... pre-push-p9-check
+# Confirm hooks path is wired
+git config --get core.hooksPath          # expected: .githooks
 
-# Test hook manually (optional)
-bash .githooks/pre-push-p9-check
+# Confirm the pre-push hook is executable
+test -x .githooks/pre-push && echo "hook installed"
+
+# Confirm the signoff directory exists
+ls -d .git/reviews                       # expected: directory exists
 ```
+
+To smoke-test the refuse path without actually pushing:
+
+```bash
+git push --dry-run
+```
+
+With no signoff present the hook prints a "signoff not found" diagnostic and exits 1; nothing leaves the machine.
 
 ## CI/CD Enforcement Details
 
