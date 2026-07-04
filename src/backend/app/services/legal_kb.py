@@ -183,7 +183,7 @@ class LegalKnowledgeBase:
         if not index_path.exists() or not metadata_path.exists():
             return False
         try:
-            self._matrix = np.load(index_path)
+            self._matrix = np.load(index_path, allow_pickle=False)
             self._chunks = json.loads(metadata_path.read_text(encoding="utf-8"))
         except Exception as exc:
             logger.warning("Failed to load legal KB index: %s", exc)
