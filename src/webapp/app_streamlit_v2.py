@@ -349,16 +349,24 @@ init_state()
 # ── API helpers ───────────────────────────────────────────────────────────────
 
 
-def call_infer(url: Optional[str], text: Optional[str], context: list[str]) -> Optional[dict]:
+def call_infer(url: Optional[str], text: Optional[str]) -> Optional[dict]:
     """Ask the backend to guess jurisdiction/doc_type/industry from the input.
 
     Returns the parsed JSON on success, or None if the backend is unavailable
     or returns a non-200. Callers must treat None as "keep asking the user."
+
+    Note: context chips are intentionally NOT passed to /infer. The endpoint
+    only consumes URL/text (see backend/app/services/inference.py::infer_all,
+    which takes only url and text). Chip state is applied downstream in
+    /analyze. Not sending it here also removes the stale-chip bug where
+    st.session_state.context_selections lags the in-progress form selection
+    while widgets are wrapped in st.form(...) (see grumpy F4 / issue
+    569260b).
     """
     try:
         resp = requests.post(
             f"{API_BASE}/infer",
-            json={"url": url, "text": text, "context": context},
+            json={"url": url, "text": text},
             timeout=15,
         )
         if resp.status_code == 200:
@@ -536,10 +544,13 @@ def render_intake() -> None:
     # until submit, so inference-driven UI (like `location_needed`) has to be
     # resolved outside the form. See issue #82 / Phase 5.d UI-1.
     if st.session_state.url_input or st.session_state.text_input:
+        # No context arg: /infer uses URL/text only; chip state is applied
+        # downstream in /analyze. Passing chips here would send stale values
+        # because widgets inside st.form(...) don't update session_state
+        # until submit (see grumpy F4).
         inferred = call_infer(
             st.session_state.url_input or None,
             st.session_state.text_input or None,
-            list(st.session_state.context_selections),
         )
         if inferred:
             st.session_state.inferred_juris = inferred.get("jurisdictions")
