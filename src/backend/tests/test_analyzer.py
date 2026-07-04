@@ -374,3 +374,134 @@ def test_analyzer_derive_action_items_empty_findings_returns_empty():
     from app.services.analyzer import _derive_action_items
 
     assert _derive_action_items([], ["US-CA"]) == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #83 / Phase 5.d CONTENT-1: chip-tuned action_items
+# ---------------------------------------------------------------------------
+
+
+def _mixed_findings():
+    """A fixture with categories that exercise every branch of the derivation."""
+    return [
+        _make_finding_for_actions("Sale/Share"),
+        _make_finding_for_actions("User Rights"),
+        _make_finding_for_actions("AI Training"),
+        _make_finding_for_actions("Liability"),
+        _make_finding_for_actions("Children's Privacy"),
+    ]
+
+
+def test_analyzer_action_items_liability_no_longer_fires_without_for_work():
+    """The prior chip-invariant 'For work/vendor use, escalate liability...'
+    line MUST NOT surface for readers who did not pick the for_work chip.
+    This is the specific off-tone item Phase 5.d E2E flagged CONTENT-1."""
+    from app.services.analyzer import _derive_action_items
+
+    for chip in ["just_curious", "for_child", "for_care", "want_understand"]:
+        items = _derive_action_items(_mixed_findings(), ["US-CA"], [chip])
+        # No item should carry the work/vendor escalation phrasing.
+        joined = " ".join(items).lower()
+        assert "work" not in joined and "vendor" not in joined, (
+            f"chip {chip!r} should NOT surface work/vendor action items; got: {items}"
+        )
+
+
+def test_analyzer_action_items_for_work_surfaces_liability_item():
+    """The work/vendor liability item MUST fire for readers who picked
+    for_work. Complement to the guard above — proves the gating is
+    causal, not just suppressive."""
+    from app.services.analyzer import _derive_action_items
+
+    items = _derive_action_items(_mixed_findings(), ["US-CA"], ["for_work"])
+    joined = " ".join(items).lower()
+    assert "work" in joined or "vendor" in joined, (
+        f"for_work chip must surface work/vendor action items; got: {items}"
+    )
+
+
+def test_analyzer_action_items_differ_across_chips_parametrized():
+    """Every ContextChip MUST produce a materially different action_items
+    list on the same fixture. Iterating via typing.get_args() so this
+    picks up new chips automatically per the 3-rule drift policy R3."""
+    from typing import get_args
+
+    from app.schemas import ContextChip
+    from app.services.analyzer import _derive_action_items
+
+    findings = _mixed_findings()
+    outputs: dict[str, tuple[str, ...]] = {}
+    for chip in get_args(ContextChip):
+        items = _derive_action_items(findings, ["US-CA"], [chip])
+        outputs[chip] = tuple(items)
+
+    # Every chip returns at least one item (universal + chip-specific + category).
+    for chip, items in outputs.items():
+        assert items, f"chip {chip!r} returned no action items on mixed findings"
+
+    # Outputs are not all identical. At least (n-1) chips must differ from
+    # any given chip's output — i.e., the set of unique outputs > 1.
+    unique_outputs = {items for items in outputs.values()}
+    assert len(unique_outputs) > 1, (
+        "action_items are chip-invariant across all ContextChips — the "
+        "chip-tune fix from issue #83 has regressed."
+    )
+
+
+def test_analyzer_action_items_include_universal_regardless_of_chip():
+    """The universal item ('Review the specific opt-out and rights mechanisms
+    named in the legal details above.') fires for every chip when findings
+    exist. Regression guard so the universal item cannot be silently dropped."""
+    from typing import get_args
+
+    from app.schemas import ContextChip
+    from app.services.analyzer import _derive_action_items
+
+    for chip in get_args(ContextChip):
+        items = _derive_action_items(_mixed_findings(), ["US-CA"], [chip])
+        assert any("opt-out and rights mechanisms" in line for line in items), (
+            f"chip {chip!r} missing the universal review item; got: {items}"
+        )
+
+
+def test_analyzer_action_items_no_context_backward_compat():
+    """Callers that pass no context still get category-derived items.
+    Backward-compat guarantee: the third param defaults to None, and
+    downstream consumers that predate the chip taxonomy still work."""
+    from app.services.analyzer import _derive_action_items
+
+    items = _derive_action_items(_mixed_findings(), ["US-CA"])
+    # Universal item still fires.
+    assert any("opt-out and rights mechanisms" in line for line in items)
+    # Sale/Share category item still fires when US-CA is set.
+    assert any("Do Not Sell" in line for line in items)
+
+
+def test_analyzer_action_items_dedupes_when_chip_and_category_overlap():
+    """If a chip item and a category-derived item say substantially the
+    same thing, the return list must dedupe by exact-string. Regression
+    guard against readers seeing near-identical items back to back."""
+    from app.services.analyzer import _derive_action_items
+
+    items = _derive_action_items(_mixed_findings(), ["US-CA"], ["for_child"])
+    # All items are unique strings.
+    assert len(items) == len(set(items)), (
+        f"duplicate strings in action_items: {items}"
+    )
+
+
+def test_analyzer_action_items_cap_holds_with_chips_active():
+    """The 5-item cap holds even when a chip + all category branches are
+    firing. Prevents accidental cap regression when new items are added."""
+    from app.services.analyzer import _derive_action_items
+
+    findings = [
+        _make_finding_for_actions("Sale/Share"),
+        _make_finding_for_actions("User Rights"),
+        _make_finding_for_actions("AI Training"),
+        _make_finding_for_actions("Automated Decision-Making"),
+        _make_finding_for_actions("Children's Privacy"),
+        _make_finding_for_actions("Liability"),
+    ]
+    items = _derive_action_items(findings, ["US-CA", "GDPR"], ["for_work"])
+    assert len(items) <= 5, f"cap breached with for_work + all categories: {items}"

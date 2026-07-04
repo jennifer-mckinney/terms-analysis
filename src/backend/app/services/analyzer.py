@@ -337,8 +337,64 @@ _SEV_LIST = ["Low", "Medium", "High", "Critical"]
 _KNOWN_SEVERITIES: frozenset[str] = frozenset(_SEV_LIST)
 
 
+# --------------------------------------------------------------------------
+# Chip-tuned action items (issue #83 / Phase 5.d E2E CONTENT-1 MEDIUM).
+#
+# Previously ``_derive_action_items`` was chip-invariant: the same items
+# fired for every reader. Phase 5.d found the "For work/vendor use,
+# escalate liability" item surfacing for ``just_curious``, which is
+# off-tone and undermines the appearance that the tool listens to context.
+#
+# The composition rule (see ``_derive_action_items`` below):
+#   final = _ACTION_ITEMS_UNIVERSAL
+#         + (chip items for every active chip in context)
+#         + (category-derived items the previous implementation emitted)
+#   deduped in insertion order, capped at 5 to match the prior cap.
+#
+# Voice constraint: chip items MUST honor LIB-VOICE V2 (no you/we/our/your
+# at the load-bearing level; per-finding-observation exception does not
+# apply to action_items). All items are em-dash free (LIB-VOICE V7).
+# --------------------------------------------------------------------------
+
+_ACTION_ITEMS_UNIVERSAL: List[str] = [
+    "Review the specific opt-out and rights mechanisms named in the legal "
+    "details above.",
+]
+
+_ACTION_ITEMS_BY_CHIP: dict[str, List[str]] = {
+    "for_child": [
+        "For accounts a child will use, look for parental supervision or "
+        "family-account controls before signing up.",
+        "Check whether facial recognition or biometric features can be "
+        "disabled in the settings.",
+        "Watch for policy-change notifications. These terms can update "
+        "without a new consent step.",
+    ],
+    "for_work": [
+        "For work or vendor use, escalate liability and unilateral-change "
+        "clauses to legal review before signing.",
+        "Compare this policy against the vendor's stated Data Processing "
+        "Addendum if one exists.",
+    ],
+    "for_care": [
+        "Consider walking through the settings together with the person "
+        "being helped before agreeing.",
+        "Note any language about who else can be granted account access.",
+    ],
+    "want_understand": [
+        "Note any clauses that stood out and consider whether the "
+        "tradeoffs are acceptable.",
+    ],
+    "just_curious": [
+        "Note anything unusual for later reference.",
+    ],
+}
+
+
 def _derive_action_items(
-    findings: List[Finding], jurisdictions: List[Jurisdiction]
+    findings: List[Finding],
+    jurisdictions: List[Jurisdiction],
+    context: Optional[List[ContextChip]] = None,
 ) -> List[str]:
     """Return context-relevant, generic action items derived from findings.
 
@@ -347,10 +403,33 @@ def _derive_action_items(
     specific; no hardcoded URLs. Points readers to general levers (opt-out,
     deletion, supervisory authorities) tied to categories the analysis
     actually detected. Capped at 5 items.
+
+    Chip-tuned per issue #83: the "For work/vendor use, escalate liability"
+    item now fires ONLY when ``for_work`` is in ``context``. Chip-specific
+    items from ``_ACTION_ITEMS_BY_CHIP`` are prepended so the output
+    materially differs across readers.
+
+    ``context`` defaults to ``None`` for backward compatibility with callers
+    that predate the chip taxonomy; in that case only universal + category-
+    derived items fire.
     """
     categories = {f.category for f in findings}
     jurisdiction_set = set(jurisdictions or [])
+    context_set: set[str] = set(context or [])
     lines: List[str] = []
+
+    # 1. Universal items always fire (unless zero findings, handled below).
+    lines.extend(_ACTION_ITEMS_UNIVERSAL)
+
+    # 2. Chip-specific items: one block per active chip, in taxonomy order
+    # (defined by _ACTION_ITEMS_BY_CHIP dict insertion order).
+    for chip, items in _ACTION_ITEMS_BY_CHIP.items():
+        if chip in context_set:
+            lines.extend(items)
+
+    # 3. Category-derived items: the previous chip-invariant set, kept for
+    # backward compatibility with callers that don't pass context and for
+    # readers whose chip choice doesn't cover a detected category.
 
     if any(c in categories for c in ("Sale/Share", "Data Sale / Sharing")):
         if "US-CA" in jurisdiction_set:
@@ -361,7 +440,8 @@ def _derive_action_items(
             )
         else:
             lines.append(
-                "Look for an opt-out of data sale/sharing in the service's privacy settings."
+                "Look for an opt-out of data sale/sharing in the service's "
+                "privacy settings."
             )
 
     if any(
@@ -370,19 +450,20 @@ def _derive_action_items(
     ):
         if "GDPR" in jurisdiction_set or "UK-GDPR" in jurisdiction_set:
             lines.append(
-                "EU/UK residents can request data access, correction, and deletion "
-                "under GDPR / UK GDPR. Filed with the service directly; complaints "
-                "filed with the national data protection authority."
+                "EU/UK residents can request data access, correction, and "
+                "deletion under GDPR / UK GDPR. Filed with the service "
+                "directly; complaints filed with the national data protection "
+                "authority."
             )
         lines.append(
-            "A data download and account deletion path is usually available in "
-            "the service's account settings."
+            "A data download and account deletion path is usually available "
+            "in the service's account settings."
         )
 
     if any(c in categories for c in ("AI Training", "AI Training Opt-Out")):
         lines.append(
-            "Look for AI training opt-out settings in the service's privacy or "
-            "account controls. Not every service offers a full opt-out."
+            "Look for AI training opt-out settings in the service's privacy "
+            "or account controls. Not every service offers a full opt-out."
         )
 
     if any(
@@ -395,7 +476,8 @@ def _derive_action_items(
     ):
         lines.append(
             "Automated decisions with significant effect may be challengeable. "
-            "Consider requesting human review through the service's support channels."
+            "Consider requesting human review through the service's support "
+            "channels."
         )
 
     if any(
@@ -403,18 +485,34 @@ def _derive_action_items(
         for c in ("Children's Privacy", "COPPA Compliance", "Minors")
     ):
         lines.append(
-            "For accounts involving children, look for parental supervision or "
-            "family-account tools. Underage accounts can be reported to the "
-            "service and, in the US, to the FTC."
+            "For accounts involving children, look for parental supervision "
+            "or family-account tools. Underage accounts can be reported to "
+            "the service and, in the US, to the FTC."
         )
 
-    if any(c in categories for c in ("Liability", "Unilateral Changes")):
-        lines.append(
-            "For work/vendor use, escalate liability and unilateral-change "
-            "clauses to legal review before signing."
-        )
+    # NOTE: the prior chip-invariant "For work/vendor use, escalate liability
+    # and unilateral-change clauses to legal review before signing." fired
+    # whenever Liability/Unilateral Changes were detected, regardless of who
+    # was reading. That copy now lives in _ACTION_ITEMS_BY_CHIP["for_work"]
+    # and only surfaces when the reader is actually in a work context. This
+    # is exactly the swap Phase 5.d flagged for just_curious (CONTENT-1).
 
-    return lines[:5]
+    # Zero findings means nothing to act on: return empty even if a chip is
+    # set. Preserves the empty-findings contract prior consumers relied on.
+    if not findings:
+        return []
+
+    # Dedupe in insertion order, then cap. Chip and category items can name
+    # overlapping levers (e.g. for_work's liability item vs the category
+    # liability item); dedupe prevents visible duplication.
+    seen: set[str] = set()
+    deduped: List[str] = []
+    for line in lines:
+        if line not in seen:
+            seen.add(line)
+            deduped.append(line)
+
+    return deduped[:5]
 
 
 def _bump_severity(finding: Finding, boost: float) -> Finding:
@@ -652,8 +750,14 @@ async def analyze_text(
     top_by_domain = _group_by_domain(merged)
 
     # Backend-generated action items (Fix 8). Frontend no longer has to
-    # duplicate the derivation logic.
-    action_items = _derive_action_items(merged, list(jurisdictions) if jurisdictions else [])
+    # duplicate the derivation logic. ``context_list`` threads the reader's
+    # chip choice through so items are chip-tuned per issue #83
+    # (Phase 5.d E2E CONTENT-1).
+    action_items = _derive_action_items(
+        merged,
+        list(jurisdictions) if jurisdictions else [],
+        context_list,
+    )
 
     elapsed_time = time.time() - start_time
 
