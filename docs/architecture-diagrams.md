@@ -29,8 +29,10 @@ graph TB
         end
 
         DB[("SQLite\nDatabase")]:::data
+        BUNDLE[("Corpus Bundle\nout/current/\nGDPR · AI Act · DSA · Data Act · DMA")]:::data
     end
 
+    INGESTER["legal-corpus-ingester\n(sibling project)\nweekly Sunday refresh"]:::ext
     EXT["External URLs\n(policy pages, legal-corpus sources)"]:::ext
 
     USER -->|"HTTP :8501"| FE1
@@ -38,6 +40,8 @@ graph TB
     BE   -->|orchestrates| AI
     BE   <-->|read / write| DB
     BE   -->|"HTTP (SSRF-validated)"| EXT
+    INGESTER -->|"corpus bundles\n(fetch·clean·chunk·embed·publish)"| BUNDLE
+    LKB      -->|"load_from_bundle()"| BUNDLE
 
     style LOCAL fill:#fafafa,stroke:#ddd
     style AI    fill:#f5faf7,stroke:#bde
@@ -122,7 +126,7 @@ graph TB
     end
 
     subgraph CORPUS ["Legal Corpus (source)"]
-        C1[("data/legal_corpus/&lt;jurisdiction&gt;/&lt;law&gt;.txt\ncurrently placeholder text —\nreal statutes pending (issue #6)")]:::db
+        C1[("legal-corpus-ingester\nout/current/corpus/\nGDPR · AI Act · DSA · Data Act · DMA\n(Phase 1 — CC-BY-4.0)")]:::db
     end
 
     %% Frontend → API
@@ -352,4 +356,59 @@ sequenceDiagram
 
 ---
 
-*All components run locally. No data leaves the machine, except one-time legal-corpus ingestion from public government sources (offline, not part of the request-serving path). Architecture as of 2026-07-03 — reconciled against actual implementation (see issues #6/#7).*
+---
+
+## L5 — Corpus Ingestion Pipeline
+
+How legal corpus bundles are produced by `legal-corpus-ingester` and consumed by `terms-analysis`. This pipeline runs independently of the request-serving path.
+
+```mermaid
+flowchart LR
+    classDef source  fill:#f0f5fc,stroke:#4a7fb5,color:#1e3a5f,font-weight:600
+    classDef proc    fill:#f5f2f5,stroke:#5e4c5f,color:#3d2e3e
+    classDef store   fill:#fdf2f2,stroke:#8b3a3a,color:#5a1a1a
+    classDef consumer fill:#eefaf4,stroke:#3a8c5c,color:#1a4a30,font-weight:600
+    classDef gate    fill:#fff8ee,stroke:#c49a3c,color:#5a3e00,font-weight:600
+
+    subgraph SOURCES ["EUR-Lex (public, CC-BY-4.0)"]
+        S1["GDPR\n02016R0679"]:::source
+        S2["EU AI Act\n02024R1689"]:::source
+        S3["DSA\n32022R2065"]:::source
+        S4["Data Act\n32023R2854"]:::source
+        S5["DMA\n32022R1925"]:::source
+    end
+
+    subgraph INGESTER ["legal-corpus-ingester — weekly refresh (Sun 3 AM UTC)"]
+        direction TB
+        FET["EurLexFetcher\nGET /legal-content/EN/TXT/XML/\n?uri=CELEX:<id>"]:::proc
+        CLN["XmlCleaner\nAkomaNtoso 3.0\nstrip boilerplate"]:::proc
+        CHK["SectionAwareChunker\narticle + annex boundaries\n~512 token chunks"]:::proc
+        EMB["LocalAI Apertus-8B\nembed() — 384-dim vectors"]:::proc
+        PUB["Publisher\natomic rename → out/YYYY.MM.PATCH/\nsymlink out/current"]:::proc
+        LIC["License Audit\nSPDX drift guard (HR8)\napproval SHA verify (HR9)"]:::gate
+    end
+
+    subgraph BUNDLE ["Bundle — out/current/"]
+        MAN["MANIFEST.yaml\nembedder_model\nembedder_revision\ncorpus_version"]:::store
+        COR["corpus/\n*.txt chunks"]:::store
+        IDX["index/\nnumpy vectors"]:::store
+        PRV["provenance/\nlicense + version metadata"]:::store
+    end
+
+    subgraph CONSUMER ["terms-analysis"]
+        LKB["LegalKnowledgeBase\nload_from_bundle()\nretrieve(query, jurisdictions)"]:::consumer
+        ANA["analyzer.py\naugments LLM prompt\nwith legal-KB passages"]:::consumer
+    end
+
+    SOURCES -->|"CELEX XML"| FET
+    FET --> CLN --> CHK --> EMB
+    EMB --> LIC
+    LIC -->|"PASS"| PUB
+    PUB --> MAN & COR & IDX & PRV
+    MAN & COR & IDX --> LKB
+    LKB --> ANA
+```
+
+---
+
+*All components run locally. No data leaves the machine. Corpus ingestion pulls from public government sources (EUR-Lex, CC-BY-4.0) on a weekly schedule — offline from the request-serving path. Architecture as of 2026-07-04 — reconciled against actual implementation.*

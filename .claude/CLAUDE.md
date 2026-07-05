@@ -156,11 +156,25 @@ classifier friction: subagent + Write both blocked when writing signoff files. W
 xref: [[SO11]]
 
 ### SO14: sibling-project-legal-corpus-ingester
-rule: new sibling project `~/Documents/05_Technical_Development/01_AUTOMATION/01_Claude_Projects/legal-corpus-ingester/` was bootstrapped 2026-07-04. Phase 0.0 tasks P1-P7 shipped
-remote: `jennifer-mckinney/legal-corpus-ingester` (private) at `main=a8365d5` (P7 commit `98a6f06` local-only pending next-session push)
-plan: `docs/plans/2026-07-04-legal-corpus-ingester.md` (this repo) — Phase 0.0 P1-P10 then Phase 0.1 tasks 1-40
-consumer contract: `src/backend/app/services/legal_kb.py` — will consume corpus bundles from ingester per plan Task 28
-xref: [[docs/plans/2026-07-04-legal-corpus-ingester.md]]
+rule: sibling project `~/Documents/05_Technical_Development/01_AUTOMATION/01_Claude_Projects/legal-corpus-ingester/` bootstrapped 2026-07-04. Phase 0.1 Tasks 1-40 complete and pushed at `459a1b8`.
+remote: `jennifer-mckinney/legal-corpus-ingester` (private)
+plan: `docs/plans/2026-07-04-legal-corpus-ingester.md` (this repo) — complete; Phase 1 EU plan at `docs/plans/2026-07-04-legal-corpus-ingester-phase1-EU.md`
+consumer contract: `src/backend/app/services/legal_kb.py` — consumes corpus bundles from ingester per plan Task 28
+xref: [[docs/plans/2026-07-04-legal-corpus-ingester.md]] [[docs/plans/2026-07-04-legal-corpus-ingester-phase1-EU.md]]
+
+## session-outcomes-2026-07-04b
+
+### SO15: ingester-phase-01-complete
+rule: legal-corpus-ingester Phase 0.1 Tasks 1-40 all complete and pushed at HEAD `459a1b8`.
+phase-00: P1-P10 (bootstrapping, governance, CI skeleton, fetcher, cleaner, chunker, embedder, publisher, pipeline orchestrator, tools/agents/skills)
+phase-01: T1-T40 (VCR cassettes, snapshot tests, retention policy, CLI subcommands audit-license/validate-round-trip/prune/refresh, Docker, self-hosted runner, weekly refresh workflow, approval expiry watcher, VCR drift canary, nightly health check)
+bugs-fixed: 10 GitHub issues (Groups A-D) — EXIT_NO_SOURCES, SHA-pinned actions, duplicate-issue guards, sha256 validation, ModuleNotFoundError narrowing, retrieve truthiness check, --offline flag, VCR integration test, consumer stub test
+next: Phase 1 EU cluster ingestion (GDPR + AI Act + DSA + Data Act + DMA) per `docs/plans/2026-07-04-legal-corpus-ingester-phase1-EU.md`
+xref: [[SO14]]
+
+### SO16: ingester-ci-venv-fix
+rule: `.github/workflows/ci.yml` test step had no guard for missing `.venv/bin/activate`; caused CI failure on `a8365d5`. Fixed at `9db68f3` — now handled in Phase 0.1 Task 2 pyproject setup.
+status: RESOLVED — historical note only
 
 ## reference-library
 
