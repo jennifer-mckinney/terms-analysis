@@ -120,3 +120,6 @@ ignore/
 
 # Agent-sweep backups (Doer/Critic diff record for .claude/ rewrites; not committed)
 .claude/_pre-agent-sweep-backup/
+
+# Playwright MCP scratch snapshots (timestamped page/console/snap dumps)
+.playwright-mcp/
