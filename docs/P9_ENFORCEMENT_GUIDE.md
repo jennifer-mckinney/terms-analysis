@@ -145,8 +145,12 @@ With no signoff present the hook prints a "signoff not found" diagnostic and exi
 
 **Steps**:
 1. Extract PR body safely (uses temp file to avoid escaping issues)
-2. Check for `security-engineer` mention (regex: `security-engineer.*approved` or `✅.*security-engineer`)
-3. Check for `grumpy-developer` mention (regex: `grumpy-developer.*approved` or `✅.*grumpy-developer`)
+2. Check for `security-engineer` review — accepts either:
+   - Inline approval: `security-engineer.*approved` or `✅.*security-engineer`
+   - Signoff reference: `security-engineer` mentioned anywhere AND (`both PASS` / `verdict.*pass` / `signoff.json`) also present
+3. Check for `grumpy-developer` review — accepts either:
+   - Inline approval: `grumpy-developer.*approved` or `✅.*grumpy-developer`
+   - Signoff reference: `grumpy-developer` mentioned anywhere AND (`both PASS` / `verdict.*pass` / `signoff.json`) also present
 4. Scan for unresolved CRITICAL/HIGH findings
 5. Report final status (pass/fail)
 

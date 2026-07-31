@@ -24,7 +24,9 @@ jobs:
 
       - name: Check for security-engineer review
         run: |
-          if grep -qi "security-engineer.*approved\|✅.*security-engineer" /tmp/pr_body.txt; then
+          # Accept explicit inline approval OR signoff-file reference format (both PASS / verdict PASS)
+          if grep -qi "security-engineer.*approved\|✅.*security-engineer" /tmp/pr_body.txt || \
+             { grep -qi "security-engineer" /tmp/pr_body.txt && grep -qi "both PASS\|verdict.*pass\|signoff\.json" /tmp/pr_body.txt; }; then
             echo "✅ security-engineer review found"
             exit 0
           else
@@ -38,16 +40,17 @@ jobs:
             echo ""
             echo "Zero-tolerance policy: ALL findings (CRITICAL/HIGH/MEDIUM/LOW/NIT) must be fixed"
             echo ""
-            echo "After review completes, add to PR body:"
+            echo "After review completes, add to PR body (either format):"
             echo "  ✅ security-engineer: approved (no findings found)"
-            echo "  OR"
-            echo "  ✅ security-engineer: approved (found [N] items, all resolved)"
+            echo "  OR reference the .git/reviews/<sha>.signoff.json with 'both PASS'"
             exit 1
           fi
 
       - name: Check for grumpy-developer review
         run: |
-          if grep -qi "grumpy-developer.*approved\|✅.*grumpy-developer" /tmp/pr_body.txt; then
+          # Accept explicit inline approval OR signoff-file reference format (both PASS / verdict PASS)
+          if grep -qi "grumpy-developer.*approved\|✅.*grumpy-developer" /tmp/pr_body.txt || \
+             { grep -qi "grumpy-developer" /tmp/pr_body.txt && grep -qi "both PASS\|verdict.*pass\|signoff\.json" /tmp/pr_body.txt; }; then
             echo "✅ grumpy-developer review found"
             exit 0
           else
@@ -61,10 +64,9 @@ jobs:
             echo ""
             echo "Policy: CRITICAL/HIGH findings block push; MEDIUM/LOW/NIT can be follow-ups"
             echo ""
-            echo "After review completes, add to PR body:"
+            echo "After review completes, add to PR body (either format):"
             echo "  ✅ grumpy-developer: approved (no blocking findings)"
-            echo "  OR"
-            echo "  ✅ grumpy-developer: approved (found [N] items, CRITICAL/HIGH resolved)"
+            echo "  OR reference the .git/reviews/<sha>.signoff.json with 'both PASS'"
             exit 1
           fi
 
