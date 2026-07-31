@@ -11,22 +11,41 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: read
+      issues: read
       contents: read
     steps:
-      - name: Extract PR body safely
+      - name: Collect PR review evidence
         id: extract_body
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
+          API_URL: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # Store PR body in temp file to avoid shell escaping issues
+          # Build a unified evidence file from PR body + issue comments + PR reviews
           echo "$PR_BODY" > /tmp/pr_body.txt
-          cat /tmp/pr_body.txt
+          cp /tmp/pr_body.txt /tmp/pr_evidence.txt
+
+          issue_comments_json="$(curl -sS \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$API_URL/repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" || echo '[]')"
+          echo "$issue_comments_json" | jq -r '.[].body // empty' >> /tmp/pr_evidence.txt
+
+          reviews_json="$(curl -sS \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$API_URL/repos/$REPO/pulls/$PR_NUMBER/reviews?per_page=100" || echo '[]')"
+          echo "$reviews_json" | jq -r '.[].body // empty' >> /tmp/pr_evidence.txt
+
+          cat /tmp/pr_evidence.txt
 
       - name: Check for security-engineer review
         run: |
           # Accept explicit inline approval OR signoff-file reference format (both PASS / verdict PASS)
-          if grep -qi "security-engineer.*approved\|✅.*security-engineer" /tmp/pr_body.txt || \
-             { grep -qi "security-engineer" /tmp/pr_body.txt && grep -qi "both PASS\|verdict.*pass\|signoff\.json" /tmp/pr_body.txt; }; then
+          if grep -qi "security-engineer.*approved\|✅.*security-engineer" /tmp/pr_evidence.txt || \
+             { grep -qi "security-engineer" /tmp/pr_evidence.txt && grep -qi "both PASS\|verdict.*pass\|signoff\.json" /tmp/pr_evidence.txt; }; then
             echo "✅ security-engineer review found"
             exit 0
           else
@@ -49,8 +68,8 @@ jobs:
       - name: Check for grumpy-developer review
         run: |
           # Accept explicit inline approval OR signoff-file reference format (both PASS / verdict PASS)
-          if grep -qi "grumpy-developer.*approved\|✅.*grumpy-developer" /tmp/pr_body.txt || \
-             { grep -qi "grumpy-developer" /tmp/pr_body.txt && grep -qi "both PASS\|verdict.*pass\|signoff\.json" /tmp/pr_body.txt; }; then
+          if grep -qi "grumpy-developer.*approved\|✅.*grumpy-developer" /tmp/pr_evidence.txt || \
+             { grep -qi "grumpy-developer" /tmp/pr_evidence.txt && grep -qi "both PASS\|verdict.*pass\|signoff\.json" /tmp/pr_evidence.txt; }; then
             echo "✅ grumpy-developer review found"
             exit 0
           else
@@ -73,9 +92,9 @@ jobs:
       - name: Check for unresolved CRITICAL/HIGH findings
         run: |
           # If either review mentions unresolved CRITICAL or HIGH, fail
-          if grep -qi "CRITICAL\|HIGH" /tmp/pr_body.txt; then
+          if grep -qi "CRITICAL\|HIGH" /tmp/pr_evidence.txt; then
             # Check if findings are marked as resolved
-            if ! grep -qi "resolved\|fixed\|addressed" /tmp/pr_body.txt; then
+            if ! grep -qi "resolved\|fixed\|addressed" /tmp/pr_evidence.txt; then
               echo "❌ BLOCKING: Unresolved CRITICAL or HIGH findings detected"
               echo ""
               echo "P9 Policy (zero-tolerance for security):"
