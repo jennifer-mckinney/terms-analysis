@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import ModuleType
 
 
-def _load_migration_module():
+def _load_migration_module() -> ModuleType:
     # The migration script lives under scripts/ and is not a package member,
     # so load it via importlib to reach its module namespace for hasattr().
     script_path = (
