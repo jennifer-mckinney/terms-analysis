@@ -30,6 +30,7 @@ xref: [[LIB-LEGAL]] [[.claude/CLAUDE.md#HR1]]
 | langdetect | BSD | A+ | Language routing (Apertus vs. EuroLLM); unmaintained since 2021; graceful fallback exists |
 | rank_bm25 | Apache 2.0 | A+ | Sparse retrieval (BM25) for doc-chunk + legal-KB ensembles |
 | numpy | BSD | A+ | Exact/exhaustive vector similarity (legal-KB — see rejected below) |
+| PyYAML | MIT | A+ | YAML config parsing (added post-PR-#87 to unblock CI test job) |
 
 ### S2: python-multipart-pin
 rule: pin `python-multipart >= 0.0.18`
