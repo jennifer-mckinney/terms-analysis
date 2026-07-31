@@ -123,3 +123,6 @@ ignore/
 
 # Playwright MCP scratch snapshots (timestamped page/console/snap dumps)
 .playwright-mcp/
+
+# Session handoffs — local only per user directive 2026-07-03
+SESSION_HANDOFF_*.md
