@@ -740,7 +740,7 @@ def simplify_finding_for_context(finding: dict, context_selections: list[str]) -
     # HTML-escape FIRST (defense in depth) so unescaped content cannot leak.
     explanation = html.escape(raw_explanation)
 
-    # Apply simplification patterns in order; first match wins.
+    # Apply simplification patterns in order; multiple replacements may apply.
     # Patterns are pre-compiled at module load to prevent ReDoS (CRITICAL-1).
     for pattern, replacement in zip(_SIMPLIFY_PATTERNS, _SIMPLIFY_REPLACEMENTS):
         explanation = pattern.sub(replacement, explanation)
