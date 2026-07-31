@@ -44,6 +44,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install --prefer-binary -r src/backend/requirements.txt
+          pip install --prefer-binary -r src/webapp/requirements.txt
           pip install --prefer-binary \
             "pytest-asyncio>=0.21.0" \
             pytest-cov \
