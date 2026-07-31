@@ -44,11 +44,12 @@ examples:
   drift_to_update: PDF export beyond PRD spec — update PRD to name format, then implement
 
 ### P4: hard-scope-limits-non-negotiable
-rule: tool analyzes document text only; two limits surface verbatim, always, in scope box
-limit_hardware_permissions: camera / microphone / contacts / location — tool reads policy text, not manifests
-limit_practice_divergence: tool assesses what policy says, not what company does
+rule: tool analyzes document text only; the runtime-permission scope limit surfaces verbatim, always, in the "what else worth checking" note in results
+limit_runtime_permissions: camera / microphone / contacts / location — tool reads policy text, not install-time permission requests; readers directed to (a) the app's Terms of Use, (b) App Store Privacy Nutrition Label / Play Store Data Safety section, (c) install-time permissions in device Settings
 requests_to_expand_these: drift under P3 — surface and ask
-xref: [[LIB-VOICE#V11]] [[terms_analysis_scope_limits.md]]
+because: analyzing the policy IS analyzing the contract. "Real-world practice divergence" was previously listed as a second limit; dropped 2026-07-03 per user directive on grounds that behavior monitoring is a separate discipline (compliance monitoring, breach research, investigative journalism), not a scope limit of a policy-analysis tool. Conflating tool scope with due-diligence-in-general read defensive and mixed categories.
+retro_anchor: user review 2026-07-03 following Phase 5.d E2E; codified in docs/plans/2026-07-03-results-view-revamp-report-card.md §7 D-Q9
+xref: [[LIB-VOICE#V11]]
 
 ### P5: local-only-open-source-only
 rule: hard requirements restated from `.claude/CLAUDE.md`
@@ -112,10 +113,21 @@ review_agents:
   security-engineer: STRIDE-style threat-model review — auth, secrets, user input, RLS, CSP, dependencies, session/cookie state, migration safety, endpoint deprecation contract
   grumpy-developer: blunt code-quality review — swallowed errors, dead code, brittle assumptions, missed edges, tautological tests, dispatch-boundary artifacts from multi-Doer sessions
 custom: reviewer prompts MUST be customized to the actual diff and session context, not defaults
-gate: security-engineer findings of ANY severity (CRITICAL / HIGH / MEDIUM / LOW / NIT) block push and MUST be fixed — zero tolerance, no follow-up-issue path; grumpy-developer findings of CRITICAL or HIGH block push, MEDIUM / LOW / NIT can be filed as follow-up issues; either gate resolves via (a) fix-Coder + re-verify, or (b) explicit user override in-session per P8 override_authority
+gate: security-engineer AND grumpy-developer findings of ANY severity (CRITICAL / HIGH / MEDIUM / LOW / NIT) block push and MUST be fixed — zero tolerance for BOTH per 2026-07-04 user directive, no follow-up-issue path; either gate resolves via (a) fix-Coder + re-verify (the loop-pattern below), or (b) explicit user override in-session per P8 override_authority via `override.used=true` in the signoff JSON
 security_findings_zero_tolerance: user directive 2026-07-03 — every security-engineer finding is a fix-now item regardless of severity; codified after F1-F7 review where two MEDIUMs would have shipped as follow-ups under prior gate
 because: local pytest + orchestrator spot-check is not sufficient for pushed code; two independent adversarial reviewers catch what dispatch Coders and orchestrator miss; especially load-bearing after multi-agent sessions where domain boundaries were crossed
 enforcement: prompt-based today; automation follow-up: pre-push git hook that refuses push until a signed reviewer-log exists for the current HEAD
+loop_pattern: (amendment 2026-07-04) every push runs this fixed-point loop until convergence
+  1. Coder(s) implement the change → commit LOCALLY (no push)
+  2. Orchestrator dispatches security-engineer + grumpy-developer IN PARALLEL on the delta
+  3. If EITHER reviewer returns findings of ANY severity → dispatch fix-Coder scoped to those findings → commit locally → GOTO 2
+  4. If BOTH reviewers return zero findings → orchestrator writes `.git/reviews/<HEAD-SHA>.signoff.json` → push
+automation: `.githooks/pre-push` (both repos) enforces the signoff schema; missing or non-PASS signoff hard-refuses push. See `automations/p9-pre-push.md`
+whack_a_mole_avoidance: when a name-based deny-list / exact-match rule keeps growing across rounds (each round finds another edge case), switch to a STRUCTURAL fix — pattern-based rules, schema-driven ordering, input normalization. Structural fixes close classes of attack instead of individual names. Two structural-fix wins on 2026-07-04:
+  - terms-analysis grumpy F2: switched `_ACTION_ITEMS_BY_CHIP.items()` iteration → `typing.get_args(ContextChip)` schema-driven order
+  - ingester rounds 6-9 logging redaction: added `_REDACT_SUFFIXES` + `_normalize_key(camelCase→snake_case)` instead of growing exact-name list further
+loop_failure_mode: if the loop does NOT converge after 3-4 rounds on the same axis, PAUSE and ask user whether to keep patching or switch to a structural fix. Silent iteration is a Coder-role violation.
+retro_anchor: codified 2026-07-03 (security zero-tolerance) then extended 2026-07-04 (grumpy zero-tolerance + loop_pattern + whack_a_mole guidance)
 xref: [[P8]] [[LIB-TEST]]
 
 ## enforcement-summary

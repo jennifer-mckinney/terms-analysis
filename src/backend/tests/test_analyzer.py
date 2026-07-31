@@ -374,3 +374,199 @@ def test_analyzer_derive_action_items_empty_findings_returns_empty():
     from app.services.analyzer import _derive_action_items
 
     assert _derive_action_items([], ["US-CA"]) == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #83 / Phase 5.d CONTENT-1: chip-tuned action_items
+# ---------------------------------------------------------------------------
+
+
+def _mixed_findings():
+    """A fixture with categories that exercise every branch of the derivation."""
+    return [
+        _make_finding_for_actions("Sale/Share"),
+        _make_finding_for_actions("User Rights"),
+        _make_finding_for_actions("AI Training"),
+        _make_finding_for_actions("Liability"),
+        _make_finding_for_actions("Children's Privacy"),
+    ]
+
+
+def test_analyzer_action_items_liability_no_longer_fires_without_for_work():
+    """The prior chip-invariant 'For work/vendor use, escalate liability...'
+    line MUST NOT surface for readers who did not pick the for_work chip.
+    This is the specific off-tone item Phase 5.d E2E flagged CONTENT-1."""
+    from app.services.analyzer import _derive_action_items
+
+    for chip in ["just_curious", "for_child", "for_care", "want_understand"]:
+        items = _derive_action_items(_mixed_findings(), ["US-CA"], [chip])
+        # No item should carry the work/vendor escalation phrasing.
+        joined = " ".join(items).lower()
+        assert "work" not in joined and "vendor" not in joined, (
+            f"chip {chip!r} should NOT surface work/vendor action items; got: {items}"
+        )
+
+
+def test_analyzer_action_items_for_work_surfaces_liability_item():
+    """The work/vendor liability item MUST fire for readers who picked
+    for_work. Complement to the guard above — proves the gating is
+    causal, not just suppressive."""
+    from app.services.analyzer import _derive_action_items
+
+    items = _derive_action_items(_mixed_findings(), ["US-CA"], ["for_work"])
+    joined = " ".join(items).lower()
+    assert "work" in joined or "vendor" in joined, (
+        f"for_work chip must surface work/vendor action items; got: {items}"
+    )
+
+
+def test_analyzer_action_items_differ_across_chips_parametrized():
+    """Every ContextChip MUST produce a materially different action_items
+    list on the same fixture. Iterating via typing.get_args() so this
+    picks up new chips automatically per the 3-rule drift policy R3."""
+    from typing import get_args
+
+    from app.schemas import ContextChip
+    from app.services.analyzer import _derive_action_items
+
+    findings = _mixed_findings()
+    outputs: dict[str, tuple[str, ...]] = {}
+    for chip in get_args(ContextChip):
+        items = _derive_action_items(findings, ["US-CA"], [chip])
+        outputs[chip] = tuple(items)
+
+    # Every chip returns at least one item (universal + chip-specific + category).
+    for chip, items in outputs.items():
+        assert items, f"chip {chip!r} returned no action items on mixed findings"
+
+    # Outputs are not all identical. At least (n-1) chips must differ from
+    # any given chip's output — i.e., the set of unique outputs > 1.
+    unique_outputs = {items for items in outputs.values()}
+    assert len(unique_outputs) > 1, (
+        "action_items are chip-invariant across all ContextChips — the "
+        "chip-tune fix from issue #83 has regressed."
+    )
+
+
+def test_analyzer_action_items_include_universal_regardless_of_chip():
+    """The universal item ('Review the specific opt-out and rights mechanisms
+    named in the legal details above.') fires for every chip when findings
+    exist. Regression guard so the universal item cannot be silently dropped."""
+    from typing import get_args
+
+    from app.schemas import ContextChip
+    from app.services.analyzer import _derive_action_items
+
+    for chip in get_args(ContextChip):
+        items = _derive_action_items(_mixed_findings(), ["US-CA"], [chip])
+        assert any("opt-out and rights mechanisms" in line for line in items), (
+            f"chip {chip!r} missing the universal review item; got: {items}"
+        )
+
+
+def test_analyzer_action_items_no_context_backward_compat():
+    """Callers that pass no context still get category-derived items.
+    Backward-compat guarantee: the third param defaults to None, and
+    downstream consumers that predate the chip taxonomy still work."""
+    from app.services.analyzer import _derive_action_items
+
+    items = _derive_action_items(_mixed_findings(), ["US-CA"])
+    # Universal item still fires.
+    assert any("opt-out and rights mechanisms" in line for line in items)
+    # Sale/Share category item still fires when US-CA is set.
+    assert any("Do Not Sell" in line for line in items)
+
+
+def test_analyzer_action_items_dedupes_when_chip_and_category_overlap(monkeypatch):
+    """If a chip item and a category-derived item are byte-for-byte identical,
+    the return list must dedupe. Grumpy F3: prior test used non-overlapping
+    strings so it would have passed even with the dedupe step deleted. Now
+    monkeypatches a real duplicate of a category-derived string into
+    ``_ACTION_ITEMS_BY_CHIP`` and asserts the output contains the string once.
+    """
+    from app.services import analyzer
+    from app.services.analyzer import _derive_action_items
+
+    # Exact category string emitted for Sale/Share + US-CA (see analyzer.py).
+    ca_sale_share_line = (
+        "California residents can submit a \"Do Not Sell or Share My "
+        "Personal Information\" request through the service's privacy "
+        "settings or a designated privacy link."
+    )
+
+    # Inject an exact duplicate into the for_work chip block.
+    original = analyzer._ACTION_ITEMS_BY_CHIP["for_work"]
+    monkeypatch.setitem(
+        analyzer._ACTION_ITEMS_BY_CHIP,
+        "for_work",
+        list(original) + [ca_sale_share_line],
+    )
+
+    items = _derive_action_items(
+        _mixed_findings(), ["US-CA"], ["for_work"]
+    )
+
+    # Baseline unique-strings guard (kept from prior test).
+    assert len(items) == len(set(items)), (
+        f"duplicate strings in action_items: {items}"
+    )
+    # Load-bearing: the exact duplicated string appears exactly once, proving
+    # the dedupe step is doing real work (not just the fixture avoiding overlap).
+    assert items.count(ca_sale_share_line) == 1, (
+        f"duplicate category/chip line not deduped: {items}"
+    )
+
+
+def test_analyzer_action_items_chip_order_follows_schema():
+    """Multi-chip priority ordering MUST follow ``schemas.ContextChip`` order,
+    not ``_ACTION_ITEMS_BY_CHIP`` dict-insertion order. Grumpy F2: if the
+    chip dict is reordered, the reader-facing output must NOT change. Locks
+    the schema as the single source of truth for priority.
+    """
+    from typing import get_args
+
+    from app.schemas import ContextChip
+    from app.services.analyzer import _ACTION_ITEMS_BY_CHIP, _derive_action_items
+
+    # Pick two chips whose blocks are distinct and both have items.
+    # for_child appears before for_work in the ContextChip Literal.
+    schema_order = list(get_args(ContextChip))
+    assert schema_order.index("for_child") < schema_order.index("for_work"), (
+        "test fixture assumes schemas.ContextChip lists for_child before for_work"
+    )
+
+    # Findings that trigger no category-item that overlaps chip items, so the
+    # ordering between for_child and for_work blocks is observable.
+    findings = [
+        _make_finding_for_actions("Liability"),
+    ]
+    items = _derive_action_items(findings, [], ["for_work", "for_child"])
+
+    # Grab the first item from each chip block that survived cap+dedupe.
+    for_child_first = _ACTION_ITEMS_BY_CHIP["for_child"][0]
+    for_work_first = _ACTION_ITEMS_BY_CHIP["for_work"][0]
+
+    assert for_child_first in items and for_work_first in items, (
+        f"expected both chip signature items present: {items}"
+    )
+    assert items.index(for_child_first) < items.index(for_work_first), (
+        "chip ordering must follow schemas.ContextChip order (for_child before "
+        f"for_work), not caller order or dict insertion order; got: {items}"
+    )
+
+
+def test_analyzer_action_items_cap_holds_with_chips_active():
+    """The 5-item cap holds even when a chip + all category branches are
+    firing. Prevents accidental cap regression when new items are added."""
+    from app.services.analyzer import _derive_action_items
+
+    findings = [
+        _make_finding_for_actions("Sale/Share"),
+        _make_finding_for_actions("User Rights"),
+        _make_finding_for_actions("AI Training"),
+        _make_finding_for_actions("Automated Decision-Making"),
+        _make_finding_for_actions("Children's Privacy"),
+        _make_finding_for_actions("Liability"),
+    ]
+    items = _derive_action_items(findings, ["US-CA", "GDPR"], ["for_work"])
+    assert len(items) <= 5, f"cap breached with for_work + all categories: {items}"

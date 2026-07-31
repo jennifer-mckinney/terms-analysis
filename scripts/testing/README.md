@@ -75,6 +75,8 @@ Run `verify.sh --scopes` for the authoritative list. Current scopes:
 | `snapshots` | `test_snapshots_and_diffs.py`. |
 | `validation` | `test_validation.py`. |
 | `smoke` | `test_all.py`. |
+| `simplification` | Shell-native assertions for `simplify_finding_for_context()` — headless, no backend required. Mirrors `tests/test_child_context_simplification.py`. |
+| `smoke-live` | Live HTTP smoke tests via curl+jq against running backend. Mirrors `tests/test_api_endpoints.py`. |
 
 ## Output format spec
 
@@ -118,3 +120,24 @@ python -m pytest scripts/testing/tests/ -q
 
 These use synthetic pytest output and static-map assertions; they do not
 touch the real backend test suite.
+
+## Shell-native scripts
+
+Two scripts bypass pytest entirely and produce the same `PASS/FAIL` output format:
+
+| Script | Mirrors | Requires |
+|--------|---------|---------|
+| `simplification-check.sh` | `tests/test_child_context_simplification.py` | Python + webapp venv |
+| `smoke-test.sh` | `tests/test_api_endpoints.py` | Running backend + jq |
+
+The `.py` files are kept alongside as fallback. Differences:
+- `.py` files use a copied function or TestClient mocks — faster to run offline.
+- `.sh` files test the live source / live HTTP — catch integration regressions the mocks miss.
+
+Run directly or via `verify.sh`:
+```
+scripts/testing/simplification-check.sh
+scripts/testing/smoke-test.sh --base-url http://localhost:9000
+scripts/testing/verify.sh simplification
+scripts/testing/verify.sh smoke-live
+```

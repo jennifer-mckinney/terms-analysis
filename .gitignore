@@ -121,5 +121,8 @@ ignore/
 # Agent-sweep backups (Doer/Critic diff record for .claude/ rewrites; not committed)
 .claude/_pre-agent-sweep-backup/
 
+# Playwright MCP scratch snapshots (timestamped page/console/snap dumps)
+.playwright-mcp/
+
 # Session handoffs — local only per user directive 2026-07-03
 SESSION_HANDOFF_*.md

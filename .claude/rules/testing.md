@@ -65,7 +65,7 @@ rule: mock `localStorage` for theme persistence
 |--------|--------|
 | line coverage | >= 85% (baseline: 98.06%) |
 | branch coverage | >= 75% |
-| core rule categories tested | Yes (~50 categories/64 patterns; not all require individual tests) |
+| core rule categories tested | No — CRITICAL gap: only 2/50 categories individually tested; see docs/research/test-coverage-matrix.md |
 | validation penalty paths | Yes |
 | LLM failure/fallback | Yes |
 | API endpoint happy + error | Yes |
@@ -89,8 +89,9 @@ _VALID_JURISDICTIONS: frozenset[str] = frozenset(get_args(Jurisdiction))
 reference_impl_test:
 ```python
 def test_main_valid_chips_matches_schema_literal():
+    from typing import get_args
     from app.main import _VALID_CHIPS
-    from typing import get_args; from app.schemas import ContextChip
+    from app.schemas import ContextChip
     assert _VALID_CHIPS == frozenset(get_args(ContextChip))
 ```
 

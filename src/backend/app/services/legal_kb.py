@@ -34,8 +34,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+import yaml
 
 from ..config import settings
+from ..exceptions import CorpusMismatchError
 from .embedding import bm25_scores, chunk_text, rrf_fuse
 from .localai import LocalAIClient
 
@@ -181,7 +183,7 @@ class LegalKnowledgeBase:
         if not index_path.exists() or not metadata_path.exists():
             return False
         try:
-            self._matrix = np.load(index_path)
+            self._matrix = np.load(index_path, allow_pickle=False)
             self._chunks = json.loads(metadata_path.read_text(encoding="utf-8"))
         except Exception as exc:
             logger.warning("Failed to load legal KB index: %s", exc)
@@ -198,6 +200,106 @@ class LegalKnowledgeBase:
             self._chunks = []
             return False
         return True
+
+    def load_from_bundle(
+        self,
+        bundle_dir: Path,
+        expected_chunker_version: Optional[str] = None,
+        expected_embedder_model: Optional[str] = None,
+        expected_embedder_revision: Optional[str] = None,
+    ) -> None:
+        """Load corpus from an ingester-produced bundle directory.
+
+        Reads MANIFEST.yaml, validates version fields against expected values,
+        then loads ``index/legal_kb.npy`` + ``index/legal_kb_metadata.json``
+        into ``self._matrix`` and ``self._chunks``.
+
+        Raises:
+            FileNotFoundError: if MANIFEST.yaml, legal_kb.npy, or
+                legal_kb_metadata.json are absent from ``bundle_dir``.
+            CorpusMismatchError: if a version field in the MANIFEST does not
+                match the corresponding ``expected_*`` argument, or if the
+                row count of the loaded matrix does not match the metadata
+                chunk count.
+        """
+        manifest_path = bundle_dir / "MANIFEST.yaml"
+        if not manifest_path.exists():
+            logger.error("MANIFEST.yaml missing from bundle at %s", bundle_dir)
+            raise FileNotFoundError("MANIFEST.yaml not found in bundle directory")
+
+        manifest: Dict[str, Any] = yaml.safe_load(
+            manifest_path.read_text(encoding="utf-8")
+        )
+
+        # Guard against an empty or non-dict MANIFEST (e.g. empty file yields None)
+        if not isinstance(manifest, dict):
+            raise CorpusMismatchError(
+                dimension="manifest_structure",
+                expected="dict",
+                actual=type(manifest).__name__,
+            )
+
+        # Validate version fields against caller expectations when provided.
+        # Use `is not None` rather than truthiness so that callers can pass
+        # the empty string "" as an expected value without skipping the check.
+        if expected_chunker_version is not None and manifest.get("chunker_version") != expected_chunker_version:
+            raise CorpusMismatchError(
+                dimension="chunker_version",
+                expected=expected_chunker_version,
+                actual=str(manifest.get("chunker_version", "<key missing>")),
+            )
+        if expected_embedder_model is not None and manifest.get("embedder_model") != expected_embedder_model:
+            raise CorpusMismatchError(
+                dimension="embedder_model",
+                expected=expected_embedder_model,
+                actual=str(manifest.get("embedder_model", "<key missing>")),
+            )
+        if expected_embedder_revision is not None and manifest.get("embedder_revision") != expected_embedder_revision:
+            raise CorpusMismatchError(
+                dimension="embedder_revision",
+                expected=expected_embedder_revision,
+                actual=str(manifest.get("embedder_revision", "<key missing>")),
+            )
+
+        index_path = bundle_dir / "index" / "legal_kb.npy"
+        metadata_path = bundle_dir / "index" / "legal_kb_metadata.json"
+
+        if not index_path.exists():
+            logger.error("index/legal_kb.npy missing from bundle at %s", bundle_dir)
+            raise FileNotFoundError("index/legal_kb.npy not found in bundle directory")
+        if not metadata_path.exists():
+            logger.error("index/legal_kb_metadata.json missing from bundle at %s", bundle_dir)
+            raise FileNotFoundError("index/legal_kb_metadata.json not found in bundle directory")
+
+        # allow_pickle=False enforces safe numeric-only deserialization (no object arrays)
+        matrix = np.load(index_path, allow_pickle=False)
+        chunks: List[Dict[str, Any]] = json.loads(
+            metadata_path.read_text(encoding="utf-8")
+        )
+
+        # Guard against a mismatch between the persisted matrix row count and
+        # the metadata list length — both must agree for retrieval to be safe.
+        if matrix.shape[0] != len(chunks):
+            raise CorpusMismatchError(
+                dimension="chunk_count",
+                expected=str(len(chunks)),
+                actual=str(matrix.shape[0]),
+            )
+
+        # Embeddings must be float32; other dtypes indicate a corrupt or
+        # incompatible bundle (e.g. produced by a different pipeline version).
+        if matrix.dtype != np.float32:
+            raise CorpusMismatchError(
+                dimension="matrix_dtype",
+                expected="float32",
+                actual=str(matrix.dtype),
+            )
+
+        self._matrix = matrix
+        self._chunks = chunks
+        logger.info(
+            "Legal KB loaded from bundle: %d chunks from %s", len(chunks), bundle_dir
+        )
 
     async def retrieve(
         self,

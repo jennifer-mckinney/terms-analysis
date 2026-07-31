@@ -439,13 +439,13 @@ The two constraints below are non-negotiable operating requirements for the tool
 
 **References:** `.claude/CLAUDE.md` §Session outcomes (2026-07-03), `.claude/library/LIB-PRINCIPLES.md` Principle 3 (surface drift, do not silently execute), audit findings LE-001 / LE-002 (regression tests in `src/backend/tests/test_audit_phase1_fixes.py`).
 
-#### BRD-CONSTRAINT-02 — Hardware permissions are scope caveats only
+#### BRD-CONSTRAINT-02 (revised 2026-07-03) — Runtime-permission scope limit
 
-**Rule:** The tool analyzes document text only. Hardware permissions (camera, microphone, contacts, location) are surfaced verbatim in the scope box as a limit of the tool — they are never a context chip, never a domain group with findings, and never a category in `schemas.CATEGORIES`. Text-level mentions of camera / mic / contacts / location that appear in a policy are analyzed under their existing content categories (for example, precise geolocation under `Sensitive Data`), not under a hardware-permission bucket.
+**Rule:** The tool analyzes document text only. The runtime-permission scope limit (camera, microphone, contacts, location) is surfaced verbatim in the "what else worth checking" note in results — the tool reads the policy, not the app's install-time permission requests. These hardware terms are never a context chip, never a domain group with findings, and never a category in `schemas.CATEGORIES`. Text-level mentions of camera / mic / contacts / location that appear in a policy are analyzed under their existing content categories (for example, precise geolocation under `Sensitive Data`), not under a hardware-permission bucket. The previous "real-world practice divergence" clause was dropped 2026-07-03: analyzing the policy IS analyzing the contract; behavior monitoring is a separate discipline outside this tool's scope.
 
-**Why:** The tool reads policy text, not runtime permission manifests. Any UI or API surface that implied hardware analysis would over-claim capability and violate the scope-honesty gap. Real-world practice divergence — what the app actually requests versus what the policy says — is likewise out of scope and surfaced in the scope box.
+**Why:** The tool reads policy text, not runtime permission manifests. Any UI or API surface that implied hardware analysis would over-claim capability and violate the scope-honesty gap. Behavior monitoring — what the app actually does versus what the policy says — is a distinct discipline (compliance monitoring, breach research, investigative journalism) and outside this tool's scope; retaining it as a caveat conflated tool scope with due-diligence-in-general.
 
-**References:** `.claude/library/LIB-PRINCIPLES.md` Principle 4 (hard scope limits are non-negotiable), `.claude/library/LIB-VOICE.md` §Scope-honesty gap, `terms_analysis_scope_limits.md` (auto-memory).
+**References:** `.claude/library/LIB-PRINCIPLES.md` Principle 4 (hard scope limits are non-negotiable), `.claude/library/LIB-VOICE.md` §Scope-honesty gap, `terms_analysis_scope_limits.md` (auto-memory), `docs/plans/2026-07-03-results-view-revamp-report-card.md` §7 D-Q9.
 
 ### Industry Profiles
 

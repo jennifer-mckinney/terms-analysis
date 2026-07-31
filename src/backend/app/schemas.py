@@ -145,6 +145,10 @@ ContextChip = Literal[
 ]
 
 
+# Re-export from canonical home for backwards-compatibility
+from .exceptions import CorpusMismatchError as CorpusMismatchError  # noqa: F401
+
+
 class Evidence(BaseModel):
     line_start: int = Field(..., ge=1)
     line_end: int = Field(..., ge=1)

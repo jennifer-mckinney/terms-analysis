@@ -13,13 +13,14 @@ from typing import get_args
 from uuid import uuid4
 from xml.sax.saxutils import escape as _xml_escape
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .database import db_session, get_db, init_db
+from .exceptions import CorpusMismatchError
 from .models import Analysis, PolicySnapshot, ReviewItem, WatchlistItem
 from .schemas import (
     AnalysisPayload,
@@ -101,6 +102,23 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "X-API-Key"],
 )
+
+
+@app.exception_handler(CorpusMismatchError)
+async def corpus_mismatch_handler(
+    request: Request, exc: CorpusMismatchError
+) -> JSONResponse:
+    """Return HTTP 503 with a structured body when a bundle version mismatch is
+    detected.  The ``X-Corpus-Mismatch`` header surfaces which MANIFEST field
+    failed so callers can act on it without parsing the body."""
+    # Log the full mismatch detail server-side; expose only the dimension in the
+    # response body to avoid leaking internal version strings to clients.
+    logger.warning("Corpus mismatch: %s", exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": f"Corpus version mismatch on: {exc.dimension}"},
+        headers={"X-Corpus-Mismatch": exc.dimension},
+    )
 
 
 @app.get("/health")

@@ -111,8 +111,11 @@ def _extract_docx(data: bytes) -> str:
 
 
 def _preserve_rtf_delimiter_spaces(text: str) -> str:
-    pattern = re.compile(r"(?<=\\w)\\\\[a-zA-Z]+-?\\d* (?=\\w)")
-    return pattern.sub(lambda match: match.group(0)[:-1] + r"\\~", text)
+    # Fixed: RTF patterns use single backslash (\) not double (\\)
+    # Raw string escapes one backslash to get the literal RTF code like \font0
+    # (CRITICAL-2 from P9 security review: wrong escape levels in raw string)
+    pattern = re.compile(r"(?<=\w)\\[a-zA-Z]+-?\d*\s(?=\w)")
+    return pattern.sub(lambda match: match.group(0)[:-1] + r"\~", text)
 
 
 def _extract_rtf(data: bytes) -> str:
@@ -225,11 +228,9 @@ async def fetch_url_text(url: str) -> str:
             ) from exc
         if response.status_code in _BLOCKED_STATUSES:
             raise ValueError(
-                "This website blocks automated access. "
-                "Try these instead: for Google/Gmail use policies.google.com/privacy, "
-                "for Apple use apple.com/legal/privacy, "
-                "for Meta/Facebook use facebook.com/privacy/policy "
-                "— or paste the policy text directly."
+                "This website blocks automated access. Here's what you can do:\n"
+                "• Use the 'Paste text' tab and copy the policy from your browser\n"
+                "• Use the 'Upload file' tab if you can save the page as PDF/HTML"
             )
         try:
             response.raise_for_status()

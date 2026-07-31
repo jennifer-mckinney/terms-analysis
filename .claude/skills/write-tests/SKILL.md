@@ -8,7 +8,7 @@ allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 
 ## Phase 1: Understand the Target
 
-1. **Identify the module** from `$ARGUMENTS` (e.g., "rules", "validation", "analyzer", "ingest", "lm_studio", "diffing", "prompts", "schemas", "config", "api")
+1. **Identify the module** from `$ARGUMENTS` (e.g., "rules", "validation", "analyzer", "ingest", "localai", "diffing", "prompts", "schemas", "config", "api")
 2. **Read the source file**: `src/backend/app/services/$ARGUMENTS.py` (or `app/$ARGUMENTS.py` for schemas/config, `app/main.py` for api)
 3. **Read existing tests**: check `src/backend/tests/test_$ARGUMENTS.py` if it exists
 4. **Read the coverage gap analysis**: @.claude/library/LIB-TEST.md — find the module's section
@@ -48,8 +48,8 @@ class TestFunctionName:
 
 ### Rules
 - **IMPORTANT**: Use `from __future__ import annotations` in every test file
-- **IMPORTANT**: Mock external dependencies (LM Studio, httpx, database) — never call real services
-- **IMPORTANT**: Use `@pytest.mark.asyncio` for async functions
+- **IMPORTANT**: Mock external dependencies (LocalAI, httpx, database) — never call real services
+- **IMPORTANT**: Use `asyncio.run(...)` inside a regular (non-`async def`) test function. Do NOT use `@pytest.mark.asyncio` — see @.claude/rules/testing.md T1 for why (marker silently no-ops as PytestUnknownMarkWarning).
 - Use descriptive test names: `test_<function>_<scenario>`
 - One assertion per test when possible
 - Use factories/fixtures from conftest.py for Finding, Evidence, etc.

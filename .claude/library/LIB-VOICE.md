@@ -72,11 +72,11 @@ grade_field_still_exists: `AnalysisPayload.grade` present for machine consumptio
 rule: results view MUST render a "what was / wasn't checked" box; never optional; never collapsible below fold
 because: if reader thinks tool checked things it didn't, they trust a green verdict beyond what it earned
 
-### V11: hard scope limits (verbatim, never chip, never domain group)
-rule: two limits are surfaced verbatim in the scope box, always
-limit_1_hardware: camera / microphone / contacts / location — tool reads policy text, not app manifest; can flag "we may request camera" clause but cannot report what app ACTUALLY requests
-limit_2_practice_divergence: tool analyzes what policy says, not what company does; well-written policy the company violates will read as low risk
-xref: [[LIB-PRINCIPLES#P4]] [[terms_analysis_scope_limits.md]]
+### V11: hard scope limit (verbatim, never chip, never domain group)
+rule: one limit is surfaced verbatim in the scope box, always
+limit_runtime_permissions: camera / microphone / contacts / location — tool reads policy text, not install-time permission requests; readers are directed to (a) the app's Terms of Use, (b) the App Store Privacy Nutrition Label or Play Store Data Safety section, and (c) install-time permissions in device Settings
+because: tracks the P4 amendment 2026-07-03 (docs/plans/2026-07-03-results-view-revamp-report-card.md §7 D-Q9) — real-world-practice-divergence clause dropped; behavior monitoring is a separate discipline outside this tool's scope
+xref: [[LIB-PRINCIPLES#P4]]
 
 ### V12: scope box voice
 rule: scope box uses observational third-person (V2), not first-person
@@ -100,5 +100,5 @@ rule: apply this checklist to every change touching intake, results, error messa
 3. directive language: "you should" / "we recommend" / "the tool determined"? rewrite tentative (V8)
 4. possessives in results: "your" / "our" / "we"? rewrite observational (V2)
 5. verdict label: reads as action, not grade? (V9)
-6. scope-honesty: hardware + real-world-practice mentioned visibly? (V10, V11)
+6. scope-honesty: runtime-permission caveat mentioned visibly? (V10, V11)
 7. PRODUCT.md anchor: does this help reader feel Clear, Calm, Empowered? (V13)

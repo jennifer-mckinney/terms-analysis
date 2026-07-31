@@ -1,0 +1,101 @@
+name: P9 Review Enforcement
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+jobs:
+  enforce-p9:
+    name: Enforce P9 Pre-Push Review
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+      contents: read
+    steps:
+      - name: Extract PR body safely
+        id: extract_body
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          # Store PR body in temp file to avoid shell escaping issues
+          echo "$PR_BODY" > /tmp/pr_body.txt
+          cat /tmp/pr_body.txt
+
+      - name: Check for security-engineer review
+        run: |
+          # Accept explicit inline approval OR signoff-file reference format (both PASS / verdict PASS)
+          if grep -qi "security-engineer.*approved\|✅.*security-engineer" /tmp/pr_body.txt || \
+             { grep -qi "security-engineer" /tmp/pr_body.txt && grep -qi "both PASS\|verdict.*pass\|signoff\.json" /tmp/pr_body.txt; }; then
+            echo "✅ security-engineer review found"
+            exit 0
+          else
+            echo "❌ MISSING: security-engineer review (P9 violation)"
+            echo ""
+            echo "P9 Requirement: Before pushing to main, dispatch security-engineer agent for:"
+            echo "  • STRIDE threat-model review"
+            echo "  • Auth, secrets, user input validation"
+            echo "  • RLS, CSP, dependencies, session/cookie state"
+            echo "  • Migration safety, endpoint deprecation"
+            echo ""
+            echo "Zero-tolerance policy: ALL findings (CRITICAL/HIGH/MEDIUM/LOW/NIT) must be fixed"
+            echo ""
+            echo "After review completes, add to PR body (either format):"
+            echo "  ✅ security-engineer: approved (no findings found)"
+            echo "  OR reference the .git/reviews/<sha>.signoff.json with 'both PASS'"
+            exit 1
+          fi
+
+      - name: Check for grumpy-developer review
+        run: |
+          # Accept explicit inline approval OR signoff-file reference format (both PASS / verdict PASS)
+          if grep -qi "grumpy-developer.*approved\|✅.*grumpy-developer" /tmp/pr_body.txt || \
+             { grep -qi "grumpy-developer" /tmp/pr_body.txt && grep -qi "both PASS\|verdict.*pass\|signoff\.json" /tmp/pr_body.txt; }; then
+            echo "✅ grumpy-developer review found"
+            exit 0
+          else
+            echo "❌ MISSING: grumpy-developer review (P9 violation)"
+            echo ""
+            echo "P9 Requirement: Before pushing to main, dispatch grumpy-developer agent for:"
+            echo "  • Blunt code-quality review"
+            echo "  • Swallowed errors, dead code, brittle assumptions"
+            echo "  • Missed edge cases, tautological tests"
+            echo "  • Dispatch-boundary artifacts from multi-agent sessions"
+            echo ""
+            echo "Policy: CRITICAL/HIGH findings block push; MEDIUM/LOW/NIT can be follow-ups"
+            echo ""
+            echo "After review completes, add to PR body (either format):"
+            echo "  ✅ grumpy-developer: approved (no blocking findings)"
+            echo "  OR reference the .git/reviews/<sha>.signoff.json with 'both PASS'"
+            exit 1
+          fi
+
+      - name: Check for unresolved CRITICAL/HIGH findings
+        run: |
+          # If either review mentions unresolved CRITICAL or HIGH, fail
+          if grep -qi "CRITICAL\|HIGH" /tmp/pr_body.txt; then
+            # Check if findings are marked as resolved
+            if ! grep -qi "resolved\|fixed\|addressed" /tmp/pr_body.txt; then
+              echo "❌ BLOCKING: Unresolved CRITICAL or HIGH findings detected"
+              echo ""
+              echo "P9 Policy (zero-tolerance for security):"
+              echo "  • security-engineer findings: ALL levels (CRITICAL/HIGH/MEDIUM/LOW/NIT) must be fixed"
+              echo "  • grumpy-developer findings: CRITICAL/HIGH must be fixed; MEDIUM/LOW/NIT can be follow-ups"
+              echo ""
+              echo "Mark findings as fixed:"
+              echo "  - [CRITICAL] Issue X: [fixed/resolved] in commit SHA"
+              echo "  - [HIGH] Issue Y: [addressed] in commit SHA"
+              exit 1
+            fi
+          fi
+          echo "✅ All CRITICAL/HIGH findings are addressed"
+          exit 0
+
+      - name: P9 Requirements Met
+        run: |
+          echo "✅ P9 Review Requirements Satisfied"
+          echo ""
+          echo "P9 Enforcement Summary:"
+          echo "  ✅ security-engineer review: present"
+          echo "  ✅ grumpy-developer review: present"
+          echo "  ✅ CRITICAL/HIGH findings: resolved or absent"

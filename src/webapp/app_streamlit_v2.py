@@ -24,6 +24,100 @@ from typing import Optional
 import requests
 import streamlit as st
 
+# Pre-compile all simplification patterns ONCE at module load to prevent ReDoS.
+# Patterns use bounded alternation instead of unbounded [^.]* greedy matching.
+# See CRITICAL-1: ReDoS in Regex Patterns from P9 security review.
+_SIMPLIFY_PATTERNS = [
+    # COPPA + FERPA
+    # NOTE: apostrophes match either literal `'` or html-escaped `&#x27;` because
+    # explanation is html.escape'd before pattern application (defense in depth
+    # for CRITICAL-3). Without this, escaped apostrophes silently defeat matching.
+    re.compile(
+        r"(?i)Special protections required for children(?:'|&#x27;)s personal information under COPPA \(under 13\) and FERPA"
+    ),
+    re.compile(
+        r"(?i)Special protections required for children(?:'|&#x27;)s personal information under COPPA"
+    ),
+    # AI/ML training disclosure + opt-out
+    re.compile(
+        r"(?i)Using user data to train AI/ML models requires clear disclosure and (?:in many jurisdictions )?an? opt-out right"
+    ),
+    re.compile(r"(?i)Using user data to train AI/ML models requires clear disclosure"),
+    # Generic children's data
+    # Apostrophe alternation matches html-escaped input (see COPPA note above).
+    re.compile(r"(?i)Children(?:'|&#x27;)s data requires special protections and disclosures"),
+    # Marketing/tracking purposes
+    re.compile(
+        r"(?i)(?:Using|Tracking|Collecting) (?:user|personal) data for (?:marketing|advertising|analytics) purposes"
+    ),
+    # Retention/storage patterns (FIXED: removed [^.]* unbounded greedy matching)
+    re.compile(
+        r"(?i)(?:Personal|user) data (?:may be )?(?:retained|stored|kept) for (?:marketing|business|commercial) purposes"
+    ),
+    # Third-party sharing (FIXED: removed [^.]* unbounded greedy matching)
+    re.compile(
+        r"(?i)(?:Personal|user) data (?:may be |is )?(?:shared|disclosed|provided) to third.?parties for (?:marketing|advertising|commercial) purposes"
+    ),
+    re.compile(
+        r"(?i)(?:Personal|user) data (?:may be |is )?(?:shared|disclosed|provided) to third.?parties"
+    ),
+    # Profiling/behavioral tracking
+    re.compile(
+        r"(?i)(?:behavioral|user|activity|usage) profiling (?:for )?(?:targeting|analytics|personalization)"
+    ),
+    # Location tracking
+    re.compile(
+        r"(?i)(?:location|geolocation) data (?:is )?(?:collected|tracked|monitored)"
+    ),
+    # Biometric data
+    re.compile(
+        r"(?i)(?:facial recognition|biometric|face scan|fingerprint) (?:data )?(?:collection|processing|use)"
+    ),
+    # Deletion/right to be forgotten
+    re.compile(
+        r"(?i)(?:right to deletion|right to be forgotten|erasure right) may (?:be limited|be restricted|not apply)"
+    ),
+    re.compile(r"(?i)(?:right to deletion|right to be forgotten|erasure right)"),
+    # Automated decision-making
+    re.compile(
+        r"(?i)automated decision.?making (?:based|relying) on (?:personal|user) data"
+    ),
+    # Opt-in vs opt-out consent
+    re.compile(r"(?i)(?:opt.?out|negative) consent"),
+    re.compile(r"(?i)(?:opt.?in|affirmative|explicit) consent"),
+    # Minors/children in general
+    re.compile(r"(?i)minors? (?:under |aged? )?(?:\d+)"),
+]
+
+# Apostrophe normalization — fixes LOW-1 from grumpy peer review of commit 6c6afb0.
+# html.escape() does NOT convert typographic apostrophes (U+2019, U+2018) to entities,
+# so widening the regex to (?:'|&#x27;) alone still misses "Children’s" input.
+# Normalize typographic apostrophes to ASCII BEFORE html.escape so downstream patterns
+# see a canonical form. Regex apostrophe alternation retained as belt-and-suspenders.
+_APOSTROPHE_TRANSLATE = str.maketrans({"’": "'", "‘": "'"})
+
+# Replacement text for each pattern in order (must match length of _SIMPLIFY_PATTERNS)
+_SIMPLIFY_REPLACEMENTS = [
+    "There's a law that says websites have to be extra careful with kids' information (kids under 13). They need special permission before collecting things like age or location.",
+    "There's a law that says websites have to be extra careful with kids' information (kids under 13). They need special permission before collecting things like age or location.",
+    "This service might teach its AI system using your information. The law says they should tell you if they do this, and let you say 'no thanks'.",
+    "This service might teach its AI system using your information. The law says they should tell you if they do this.",
+    "Kids' information needs extra safety - it's like keeping their data in a special lock.",
+    "This company watches what you do so they can show you better ads.",
+    "This company keeps your information to use it for ads and other business reasons.",
+    "This company shares your information with other companies so they can send you ads too.",
+    "This company shares your information with other companies.",
+    "This service tracks what you do to figure out what you like.",
+    "This service can see where you are.",
+    "This service can recognize your face or fingerprint.",
+    "You might not be able to ask them to delete your information.",
+    "You can ask them to delete your information.",
+    "A computer decides things about you based on your information.",
+    "They start doing something unless you say stop.",
+    "They ask permission first before doing something.",
+    "kids under that age",
+]
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 # Backend API base. run.sh exports API_BASE_URL; default to localhost:9000 to
@@ -255,16 +349,24 @@ init_state()
 # ── API helpers ───────────────────────────────────────────────────────────────
 
 
-def call_infer(url: Optional[str], text: Optional[str], context: list[str]) -> Optional[dict]:
+def call_infer(url: Optional[str], text: Optional[str]) -> Optional[dict]:
     """Ask the backend to guess jurisdiction/doc_type/industry from the input.
 
     Returns the parsed JSON on success, or None if the backend is unavailable
     or returns a non-200. Callers must treat None as "keep asking the user."
+
+    Note: context chips are intentionally NOT passed to /infer. The endpoint
+    only consumes URL/text (see backend/app/services/inference.py::infer_all,
+    which takes only url and text). Chip state is applied downstream in
+    /analyze. Not sending it here also removes the stale-chip bug where
+    st.session_state.context_selections lags the in-progress form selection
+    while widgets are wrapped in st.form(...) (see grumpy F4 / issue
+    569260b).
     """
     try:
         resp = requests.post(
             f"{API_BASE}/infer",
-            json={"url": url, "text": text, "context": context},
+            json={"url": url, "text": text},
             timeout=15,
         )
         if resp.status_code == 200:
@@ -431,40 +533,24 @@ def render_intake() -> None:
             st.session_state.input_mode = "file"
         st.caption("PDF, DOCX, RTF, HTML, or TXT. Up to 10MB. Text is extracted locally.")
 
-    # Optional context cards. Design uses selectable cards; Streamlit doesn't
-    # have those natively so we use a bordered container + checkbox + styled sub.
-    st.markdown(
-        "<div class='pr-opt-label'>A little context "
-        "<span class='pr-opt-hint'>(optional, choose any that fit)</span></div>",
-        unsafe_allow_html=True,
-    )
-
-    selections: list[str] = []
-    for chip in CONTEXT_CHIPS:
-        with st.container(border=True):
-            checked = st.checkbox(
-                chip["label"],
-                key=f"ctx_{chip['value']}",
-                value=chip["value"] in st.session_state.context_selections,
-            )
-            st.markdown(
-                f"<div class='pr-card-sub'>{html.escape(chip['sub'])}</div>",
-                unsafe_allow_html=True,
-            )
-            if checked:
-                selections.append(chip["value"])
-    st.session_state.context_selections = selections
-
     # Inference is about the POLICY jurisdictions we detected in the text/URL —
     # NOT about where the reader is. We surface these signals in results (so the
     # reader can see what the policy talks about) but never use them to pre-fill
     # or override the reader's location choice. The reader's location is a
     # separate, explicit decision that must always come from the reader.
+    #
+    # Inference runs BEFORE the intake form so it can react dynamically to the
+    # user pasting a URL/text. Widgets inside st.form(...) do not trigger reruns
+    # until submit, so inference-driven UI (like `location_needed`) has to be
+    # resolved outside the form. See issue #82 / Phase 5.d UI-1.
     if st.session_state.url_input or st.session_state.text_input:
+        # No context arg: /infer uses URL/text only; chip state is applied
+        # downstream in /analyze. Passing chips here would send stale values
+        # because widgets inside st.form(...) don't update session_state
+        # until submit (see grumpy F4).
         inferred = call_infer(
             st.session_state.url_input or None,
             st.session_state.text_input or None,
-            selections,
         )
         if inferred:
             st.session_state.inferred_juris = inferred.get("jurisdictions")
@@ -530,8 +616,48 @@ def render_intake() -> None:
                     )
 
     st.markdown("<div style='margin-top:1.5rem;'></div>", unsafe_allow_html=True)
-    if st.button("Take a look →", type="primary", use_container_width=True):
-        run_analysis()
+
+    # Context chips + submit live inside st.form(...) so they submit atomically.
+    # Before this, a user could tick a chip and click "Take a look" within the
+    # same paint cycle; Streamlit's per-widget rerun model meant the submit
+    # button ref could resolve against a stale (pre-chip) state and drop the
+    # chip from the POST /analyze body. Wrapping both widgets in a form makes
+    # the chip state at submit-time captured together with the submit event.
+    # See issue #82 / Phase 5.d E2E UI-1 (HIGH).
+    #
+    # Design uses selectable cards; Streamlit doesn't have those natively so we
+    # use a bordered container + checkbox + styled sub inside the form.
+    with st.form(key="intake_form", clear_on_submit=False):
+        st.markdown(
+            "<div class='pr-opt-label'>A little context "
+            "<span class='pr-opt-hint'>(optional, choose any that fit)</span></div>",
+            unsafe_allow_html=True,
+        )
+
+        selections: list[str] = []
+        for chip in CONTEXT_CHIPS:
+            with st.container(border=True):
+                checked = st.checkbox(
+                    chip["label"],
+                    key=f"ctx_{chip['value']}",
+                    value=chip["value"] in st.session_state.context_selections,
+                )
+                st.markdown(
+                    f"<div class='pr-card-sub'>{html.escape(chip['sub'])}</div>",
+                    unsafe_allow_html=True,
+                )
+                if checked:
+                    selections.append(chip["value"])
+
+        submitted = st.form_submit_button(
+            "Take a look →",
+            type="primary",
+            use_container_width=True,
+        )
+        if submitted:
+            # Capture chip state atomically on submit, then dispatch analysis.
+            st.session_state.context_selections = selections
+            run_analysis()
 
     st.markdown(
         "<p class='pr-privacy-note'>Processed locally. Policy text is not stored. "
@@ -580,6 +706,61 @@ def run_analysis() -> None:
         st.session_state.analysis_result = result
         st.session_state.view = "results"
         st.rerun()
+
+
+def simplify_finding_for_context(finding: dict, context_selections: list[str]) -> dict:
+    """Simplify finding explanation for non-legal audiences, especially for child context.
+
+    Takes a finding dict and returns a modified copy with a simplified explanation
+    field if "for_child" is in the context selections. Other contexts show the
+    original explanation. The simplified version uses kindergarten-teacher-level
+    language: simple words, storytelling tone, explains why, and avoids acronyms
+    without explanation.
+
+    Defense-in-depth: HTML-escapes explanation before simplification so no
+    unescaped HTML can leak into rendered findings (CRITICAL-3 from P9 review).
+
+    Args:
+        finding: A finding dict with 'explanation' and other fields.
+        context_selections: List of selected context values (e.g., ["for_child"]).
+
+    Returns:
+        A copy of the finding dict, potentially with a simplified explanation.
+    """
+    if not context_selections or "for_child" not in context_selections:
+        # Return finding unchanged for other contexts.
+        return finding
+
+    finding_copy = finding.copy()
+    # Normalize typographic apostrophes (U+2019, U+2018) -> ASCII BEFORE escape
+    # so pattern alternation `(?:'|&#x27;)` reliably matches. html.escape leaves
+    # typographic quotes unchanged; without normalization "Children’s" would
+    # silently defeat every pattern here. See LOW-1 in grumpy review of 6c6afb0.
+    raw_explanation = str(finding.get("explanation") or "").translate(_APOSTROPHE_TRANSLATE)
+    # HTML-escape FIRST (defense in depth) so unescaped content cannot leak.
+    explanation = html.escape(raw_explanation)
+
+    # Apply simplification patterns in order; multiple replacements may apply.
+    # Patterns are pre-compiled at module load to prevent ReDoS (CRITICAL-1).
+    for pattern, replacement in zip(_SIMPLIFY_PATTERNS, _SIMPLIFY_REPLACEMENTS):
+        explanation = pattern.sub(replacement, explanation)
+
+    # Fallback: if explanation still looks very legal, add a note.
+    # (Only if no patterns matched.)
+    original_escaped = html.escape(raw_explanation)
+    if explanation == original_escaped:
+        # Pattern didn't match. Check if it still contains legal jargon markers.
+        jargon_markers = ["GDPR", "CCPA", "regulation", "legislation", "statute", "compliance"]
+        if any(marker in explanation for marker in jargon_markers):
+            # Keep original but try one more generic simplification.
+            explanation = re.sub(
+                r"(?i)(?:This|The) (?:service|company|website)",
+                "This service",
+                explanation,
+            )
+
+    finding_copy["explanation"] = explanation
+    return finding_copy
 
 
 # ── Results view ──────────────────────────────────────────────────────────────
@@ -1015,7 +1196,9 @@ def render_results() -> None:
             )
             continue
         for i, f in enumerate(items, 1):
-            plain = f.get("explanation") or "See legal details below."
+            # Simplify explanation if "for_child" context is selected.
+            simplified = simplify_finding_for_context(f, st.session_state.context_selections)
+            plain = simplified.get("explanation") or "See legal details below."
             st.markdown(
                 f'<div class="pr-top-thing"><div class="pr-thing-num">{i}</div><div>{html.escape(plain)}</div></div>',
                 unsafe_allow_html=True,
@@ -1024,21 +1207,23 @@ def render_results() -> None:
     # Legal details — collapsed by default (decision #7).
     with st.expander(f"Legal details / {total} issues"):
         for f in findings:
-            sev = f.get("severity", "Low")
+            # Simplify explanation if "for_child" context is selected.
+            simplified = simplify_finding_for_context(f, st.session_state.context_selections)
+            sev = simplified.get("severity", "Low")
             sev_class = f"pr-sev-{sev.lower()}"
-            cat = html.escape(str(f.get("category", "-")))
-            irp = f.get("irp_score")
+            cat = html.escape(str(simplified.get("category", "-")))
+            irp = simplified.get("irp_score")
             irp_str = f"IRP {irp:.2f}" if isinstance(irp, (int, float)) else "-"
-            conf_pct = int((f.get("confidence") or 0) * 100)
-            excerpt = html.escape(str(f.get("excerpt", "")))
-            explanation = html.escape(str(f.get("explanation", "")))
-            evidence = f.get("evidence") or {}
+            conf_pct = int((simplified.get("confidence") or 0) * 100)
+            excerpt = html.escape(str(simplified.get("excerpt", "")))
+            explanation = html.escape(str(simplified.get("explanation", "")))
+            evidence = simplified.get("evidence") or {}
             basis = " / ".join(
                 html.escape(str(b)) for b in (evidence.get("legal_basis") or [])
             )
-            impact = f.get("impact", 0) or 0
-            likelihood = f.get("likelihood", 0) or 0
-            safeguard = f.get("safeguard_score", 0) or 0
+            impact = simplified.get("impact", 0) or 0
+            likelihood = simplified.get("likelihood", 0) or 0
+            safeguard = simplified.get("safeguard_score", 0) or 0
             lstart = evidence.get("line_start")
             lend = evidence.get("line_end")
             line_ref = f"Lines {lstart} to {lend}" if lstart and lend else ""
