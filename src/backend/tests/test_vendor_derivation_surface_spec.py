@@ -31,11 +31,10 @@ _MODULE_PATH = (
 
 
 def _load_module() -> ModuleType:
-    """Load the migration script as a module without executing side effects at import.
+    """Load the migration script as a module for surface assertions.
 
-    The module is script-shaped but its top-level is import-safe (guarded by
-    ``if __name__ == '__main__':`` conventions). If that ever changes, this
-    loader will surface the failure loudly.
+    This imports the script (executing its import-time setup) but does not run the
+    CLI entrypoint guarded by ``if __name__ == '__main__':``.
     """
     spec = importlib.util.spec_from_file_location(
         "migrate_policywatch_to_watchlist_under_test",
