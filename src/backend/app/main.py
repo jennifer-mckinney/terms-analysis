@@ -20,8 +20,8 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .database import db_session, get_db, init_db
-from .models import Analysis, PolicySnapshot, ReviewItem, WatchlistItem
 from .exceptions import CorpusMismatchError
+from .models import Analysis, PolicySnapshot, ReviewItem, WatchlistItem
 from .schemas import (
     AnalysisPayload,
     AnalysisSummary,
