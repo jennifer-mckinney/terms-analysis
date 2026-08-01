@@ -8,7 +8,7 @@ xref: [[LIB-STACK]] [[LIB-RULES]] [[LIB-LEGAL]] [[LIB-CONTEXT]] [[LIB-API]]
 | id | component | tech | location | role |
 |----|-----------|------|----------|------|
 | C1 | Web UI | Streamlit | `src/webapp/app_streamlit_v2.py` | Sole UI (:8501); communicates via `requests`; issue #19 redesign; `app_streamlit_legacy.py` is v1 rollback via `STREAMLIT_UI=v1` |
-| C2 | API server | FastAPI + Uvicorn | `src/backend/app/main.py` | 24 REST endpoints + `/health`, async |
+| C2 | API server | FastAPI + Uvicorn | `src/backend/app/main.py` | 25 REST endpoints + `/health`, async (grep `@app.*` = 26; `/infer` added per SO8) |
 | C3 | Rule engine | Python regex | `services/rules.py` | 64 patterns / ~50 categories across 30 jurisdictions |
 | C4 | LLM client | httpx async | `services/localai.py` | Chat completions + embeddings to LocalAI (Apertus-8B/EuroLLM-22B, routed by language) |
 | C5 | Doc-chunk embeddings | BM25 + LocalAI dense + RRF | `services/embedding.py` | Ensemble chunk-relevance ranking for over-length docs; **not yet wired into `analyzer.py`** — dead code |

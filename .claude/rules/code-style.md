@@ -40,7 +40,8 @@ rule: global functions exposed via `window.*` for inline event handlers
 ## commit-messages
 
 ### CM1: prefixes
-rule: use `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `style:`
+rule: use `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `style:`, `chore:`
+because: `chore:` covers Conventional-Commits build/tooling/governance-artifact changes (e.g., manifest regen, dependency bumps, CI config) that do not fit the other prefixes; widened 2026-07-31 after P9 grumpy finding on commit b5f2034 (`chore(governance): regen manifest`) surfaced the gap
 
 ### CM2: subject length
 rule: subject line under 72 characters

@@ -3,13 +3,14 @@ loads: on-trigger
 scope: project
 xref: [[LIB-ARCH]] [[LIB-RULES]] [[LIB-CONTEXT]] [[.claude/rules/testing.md#R2]]
 
-status (2026-07-03): endpoint map = 24 business routes + `/health` = 25 total, verified against `main.py` `@app.*` decorators.
+status (2026-07-31): endpoint map = 25 business routes + `/health` = 26 total, verified against `main.py` `@app.*` decorators (grep count = 26). `/infer` added per SO8.
 
 ## endpoint-map
 
 | Method | Path | Auth | Request | Response | Notes |
 |--------|------|------|---------|----------|-------|
 | GET | `/health` | None | — | `{status, model_world, model_eu, review_threshold}` | Health check |
+| POST | `/infer` | None | `InferRequest` (JSON: `url?`, `text?`) | `InferResponse` (jurisdictions, doc_type, industry hints) | TLD/text signals; `@lru_cache` on hot paths; see SO8 |
 | POST | `/analyze` | None | `AnalyzeRequest` (JSON) | `AnalysisPayload` | Text analysis |
 | POST | `/analyze/url` | None | `AnalyzeUrlRequest` (JSON) | `AnalysisPayload` | URL fetch + analysis |
 | POST | `/analyze/file` | None | multipart: `file`, `name?`, `doc_type?`, `jurisdictions?` | `AnalysisPayload` | File upload |

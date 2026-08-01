@@ -51,9 +51,10 @@ rule: risk scores (0-10, higher=worse) map to grades: A (<3.5), A- (3.5-4.5), B 
 | Path | Purpose |
 |------|---------|
 | `src/webapp/` | Streamlit UI: `app_streamlit_v2.py` (primary, issue #19) + `app_streamlit_legacy.py` (v1 rollback via `STREAMLIT_UI=v1`) |
-| `src/backend/app/` | FastAPI: `main.py` (24 endpoints + `/health`), `services/`, `schemas.py`, `models.py` |
+| `src/backend/app/` | FastAPI: `main.py` (25 endpoints + `/health`), `services/`, `schemas.py`, `models.py` |
 | `src/backend/app/services/` | Core: `rules.py`, `analyzer.py`, `validation.py`, `ingest.py`, `localai.py`, `embedding.py`, `legal_kb.py`, `diffing.py`, `prompts.py` |
-| `src/backend/tests/` | pytest suite |
+| `src/backend/tests/` | pytest suite (unit tests, 24 files, 828 tests, 98% coverage as of 2026-07-31) |
+| `tests/` | Root integration/E2E tests separate from unit tests in `src/backend/tests/`; 4 files: `test_api_endpoints.py`, `test_batch_analysis.py`, `test_child_context_simplification.py`, `test_quick_mode.py` |
 | `data/legal_corpus/` | Legal-KB source text (tracked; placeholder pending real statute ingestion — see `.claude/skills/legal-kb`) |
 | `src/backend/evaluation/` | Gold dataset + F1/Kappa scripts |
 | `docs/` | `DESIGN.md`, `TODO.md`, `reports/`, `specs/`, `wireframes/` |
@@ -81,7 +82,7 @@ rule: active development branch is `claude/issue-19-arch-docs-followup`; prior b
 ## session-outcomes-2026-07-03
 
 ### SO1: PR34-shipped
-rule: PR #34 (`claude/issue-19-plain-language-redesign`) landed across 4 commits — `e4fd706` -> `2626e2b` -> `671d3e5` -> `b5ea947`; 873 tests passing, 98.06% coverage
+rule: PR #34 (`claude/issue-19-plain-language-redesign`) landed across 4 commits — `e4fd706` -> `2626e2b` -> `671d3e5` -> `b5ea947`; at merge time 873 tests / 98.06% coverage. Post-PR-#87 baseline (2026-07-31): **828 tests, 98% coverage** (2187 stmts, 53 missed, verified via `pytest --cov=app`)
 
 ### SO2: IRP-scoring-shipped
 rule: `impact`, `likelihood`, `safeguard_score`, `irp_score` fields live on `Finding`; was "planned" in prior LIB-ARCH text
@@ -126,7 +127,7 @@ coverage_matrix: `docs/research/test-coverage-matrix.md` — 20 journeys mapped,
 xref: [[.claude/rules/testing.md]] [[LIB-PRINCIPLES#P9]]
 
 ### SO9: regressions-file
-rule: `test_regressions_pr34.py` — 30 tests covering cross-endpoint consistency via `typing.get_args()` runtime iteration, schema-Literal allowlist parity, XSS defense-in-depth (blocks `javascript:`, `data:`, `vbscript:` schemes), malformed inputs, ReDoS canary on `inference.py`, domain-grouping edges, sort stability
+rule: `test_regressions_pr34.py` — 42 tests (post-PR-#87 count, verified via `pytest --collect-only`) across 10 test classes (Categories A-I + JurisdictionFilterBoundary) covering cross-endpoint consistency via `typing.get_args()` runtime iteration, schema-Literal allowlist parity, XSS defense-in-depth (blocks `javascript:`, `data:`, `vbscript:` schemes), malformed inputs, ReDoS canary on `inference.py`, domain-grouping edges, sort stability, schema validator edges (H), inference edges (I)
 xref: [[.claude/rules/testing.md]]
 
 ## session-outcomes-2026-07-04

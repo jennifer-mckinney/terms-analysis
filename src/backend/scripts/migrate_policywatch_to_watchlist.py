@@ -96,11 +96,6 @@ def _derive_vendor_from_url(url: str) -> str:
     return "Unknown vendor"
 
 
-# Backwards-compatible alias — older internal callers still reference the
-# short name. Prefer ``_derive_vendor_from_url`` in new code.
-_vendor_from_url = _derive_vendor_from_url
-
-
 def _cast_enabled(raw: object, row_id: object = None) -> bool:
     """Cast the legacy string ``enabled`` value to a real bool (LE-010).
 

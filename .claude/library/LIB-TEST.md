@@ -3,7 +3,7 @@ loads: on-trigger
 scope: project
 xref: [[.claude/rules/testing.md]] [[LIB-STACK#S4]] [[docs/reports/test-suite-audit-pr34.md]] [[docs/reports/test-suite-quality-audit-pr34.md]]
 
-status (2026-07-03): baseline is **702 tests, 98.06% line coverage** on `src/backend/`. Policy in `.claude/rules/testing.md` (3-rule schema-drift policy). Two audit reports in `docs/reports/`.
+status (2026-07-31): baseline is **828 tests, 98% line coverage** on `src/backend/` (2187 stmts, 53 missed, verified via `pytest --cov=app`). Prior anchor 2026-07-03: 702 tests / 98.06%. Policy in `.claude/rules/testing.md` (3-rule schema-drift policy). Two audit reports in `docs/reports/`.
 
 ## baseline
 
@@ -23,9 +23,16 @@ status (2026-07-03): baseline is **702 tests, 98.06% line coverage** on `src/bac
 | `test_irp.py` | IRP formula, seeded defaults, LLM parse, hybrid safeguard-max merge |
 | `test_main_endpoints.py` | Per-endpoint validation, chip/jurisdiction allowlist enforcement, `/infer` endpoint |
 | `test_database_and_main_coverage.py` | Coverage-fill for previously untested branches in `database.py` and `main.py` |
-| `test_regressions_pr34.py` | **Categorical gap coverage backfilled after PR #34** (30 tests) — see next section |
+| `test_regressions_pr34.py` | **Categorical gap coverage backfilled after PR #34** (42 tests post-PR-#87; Categories A-I + JurisdictionFilterBoundary) — see next section |
 | `test_services.py` | Cross-cutting service-layer wiring |
 | `test_validation.py` | Hallucination guard, citation checker, boundary confidence values |
+| `test_audit_phase1_fixes.py` | Phase 1 audit remediation regressions |
+| `test_critical_p9_fixes.py` | P9 pre-push review critical-finding regressions |
+| `test_intake_form_race.py` | Streamlit `st.form` intake race-condition regressions (revamp/results-report-card) |
+| `test_legal_kb_bundle.py` | Consumer-side legal corpus bundle ingestion (sibling ingester contract) |
+| `test_phantom_alias_removed.py` | Regression: `_vendor_from_url` alias deletion (closes #79) |
+| `test_vendor_derivation_surface_spec.py` | Vendor derivation surface contract spec |
+| `test_watchlist_merge.py` | Watchlist merge semantics regression coverage |
 
 ### TEST1: activate-venv-first
 rule: MUST `source .venv/bin/activate` before `pytest`
@@ -33,7 +40,7 @@ because: else `httpx`/`playwright` resolve to wrong Python and imports fail with
 
 ## categorical-regression-coverage
 
-`test_regressions_pr34.py`, 30 tests, backfilled after PR #34's four must-fix findings (all four = cross-endpoint / schema-vs-handler drift). Grouped by category letter matching `docs/reports/test-suite-audit-pr34.md`.
+`test_regressions_pr34.py`, 42 tests (post-PR-#87), backfilled after PR #34's four must-fix findings (all four = cross-endpoint / schema-vs-handler drift). Grouped by category letter matching `docs/reports/test-suite-audit-pr34.md`. Categories H (schema-validator edges) and I (inference edges) added later beyond the original A-G taxonomy.
 
 ### TEST2: adopt-category-letters
 rule: future regression tests MUST adopt same category letters
