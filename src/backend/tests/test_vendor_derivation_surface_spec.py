@@ -48,14 +48,6 @@ def _load_module() -> ModuleType:
     return module
 
 
-def test_module_file_exists() -> None:
-    """Precondition: the module that owns vendor derivation is where we expect."""
-    assert _MODULE_PATH.is_file(), (
-        f"Expected vendor-derivation module at {_MODULE_PATH}; "
-        "if it moved, update this spec test to point at the new location."
-    )
-
-
 def test_canonical_derive_vendor_from_url_exists_and_is_callable() -> None:
     """Spec: the canonical vendor-derivation function must exist and be callable."""
     module = _load_module()
