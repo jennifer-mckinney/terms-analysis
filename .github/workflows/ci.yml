@@ -57,9 +57,13 @@ jobs:
             --cov=app \
             --cov-report=term-missing \
             --cov-fail-under=98 \
+            --cov-precision=2 \
             -v
-        # Floor: 98%. Current coverage is ~62% — CI will stay red on this
-        # check until the /write-tests work is complete.
+        # Floor: 98% (owner standard). --cov-precision=2 makes the exit-code
+        # gate compare at 2 decimals: with the default precision 0, pytest-cov
+        # rounds e.g. 97.58 up to 98 and exits 0 while printing FAIL (#177).
+        # src/backend/.coveragerc sets the same precision for local runs.
+        # Branch coverage is not gated yet (tracked under G3).
 
   audit:
     name: Dependency audit (pip-audit)

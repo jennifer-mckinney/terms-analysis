@@ -1,0 +1,8 @@
+# Coverage config for the backend test suite (read from src/backend, the
+# directory CI runs pytest in).
+# precision = 2 keeps local totals and the fail-under comparison at two
+# decimals, matching the --cov-precision=2 flag in .github/workflows/ci.yml.
+# Without it, a total such as 97.58% rounds to 98 and passes the 98 floor (#177).
+[report]
+precision = 2
+fail_under = 98
