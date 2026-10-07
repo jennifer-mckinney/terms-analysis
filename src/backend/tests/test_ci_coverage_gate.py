@@ -201,3 +201,10 @@ def test_gate_fails_below_floor_with_repo_flags(tmp_path: Path) -> None:
         "rounding lets a below-floor total pass\n"
         f"flags={flags}\n{output[-1500:]}"
     )
+    # The non-zero exit must be the coverage gate itself, not an unrelated
+    # failure; the floor comes from the explicit CI --cov-fail-under flag, not
+    # from .coveragerc. pytest-cov prints "FAIL Required test coverage of 98%
+    # not reached. Total coverage: 97.xx%" with precision 2.
+    assert f"Required test coverage of {OWNER_FLOOR}% not reached" in output, (
+        f"non-zero exit was not the coverage gate\n{output[-1500:]}"
+    )
