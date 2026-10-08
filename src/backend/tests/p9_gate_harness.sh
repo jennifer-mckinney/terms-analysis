@@ -4,7 +4,8 @@
 # Builds a throwaway sandbox that exercises this repo's REAL .githooks/pre-push
 # and scripts/install-hooks.sh without touching the real repository's config:
 #
-#   <sandbox>/home/.gitconfig   isolated global config (identity, default branch)
+#   .gitconfig in the sandbox's "home" dir   isolated global config (identity,
+#                               default branch)
 #   <sandbox>/remote.git        local bare remote
 #   <sandbox>/main              main checkout (copies of the repo's hook files)
 #   <sandbox>/wt                linked worktree of <sandbox>/main (branch wt-branch)
