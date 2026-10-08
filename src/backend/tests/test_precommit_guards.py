@@ -161,6 +161,17 @@ BLOCK_ROWS = [
     ("posix-home", "file://" + home("home", "bob")),  # file: URL, home root
     ("posix-home", "file://localhost" + home()),  # file: URL with a host
     ("posix-home", "file:///Volumes/X" + home()),  # file: URL under a volume
+    # Owner ruling 2026-10-08: `home`/`Users` at ANY depth in a file: URL blocks.
+    ("posix-home", "file:///mnt/x" + home("home", "y", "")),
+    ("posix-home", "file://wsl.localhost/Ubuntu" + home("home", "a", "")),
+    ("posix-home", "file:///srv" + home("home", "alice")),
+    ("posix-home", "file:///var" + home("home", "alice")),
+    ("posix-home", "file:///System/Volumes/Data" + home("home", "a", "")),
+    ("posix-home", "file:///tmp" + home("home", "x", "")),
+    ("posix-home", "file:/tmp" + home("home", "x", "")),
+    # grumpy/security F2: colon-separated lists (PATH, LD_LIBRARY_PATH style).
+    ("posix-home", "PATH=/usr/bin:" + home("home", "bob", "/bin")),
+    ("posix-home", "LD=/a:" + home("Users", "bob", "/lib")),
     ("posix-home", '"' + home("Users", "Alice") + '"'),
     ("posix-home", "[doc](" + home("Users", "j.doe") + ")"),
     ("posix-home", "`" + home("home", "a_b-1") + "`"),
@@ -189,9 +200,8 @@ ALLOW_ROWS = [
     ("posix-home", "the /" + "Users" + "/ directory"),
     ("posix-home", "Users/alice (relative, no root)"),
     ("posix-home", "https://api.github.com/" + "users/alice"),  # public URL, any case
-    # grumpy r2 F2: no home root, so these must not block (boundary + non-home dir).
-    ("posix-home", "profile:/" + "Users" + "/x"),  # `file:` only as a substring
-    ("posix-home", "file:/tmp/" + "home" + "/x"),  # `home` as a plain dir, not a root
+    # `file:` only as a substring (owner ruling: profile:/Users/x stays allowed).
+    ("posix-home", "profile:/" + "Users" + "/x"),
     ("posix-lowercase", "src/" + "home/x"),  # relative: no anchor
     ("posix-lowercase", "api/" + "users/42"),  # relative REST route
     ("windows", "C:" + "\\" + "Users" + "\\<name>\\x"),
@@ -421,8 +431,9 @@ def test_pattern_rows_answer_hostile_line_within_budget(pattern, line_id):
 def test_file_url_long_slash_run_without_home_root_is_allowed():
     """grumpy r2 F1 allow vector: 40 slashes after `file:`, no home root.
 
-    Run in the budgeted child, not in-process: the row 4 regex takes hours on
-    this line today, and an in-process search would hang the whole suite.
+    Run in the budgeted child, not in-process: a backtracking row 4 regex
+    would take hours on this line (r2), and an in-process search would hang
+    the whole suite. Each row must finish inside the time budget.
     """
     line = "file:" + "/" * 40 + "x"
     for pattern in [p.pattern for p in _home_patterns()]:
