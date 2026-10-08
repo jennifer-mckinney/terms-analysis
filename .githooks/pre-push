@@ -31,6 +31,7 @@ unset CDPATH
 # stdin: `<local_ref> <local_sha> <remote_ref> <remote_sha>`. The gate checks
 # the pushed shas, never HEAD: HEAD's signoff says nothing about other refs.
 REMOTE_NAME="${1:-remote}"
+REMOTE_URL="${2:-}"
 
 # Signoffs live in the repository's COMMON git dir. In a linked worktree `.git`
 # is a file, so `<toplevel>/.git/reviews` never exists there; the common dir is
@@ -138,25 +139,46 @@ print(f"OK {int(override_used)} {base}")
 SHA_RE='^([0-9a-f]{40}|[0-9a-f]{64})$'
 ZERO_RE='^(0{40}|0{64})$'
 VERDICT_RE='^OK ([01]) (-|[0-9a-f]{40}|[0-9a-f]{64})$'
-# A remote name used as a --remotes pattern must hold no glob characters, or it
-# could match other remotes' refs and count their commits as published.
-REMOTE_NAME_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
-
-# What the remote is known to have: its remote-tracking refs plus the
-# remote_sha values git read from the remote for this push, passed after
-# `git rev-list ... --not`. A missing tracking ref only makes more commits
-# count as new, which refuses; it never lets an unreviewed commit through.
+# Only current advertised refs can prove that commits are already on the
+# remote. Local remote-tracking refs may be stale after deletion or retargeting.
 PUBLISHED=()
-if [[ "${REMOTE_NAME}" =~ ${REMOTE_NAME_RE} ]]; then
-    PUBLISHED+=("--remotes=${REMOTE_NAME}")
-fi
+
+load_published() {
+    local advertised sha ref commit
+    if [ -z "${REMOTE_URL}" ] || ! advertised="$(git ls-remote --refs -- "${REMOTE_URL}")"; then
+        echo "P9 pre-push gate: refusing push to ${REMOTE_NAME}: cannot read the current remote advertisement" >&2
+        return 1
+    fi
+    while IFS=$'\t' read -r sha ref; do
+        [ -z "${sha}" ] && [ -z "${ref}" ] && continue
+        if ! [[ "${sha}" =~ ${SHA_RE} ]] || [ -z "${ref}" ]; then
+            echo "P9 pre-push gate: refusing push to ${REMOTE_NAME}: invalid current remote advertisement" >&2
+            return 1
+        fi
+        # An advertised object absent locally cannot safely prove ancestry;
+        # leave it out so the range checks conservatively treat commits as new.
+        if commit="$(git rev-parse --verify -q "${sha}^{commit}")"; then
+            PUBLISHED+=("${commit}")
+        fi
+    done <<<"${advertised}"
+}
+
+rev_list_new() {
+    local commit="$1"
+    shift
+    if [ "${#PUBLISHED[@]}" -eq 0 ]; then
+        git rev-list "$@" "${commit}"
+    else
+        git rev-list "$@" "${commit}" --not "${PUBLISHED[@]}"
+    fi
+}
 
 # check_range <ref> <commit> <base>: returns 0 only if every commit new to the
 # remote lies in the reviewed range base..commit (base "-": the tip alone).
 check_range() {
     local ref="$1" commit="$2" base="$3" new count base_commit unpublished
     if [ "${base}" = "-" ]; then
-        if ! new="$(git rev-list "${commit}" --not ${PUBLISHED[@]+"${PUBLISHED[@]}"})"; then
+        if ! new="$(rev_list_new "${commit}")"; then
             echo "P9 pre-push gate: refusing ${ref}: cannot list the commits new to ${REMOTE_NAME}" >&2
             return 1
         fi
@@ -181,7 +203,7 @@ EOF
         echo "P9 pre-push gate: refusing ${ref}: range.base ${base:0:12} is not an ancestor of ${commit:0:12}" >&2
         return 1
     fi
-    if ! unpublished="$(git rev-list -n 1 "${base_commit}" --not ${PUBLISHED[@]+"${PUBLISHED[@]}"})"; then
+    if ! unpublished="$(rev_list_new "${base_commit}" -n 1)"; then
         echo "P9 pre-push gate: refusing ${ref}: cannot check whether range.base is on ${REMOTE_NAME}" >&2
         return 1
     fi
@@ -240,15 +262,10 @@ EOF
     echo "P9 pre-push gate: signoff OK for ${ref} at ${commit:0:12}"
 }
 
-# Read every line first: the remote_sha values on all lines tell the range
-# check what the remote already has.
+# Read every line first so a no-op push exits before contacting the remote.
 REF_LINES=()
 while read -r local_ref local_sha remote_ref remote_sha; do
     REF_LINES+=("${local_ref} ${local_sha} ${remote_ref}")
-    if [[ "${remote_sha}" =~ ${SHA_RE} ]] && ! [[ "${remote_sha}" =~ ${ZERO_RE} ]] \
-        && known="$(git rev-parse --verify -q "${remote_sha}^{commit}")"; then
-        PUBLISHED+=("${known}")
-    fi
 done
 
 # Git runs the hook with no lines when every ref is already up to date. Nothing
@@ -257,6 +274,14 @@ if [ "${#REF_LINES[@]}" -eq 0 ]; then
     echo "P9 pre-push gate: nothing to push to ${REMOTE_NAME} (no refs received); nothing to review"
     exit 0
 fi
+
+for line in "${REF_LINES[@]}"; do
+    read -r _ local_sha _ <<<"${line}"
+    if ! [[ "${local_sha}" =~ ${ZERO_RE} ]]; then
+        load_published || exit 1
+        break
+    fi
+done
 
 status=0
 for line in "${REF_LINES[@]}"; do

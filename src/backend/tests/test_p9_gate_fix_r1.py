@@ -37,9 +37,9 @@ from tests.test_p9_prepush_gate import (  # noqa: F401
     pytestmark,
 )
 
-# Shared pins. The same constants appear in the sibling repo's copy of this
-# test, so a one-sided edit of either file fails that repo's suite.
-CANONICAL_PRE_PUSH_SHA256 = "2050537c85c4603c424a05c61fdd722accc08743c412793f3ad501ccfe804c09"
+# Local pins identify the expected files; CI separately compares shared files
+# byte-for-byte with the companion PR.
+CANONICAL_PRE_PUSH_SHA256 = "81657c890c63e02c7e7d9c04f1dfe0285a1688b62cb9a58401de93c3eda57d09"
 CANONICAL_INSTALLER_SHA256 = "3dd85d1670d11a6dea98ba9a8d79c75d89990bcc25979e5dfac59964822a736c"
 
 ZERO_SHA = "0" * 40
@@ -52,9 +52,9 @@ def _sha256(rel: str) -> str:
 # Parity (grumpy F5) -------------------------------------------------------
 
 
-def test_pre_push_hook_matches_shared_canonical_hash() -> None:
+def test_pre_push_hook_matches_pinned_hash() -> None:
     assert _sha256(".githooks/pre-push") == CANONICAL_PRE_PUSH_SHA256, (
-        "pre-push diverged from the canonical hook shared with the sibling repo"
+        "pre-push diverged from its pinned hash"
     )
 
 

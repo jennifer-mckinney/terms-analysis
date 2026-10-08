@@ -62,7 +62,12 @@ def installed(tmp_path: Path) -> Sandbox:
 
 
 def _hook_as(
-    sb: Sandbox, cwd: Path, remote_name: str, stdin: str, path: str | None = None
+    sb: Sandbox,
+    cwd: Path,
+    remote_name: str,
+    stdin: str,
+    path: str | None = None,
+    remote_url: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the installed hook as git would, with a chosen remote name / PATH."""
     root = sb.env["P9_SANDBOX_ROOT"]
@@ -72,7 +77,7 @@ def _hook_as(
     if path is not None:
         env["PATH"] = path
     return subprocess.run(
-        [str(cwd / ".githooks" / "pre-push"), remote_name, str(sb.remote)],
+        [str(cwd / ".githooks" / "pre-push"), remote_name, remote_url or str(sb.remote)],
         cwd=cwd,
         env=env,
         input=stdin,
@@ -202,15 +207,56 @@ def _one_new_commit(sb: Sandbox) -> tuple[str, str]:
     return seed, tip
 
 
-def test_glob_remote_name_does_not_borrow_tracking_refs(installed: Sandbox) -> None:
-    """`--remotes=orig*` would match origin/main and wave the seed through."""
+def test_remote_advertisement_is_independent_of_remote_name(installed: Sandbox) -> None:
+    """The current URL advertisement, not a --remotes name pattern, proves ancestry."""
     _seed, tip = _one_new_commit(installed)
     line = f"refs/heads/main {tip} refs/heads/main {ZERO_SHA}\n"
 
     proc = _hook_as(installed, installed.main, "orig*", line)
 
+    assert proc.returncode == 0, proc.stderr
+    assert "signoff OK" in proc.stdout
+
+
+def test_retargeted_remote_does_not_trust_stale_tracking_refs(installed: Sandbox) -> None:
+    """A tip-only signoff cannot publish its ancestry to a newly empty remote."""
+    cwd = installed.main
+    seed = _git(cwd, installed.env, "rev-parse", "refs/remotes/origin/main")
+    tip = installed.commit(cwd, "retargeted.txt")
+    _signoff(installed, cwd, tip, _pass(tip))
+    replacement = installed.root / "retargeted.git"
+    _git(installed.root, installed.env, "init", "--bare", str(replacement))
+    _git(cwd, installed.env, "remote", "set-url", "origin", str(replacement))
+
+    proc = installed.push(cwd, "probe-retargeted")
+
     assert proc.returncode != 0
-    assert "2 commits are new to orig*" in proc.stderr, proc.stderr
+    assert "commits are new to origin" in proc.stderr, proc.stderr
+    assert _git(cwd, installed.env, "rev-parse", "refs/remotes/origin/main") == seed
+    absent = _run(
+        ["git", "--git-dir", str(replacement), "show-ref", "--verify", "--quiet",
+         "refs/heads/probe-retargeted"],
+        installed.root,
+        installed.env,
+    )
+    assert absent.returncode != 0
+
+
+def test_unavailable_remote_advertisement_is_refused(installed: Sandbox) -> None:
+    tip = installed.commit(installed.main, "offline-remote.txt")
+    _signoff(installed, installed.main, tip, _pass(tip))
+    line = f"refs/heads/main {tip} refs/heads/main {ZERO_SHA}\n"
+
+    proc = _hook_as(
+        installed,
+        installed.main,
+        "origin",
+        line,
+        remote_url=str(installed.root / "missing-remote.git"),
+    )
+
+    assert proc.returncode != 0
+    assert "cannot read the current remote advertisement" in proc.stderr
 
 
 def test_remote_sha_from_stdin_counts_as_published(installed: Sandbox) -> None:
@@ -595,4 +641,3 @@ def test_doc_states_the_hook_contract_verbatim() -> None:
 )
 def test_in_ci_parses_only_real_ci_markers(value: str | None, expected: bool) -> None:
     assert in_ci(value) is expected
-

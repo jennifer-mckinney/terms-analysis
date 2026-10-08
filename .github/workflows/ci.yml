@@ -27,6 +27,21 @@ jobs:
       - name: Check style and imports
         run: ruff check src/backend/app
 
+      - name: Check shared P9 files against companion PR
+        run: |
+          sibling="$(mktemp -d)"
+          trap 'rm -rf "$sibling"' EXIT
+          git -C "$sibling" init --quiet
+          git -C "$sibling" fetch --quiet --no-tags --depth=1 \
+            https://github.com/jennifer-mckinney/legal-corpus-ingester.git \
+            refs/pull/11/head
+          for file in .githooks/pre-push scripts/install-hooks.sh; do
+            if ! git -C "$sibling" show "FETCH_HEAD:$file" | cmp -s - "$file"; then
+              echo "P9 shared file differs from legal-corpus-ingester PR #11: $file" >&2
+              exit 1
+            fi
+          done
+
   test:
     name: Test (pytest + coverage)
     runs-on: ubuntu-latest
