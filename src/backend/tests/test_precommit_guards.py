@@ -225,7 +225,8 @@ BLOCK_VECTORS = [v for _, v in BLOCK_ROWS]
 ALLOW_VECTORS = [v for _, v in ALLOW_ROWS]
 
 # Part B marker (owner ruling on #199, O1). strict: an unexpected pass fails.
-PART_B = pytest.mark.xfail(strict=True, reason="Part B, #192")
+# raises=AssertionError: a crash (ImportError, fixture error) is not a red XFAIL.
+PART_B = pytest.mark.xfail(strict=True, raises=AssertionError, reason="Part B, #192")
 
 # Refusal reason tags the Part B guard must print next to the file name, so a
 # crash (set -e, rc 1) can never be mistaken for a refusal (attack sketch s3).
