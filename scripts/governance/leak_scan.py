@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import re
 import sys
+import unicodedata
 from pathlib import Path
 from bisect import bisect_right
 from typing import BinaryIO, Callable, Dict, List, Optional, Sequence, Tuple
@@ -181,6 +182,14 @@ def load_patterns(path: Path) -> List[Pattern]:
     patterns: List[Pattern] = []
     seen = set()
     for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        # #192 fix r1: a Unicode format (Cf) character anywhere on a line (BOM,
+        # zero-width, bidi, tag) can glue itself to a column and silently
+        # disable a pattern. Refuse the file; name the code point, never echo it.
+        for char in raw:
+            if unicodedata.category(char) == "Cf":
+                raise ValueError(
+                    f"{path}:{number}: format character U+{ord(char):04X} is not allowed in the pattern file"
+                )
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue
         name, sep, rest = raw.partition("\t")
