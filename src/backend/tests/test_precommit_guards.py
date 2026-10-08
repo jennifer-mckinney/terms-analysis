@@ -170,6 +170,9 @@ BLOCK_ROWS = [
     ("home-private", "cd " + tilde("Docu" + "ments")),
     ("home-private", "see " + tilde("Desk" + "top")),
     ("home-private", "see " + tilde("Down" + "loads")),
+    ("home-private", "cd " + tilde("Docu" + "ments", "$HOME")),  # $HOME prefix branch
+    ("home-private", "cd " + tilde("Desk" + "top", "${HOME}")),  # ${HOME} prefix branch
+    ("home-private", "~/Down" + "loads"),  # end-of-line branch: nothing after the folder
 ]
 
 ALLOW_ROWS = [
@@ -186,6 +189,7 @@ ALLOW_ROWS = [
     ("home-private", "$HOME/.claude/CLAUDE.md"),
     ("home-private", "~/.claude/CLAUDE.md"),
     ("home-private", "~/<projects>/x"),
+    ("home-private", "~/Down" + "loads2/x"),  # name continues: not the standard folder
 ]
 
 BLOCK_VECTORS = [v for _, v in BLOCK_ROWS]
