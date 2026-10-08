@@ -5,13 +5,26 @@ in `.githooks/pre-commit` and in the gitignore-enforcement workflow, stop
 graveyard directories (e.g. `.pip-cache/`) from being staged at any depth,
 and close the Unicode homoglyph bypass of the `.env` guard.
 
+Split per the #145 design gate (owner rulings on #199):
+
+* Part A (active, required CI gate through pytest): the tracked tree has no
+  home path and no gitignored file, judged by the INTERIM pattern file
+  `.claude/governance/personal-path-patterns.txt` (O1; Part B deletes it in
+  favour of the one `leak_scan.py` scanner from #192). Matching is
+  case-insensitive, after Unicode Cf characters are removed. The tilde /
+  $HOME standard-home-folder prefixes are leaks too (O3).
+* Part B (after #192): staged-content guard, nested graveyard, `.env`
+  look-alikes and CI wiring. Those cases are `xfail(strict=True)` with
+  reason "Part B, #192" so they stay red for a stated reason and flip loudly
+  (XPASS fails the run) when Part B lands. Controls that the CURRENT hook or
+  workflow already satisfy stay active, so a Part A change cannot break them.
+
 Behaviour over text: every hook case runs the real `.githooks/pre-commit`
 inside a throwaway git repo, and every CI case runs the real `run:` steps of
 `.github/workflows/gitignore-enforcement.yml` against a throwaway tree.
 
-F13: the home-path patterns come from
-`.claude/governance/personal-path-patterns.txt` and the graveyard directories
-from `.claude/governance/required-gitignore.txt`. Nothing here restates them.
+F13: home-path patterns come from the pattern file and graveyard directories
+from `.claude/governance/required-gitignore.txt`; nothing here restates them.
 Home-path vectors are assembled at runtime so this file is not a leak itself.
 """
 from __future__ import annotations
@@ -58,13 +71,48 @@ def _load_ssot_lines(path: Path) -> list[str]:
     return out
 
 
+class PatternConfigError(Exception):
+    """The interim pattern file is unusable; the tree check fails closed."""
+
+
+def _load_home_patterns(path: Path) -> list[re.Pattern[str]]:
+    """Interim Part A matcher config loader (O1; deleted in Part B).
+
+    Fails closed on anything a shell consumer could read differently from
+    Python (attack sketch T3): missing file, BOM, CR, no patterns, a pattern
+    that does not compile, or a pattern that matches the empty string.
+    Patterns are compiled case-insensitively (design P1-2).
+    """
+    if not path.is_file():
+        raise PatternConfigError(f"pattern config missing: {path.name}")
+    data = path.read_bytes()
+    if data.startswith(b"\xef\xbb\xbf"):
+        raise PatternConfigError(f"pattern config has a UTF-8 BOM: {path.name}")
+    if b"\r" in data:
+        raise PatternConfigError(f"pattern config has CR line endings: {path.name}")
+    lines = []
+    for raw in data.decode("utf-8").split("\n"):
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        if raw != raw.strip():
+            raise PatternConfigError(f"pattern config line has edge whitespace: {path.name}")
+        lines.append(raw)
+    if not lines:
+        raise PatternConfigError(f"pattern config has no patterns: {path.name}")
+    out = []
+    for line in lines:
+        try:
+            pat = re.compile(line, re.IGNORECASE)
+        except re.error as exc:
+            raise PatternConfigError(f"pattern config regex does not compile: {path.name}") from exc
+        if pat.search(""):
+            raise PatternConfigError(f"pattern config regex matches the empty string: {path.name}")
+        out.append(pat)
+    return out
+
+
 def _home_patterns() -> list[re.Pattern[str]]:
-    assert PATTERNS_FILE.is_file(), (
-        f"home-path pattern SSoT missing: {PATTERNS_FILE.relative_to(REPO_ROOT)}"
-    )
-    lines = _load_ssot_lines(PATTERNS_FILE)
-    assert lines, "home-path pattern SSoT has no patterns"
-    return [re.compile(p) for p in lines]
+    return _load_home_patterns(PATTERNS_FILE)
 
 
 def _graveyard_dirs() -> list[str]:
@@ -88,30 +136,72 @@ def home(root: str = "Users", user: str = "alice", rest: str = "/x") -> str:
     return "/" + root + "/" + user + rest
 
 
+def win_home(sep: str = "\\", user: str = "alice") -> str:
+    return "C:" + sep + "Users" + sep + user + sep + "x"
+
+
+def tilde(folder: str, prefix: str = "~") -> str:
+    """A standard macOS home folder under ~ or $HOME (O3: a leak)."""
+    return prefix + "/" + folder + "/x"
+
+
 LEAK = home()  # the canonical hostile value used across hook cases
 
-BLOCK_VECTORS = [
-    "cd " + home() + "\n",
-    "cd " + home("home", "bob") + "\n",
-    "file://" + home(),
-    '"' + home("Users", "Alice") + '"',
-    "[doc](" + home("Users", "j.doe") + ")",
-    "`" + home("home", "a_b-1") + "`",
-    "PATH=" + home("Users", "9z"),
-    "/" + "Users" + "/​alice/x",  # Cf right after the slash
-    "/" + "Us​ers" + "/alice/x",  # Cf inside the root
-    "/" + "home" + "/‮bob/x",  # bidi override
+# (family, vector). Every family has at least one block AND one allow row
+# (QUALITY-BAR rule 9, enforced by test_vector_table_families_have_both_sides).
+BLOCK_ROWS = [
+    ("posix-home", "cd " + home() + "\n"),
+    ("posix-home", "cd " + home("home", "bob") + "\n"),
+    ("posix-home", "file://" + home()),
+    ("posix-home", '"' + home("Users", "Alice") + '"'),
+    ("posix-home", "[doc](" + home("Users", "j.doe") + ")"),
+    ("posix-home", "`" + home("home", "a_b-1") + "`"),
+    ("posix-home", "PATH=" + home("Users", "9z")),
+    ("posix-home", "/" + "Users" + "/\u200balice/x"),  # Cf right after the slash
+    ("posix-home", "/" + "Us\u200bers" + "/alice/x"),  # Cf inside the root
+    ("posix-home", "/" + "home" + "/\u202ebob/x"),  # bidi override
+    ("posix-lowercase", "cd " + home("users", "alice")),  # macOS FS is case-insensitive
+    ("posix-lowercase", "cd " + home("HOME", "bob")),
+    ("windows", "dir " + win_home("\\")),
+    ("windows", "dir " + win_home("/")),
+    ("windows", "dir " + win_home("\\").lower()),
+    ("deep-macos", "/System/Volumes/Data" + home()),
+    ("deep-macos", "/Volumes/Backup" + home()),
+    ("home-private", "cd " + tilde("Docu" + "ments")),
+    ("home-private", "see " + tilde("Desk" + "top")),
+    ("home-private", "see " + tilde("Down" + "loads")),
 ]
 
-ALLOW_VECTORS = [
-    "/" + "Users" + "/<name>/x",
-    "/" + "home" + "/<user>/x",
-    "$HOME/.claude/CLAUDE.md",
-    "~/.claude/CLAUDE.md",
-    "https://api.github.com/users/alice",
-    "the /" + "Users" + "/ directory",
-    "Users/alice (relative, no root)",
+ALLOW_ROWS = [
+    ("posix-home", "/" + "Users" + "/<name>/x"),
+    ("posix-home", "/" + "home" + "/<user>/x"),
+    ("posix-home", "the /" + "Users" + "/ directory"),
+    ("posix-home", "Users/alice (relative, no root)"),
+    ("posix-home", "https://api.github.com/" + "users/alice"),  # public URL, any case
+    ("posix-lowercase", "src/" + "home/x"),  # relative: no anchor
+    ("posix-lowercase", "api/" + "users/42"),  # relative REST route
+    ("windows", "C:" + "\\" + "Users" + "\\<name>\\x"),
+    ("windows", "C:" + "\\Program Files\\x"),
+    ("deep-macos", "/System/Volumes/Data/Shared/x"),
+    ("home-private", "$HOME/.claude/CLAUDE.md"),
+    ("home-private", "~/.claude/CLAUDE.md"),
+    ("home-private", "~/<projects>/x"),
 ]
+
+BLOCK_VECTORS = [v for _, v in BLOCK_ROWS]
+ALLOW_VECTORS = [v for _, v in ALLOW_ROWS]
+
+# Part B marker (owner ruling on #199, O1). strict: an unexpected pass fails.
+PART_B = pytest.mark.xfail(strict=True, reason="Part B, #192")
+
+# Refusal reason tags the Part B guard must print next to the file name, so a
+# crash (set -e, rc 1) can never be mistaken for a refusal (attack sketch s3).
+REASON_HOME = "home-path"
+REASON_CONFIG = "config"
+REASON_GRAVEYARD = "graveyard"
+REASON_ENV = ".env"
+CRASH_MARKERS = ("Traceback", "unbound variable", "command not found", "syntax error",
+                 "illegal option", "invalid option", "usage:")
 
 
 # --------------------------------------------------------------------------
@@ -189,13 +279,27 @@ def _err(proc: subprocess.CompletedProcess) -> str:
     return (proc.stdout + proc.stderr).decode("utf-8", "replace")
 
 
-def _assert_refused(proc: subprocess.CompletedProcess, *, names: list[str] = ()) -> None:
+def _assert_refused(proc: subprocess.CompletedProcess, *, name: str, reason: str) -> None:
+    """A refusal is rc == REFUSED AND names the file AND states the reason.
+
+    Attack sketch s3: under `set -e` most crashes also exit 1, so the exit
+    code alone cannot tell a refusal from a crash. Crash signatures fail it.
+    """
     out = _err(proc)
     assert proc.returncode == REFUSED, f"expected refusal rc={REFUSED}, got {proc.returncode}: {out[-600:]!r}"
-    for n in names:
-        assert n in out, f"refusal does not name {n!r}"
+    crashes = [m for m in CRASH_MARKERS if m in out]
+    assert crashes == [], f"rc={REFUSED} came from a crash, not a refusal: {crashes} in {out[-600:]!r}"
+    assert name and name in out, f"refusal does not name {name!r}: {out[-600:]!r}"
+    assert reason and reason in out, f"refusal does not state reason {reason!r}: {out[-600:]!r}"
     # F8: the message must not re-leak the home path it is refusing.
     assert LEAK not in out and _strip_cf(LEAK) not in _strip_cf(out)
+
+
+def _safe_fragment(name: str) -> str:
+    """The plain-ASCII lead of a hostile file name, which any escaping keeps."""
+    m = re.match(r"[A-Za-z0-9 _-]+", name)
+    assert m, name
+    return m.group(0)
 
 
 # ==========================================================================
@@ -215,16 +319,23 @@ def _tracked_entries() -> list[tuple[str, str]]:
 
 
 def test_tracked_tree_has_no_home_paths():
+    """Part A acceptance: no tracked blob (or symlink target) has a home path.
+
+    Red today: 2 docs with absolute home paths, 3 governance docs with a
+    tilde standard-home-folder prefix (O3), and the tracked .pip-cache/.
+    """
     patterns = _home_patterns()
     offenders = []
     for mode, rel in _tracked_entries():
         p = REPO_ROOT / rel
         if mode == "120000":
             text = os.readlink(p)
+        elif mode == "160000":
+            continue  # gitlink: no blob in this repo
         elif p.is_file():
             text = p.read_bytes().decode("utf-8", "replace")
         else:
-            continue
+            raise AssertionError(f"tracked path missing from worktree: {rel!r}")
         if _leaks(text, patterns):
             offenders.append(rel)
     assert offenders == [], f"{len(offenders)} tracked file(s) contain a user-home path: {offenders[:10]}"
@@ -240,27 +351,82 @@ def test_no_tracked_file_is_gitignored():
     assert ignored == [], f"{len(ignored)} tracked file(s) match .gitignore, e.g. {ignored[:3]}"
 
 
-def test_pattern_config_vectors_contract():
-    """R2/rule 9: every pattern has a block vector; no pattern hits an allow vector."""
-    patterns = _home_patterns()
-    for p in patterns:
+@pytest.mark.parametrize("family,vector", BLOCK_ROWS, ids=[f"{f}:{ascii(v)}" for f, v in BLOCK_ROWS])
+def test_matcher_blocks_vector(family, vector):
+    assert _leaks(vector, _home_patterns()), f"[{family}] block vector not detected: {vector!r}"
+
+
+@pytest.mark.parametrize("family,vector", ALLOW_ROWS, ids=[f"{f}:{ascii(v)}" for f, v in ALLOW_ROWS])
+def test_matcher_allows_vector(family, vector):
+    assert not _leaks(vector, _home_patterns()), f"[{family}] allow vector falsely detected: {vector!r}"
+
+
+def test_vector_table_families_have_both_sides():
+    """Rule 9 contract: every family has a block row and an allow row."""
+    block = {f for f, _ in BLOCK_ROWS}
+    allow = {f for f, _ in ALLOW_ROWS}
+    assert block == allow, f"families missing a side: block-only {block - allow}, allow-only {allow - block}"
+
+
+def test_every_pattern_has_a_block_vector():
+    """R2: a pattern no vector exercises is dead config, or an untested rule."""
+    for p in _home_patterns():
         assert any(p.search(_strip_cf(v)) for v in BLOCK_VECTORS), f"pattern {p.pattern!r} has no block vector"
-    for v in BLOCK_VECTORS:
-        assert _leaks(v, patterns), f"block vector not detected: {v!r}"
-    for v in ALLOW_VECTORS:
-        assert not _leaks(v, patterns), f"allow vector falsely detected: {v!r}"
+
+
+def test_matcher_generated_hostile_vectors():
+    """R2: the leak survives every Cf/Cc/Zl/Zp/line-break/Cs/NUL/bad-UTF-8 wrap.
+
+    Decoded the way the tree test decodes a blob (UTF-8, errors replaced).
+    The ANSI-wrapped case is a Part B scanner concern (escape stripping) and
+    is exercised only through the hook.
+    """
+    patterns = _home_patterns()
+    cases = {k: v for k, v in _generated_cases().items() if k != "ansi_conceal.md"}
+    print(f"generated hostile matcher cases: {len(cases)}")
+    missed = [k for k, v in cases.items() if not _leaks(v.decode("utf-8", "replace"), patterns)]
+    assert missed == [], f"{len(missed)}/{len(cases)} generated leaks missed, e.g. {missed[:5]}"
+
+
+BAD_PATTERN_CONFIGS = {
+    "empty": b"",
+    "comments-only": b"# only comments\n\n",
+    "bad-regex": b"([\n",
+    "crlf": b"/Users/[a-z]\r\n",
+    "bom": b"\xef\xbb\xbf/Users/[a-z]\n",
+    "matches-empty": b".*\n",
+    "optional-only": b"x?\n",
+    "edge-whitespace": b"/Users/[a-z] \n",
+}
+
+
+@pytest.mark.parametrize("body", BAD_PATTERN_CONFIGS.values(), ids=BAD_PATTERN_CONFIGS.keys())
+def test_bad_pattern_config_fails_closed_at_load(tmp_path, body):
+    """F13 / attack sketch T3: a config a shell could read differently fails closed."""
+    cfg = tmp_path / PATTERNS_FILE.name
+    cfg.write_bytes(body)
+    with pytest.raises(PatternConfigError) as exc:
+        _load_home_patterns(cfg)
+    assert str(tmp_path) not in str(exc.value), "absolute path in config error (F8)"
+
+
+def test_missing_pattern_config_fails_closed_at_load(tmp_path):
+    with pytest.raises(PatternConfigError):
+        _load_home_patterns(tmp_path / PATTERNS_FILE.name)
 
 
 # ==========================================================================
 # 2. Hook: home-path content check
 # ==========================================================================
+@PART_B
 def test_rejects_staged_personal_path(sandbox):
     _write(sandbox, "doc.md", "cd " + LEAK + "\n")
     _stage(sandbox, "doc.md")
-    _assert_refused(_run_hook(sandbox), names=["doc.md"])
+    _assert_refused(_run_hook(sandbox), name="doc.md", reason=REASON_HOME)
 
 
 def test_allows_policy_placeholder(sandbox):
+    """Control, green today: the current hook has no content scan at all."""
     for i, v in enumerate(ALLOW_VECTORS):
         _write(sandbox, f"ok{i}.md", v + "\n")
     _stage(sandbox, *[f"ok{i}.md" for i in range(len(ALLOW_VECTORS))])
@@ -268,12 +434,12 @@ def test_allows_policy_placeholder(sandbox):
     assert proc.returncode == 0, _err(proc)
 
 
+@PART_B
 @pytest.mark.parametrize("idx", range(len(BLOCK_VECTORS)))
 def test_rejects_block_vector(sandbox, idx):
     _write(sandbox, "v.md", BLOCK_VECTORS[idx])
     _stage(sandbox, "v.md")
-    proc = _run_hook(sandbox)
-    assert proc.returncode == REFUSED, f"vector {BLOCK_VECTORS[idx]!r} passed: {_err(proc)!r}"
+    _assert_refused(_run_hook(sandbox), name="v.md", reason=REASON_HOME)
 
 
 def _generated_cases() -> dict[str, bytes]:
@@ -298,6 +464,7 @@ def _generated_cases() -> dict[str, bytes]:
     return cases
 
 
+@PART_B
 def test_generated_hostile_content_all_refused(sandbox):
     cases = _generated_cases()
     print(f"generated hostile content cases: {len(cases)}")
@@ -318,6 +485,7 @@ HOSTILE_NAMES = [
 ]
 
 
+@PART_B
 @pytest.mark.parametrize("quotepath", ["true", "false"])
 @pytest.mark.parametrize("name", HOSTILE_NAMES, ids=[repr(n) for n in HOSTILE_NAMES])
 def test_hostile_filename_with_leak_refused(sandbox, name, quotepath):
@@ -325,29 +493,41 @@ def test_hostile_filename_with_leak_refused(sandbox, name, quotepath):
     _stage(sandbox, name)
     proc = _run_hook(sandbox, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.quotePath",
                                "GIT_CONFIG_VALUE_0": quotepath})
-    _assert_refused(proc)
+    _assert_refused(proc, name=_safe_fragment(name), reason=REASON_HOME)
     out = _err(proc)
     assert "\x1b" not in out and "‮" not in out, "raw control bytes from filename echoed"
 
 
-@pytest.mark.parametrize("name", HOSTILE_NAMES, ids=[repr(n) for n in HOSTILE_NAMES])
+HOSTILE_NAME_PARAMS = [
+    pytest.param(n, id=repr(n), marks=PART_B if n.startswith("-") else ())
+    for n in HOSTILE_NAMES
+]
+
+
+@pytest.mark.parametrize("name", HOSTILE_NAME_PARAMS)
 def test_hostile_filename_clean_allowed(sandbox, name):
-    """Positive control: hostile names with clean content are not refused."""
+    """Positive control: hostile names with clean content are not refused.
+
+    Leading-dash names are Part B: today's hook runs `basename` without `--`
+    and crashes on them (attack sketch T7).
+    """
     _write(sandbox, name, "nothing personal\n")
     _stage(sandbox, name)
     proc = _run_hook(sandbox)
     assert proc.returncode == 0, _err(proc)
 
 
+@PART_B
 def test_scans_index_not_worktree(sandbox):
     """F7: the staged blob is what gets committed; scan that, not the worktree."""
     _write(sandbox, "doc.md", "cd " + LEAK + "\n")
     _stage(sandbox, "doc.md")
     _write(sandbox, "doc.md", "clean now\n")
-    _assert_refused(_run_hook(sandbox), names=["doc.md"])
+    _assert_refused(_run_hook(sandbox), name="doc.md", reason=REASON_HOME)
 
 
 def test_dirty_worktree_clean_index_allowed(sandbox):
+    """Control, green today (no content scan yet); Part B must keep it green."""
     _write(sandbox, "doc.md", "clean\n")
     _stage(sandbox, "doc.md")
     _write(sandbox, "doc.md", "cd " + LEAK + "\n")
@@ -355,36 +535,41 @@ def test_dirty_worktree_clean_index_allowed(sandbox):
     assert proc.returncode == 0, _err(proc)
 
 
+@PART_B
 def test_symlink_to_home_path_refused(sandbox):
     os.symlink(home("Users", "alice", "/secret"), sandbox / "link")
     _stage(sandbox, "link")
-    _assert_refused(_run_hook(sandbox), names=["link"])
+    _assert_refused(_run_hook(sandbox), name="link", reason=REASON_HOME)
 
 
+@PART_B
 def test_huge_single_line_leak_refused(sandbox):
     _write(sandbox, "big.txt", b"a" * (2 * 1024 * 1024) + LEAK.encode())
     _stage(sandbox, "big.txt")
-    _assert_refused(_run_hook(sandbox), names=["big.txt"])
+    _assert_refused(_run_hook(sandbox), name="big.txt", reason=REASON_HOME)
 
 
+@PART_B
 def test_many_files_one_leak_refused(sandbox):
     n = 3000
     for i in range(n):
         _write(sandbox, f"many/f{i:05d}.md", "clean\n")
     _write(sandbox, f"many/f{n - 1:05d}.md", LEAK)
     _stage(sandbox, "many")
-    _assert_refused(_run_hook(sandbox), names=[f"f{n - 1:05d}.md"])
+    _assert_refused(_run_hook(sandbox), name=f"f{n - 1:05d}.md", reason=REASON_HOME)
 
 
+@PART_B
 def test_clean_commit_reports_count(sandbox):
-    """F12/R4: success carries an attestation (the number of files scanned)."""
+    """F12/R4: success carries an exact attestation line (design P1-5)."""
     n = 7
     for i in range(n):
         _write(sandbox, f"c{i}.md", "clean\n")
     _stage(sandbox, *[f"c{i}.md" for i in range(n)])
     proc = _run_hook(sandbox)
     assert proc.returncode == 0, _err(proc)
-    assert re.search(rf"(?<!\d){n}(?!\d)", _err(proc)), f"no scan count in output: {_err(proc)!r}"
+    lines = _err(proc).splitlines()
+    assert f"CLEAN {n}" in lines, f"no exact 'CLEAN {n}' sentinel line: {lines!r}"
 
 
 # --- config fail-closed (F13) ---------------------------------------------
@@ -396,24 +581,25 @@ def _clean_stage(repo: Path) -> None:
     _stage(repo, "c.md")
 
 
+@PART_B
 def test_missing_pattern_config_fails_closed(sandbox):
     (sandbox / PATTERNS_REL).unlink()
     _clean_stage(sandbox)
     proc = _run_hook(sandbox)
-    assert proc.returncode == REFUSED
+    _assert_refused(proc, name=PATTERNS_FILE.name, reason=REASON_CONFIG)
     out = _err(proc)
-    assert PATTERNS_FILE.name in out
     assert str(sandbox) not in out and str(sandbox.resolve()) not in out, "absolute path in message (F8)"
 
 
-@pytest.mark.parametrize("body", ["", "# only comments\n\n", "([\n"], ids=["empty", "comments", "bad-regex"])
+@PART_B
+@pytest.mark.parametrize("body", BAD_PATTERN_CONFIGS.values(), ids=BAD_PATTERN_CONFIGS.keys())
 def test_bad_pattern_config_fails_closed(sandbox, body):
-    (sandbox / PATTERNS_REL).write_text(body, encoding="utf-8")
+    (sandbox / PATTERNS_REL).write_bytes(body)
     _clean_stage(sandbox)
-    proc = _run_hook(sandbox)
-    assert proc.returncode == REFUSED, f"bad config {body!r} accepted: {_err(proc)!r}"
+    _assert_refused(_run_hook(sandbox), name=PATTERNS_FILE.name, reason=REASON_CONFIG)
 
 
+@PART_B
 def test_missing_required_gitignore_message_has_no_absolute_path(sandbox):
     (sandbox / REQUIRED_GITIGNORE_FILE.relative_to(REPO_ROOT)).unlink()
     _clean_stage(sandbox)
@@ -426,18 +612,20 @@ def test_missing_required_gitignore_message_has_no_absolute_path(sandbox):
 # ==========================================================================
 # 3. Hook: graveyard dirs at any depth (pip-cache)
 # ==========================================================================
+@PART_B
 def test_rejects_pip_cache(sandbox):
     _write(sandbox, "src/backend/.pip-cache/selfcheck/x", "{}\n")
     _stage(sandbox, "src/backend/.pip-cache/selfcheck/x")
-    _assert_refused(_run_hook(sandbox), names=[".pip-cache"])
+    _assert_refused(_run_hook(sandbox), name="src/backend/.pip-cache/selfcheck/x", reason=REASON_GRAVEYARD)
 
 
+@PART_B
 @pytest.mark.parametrize("d", _graveyard_dirs())
 def test_rejects_nested_graveyard_dir(sandbox, d):
     rel = f"src/backend/{d}x.txt"
     _write(sandbox, rel, "x\n")
     _stage(sandbox, rel)
-    _assert_refused(_run_hook(sandbox))
+    _assert_refused(_run_hook(sandbox), name=rel, reason=REASON_GRAVEYARD)
 
 
 @pytest.mark.parametrize("d", _graveyard_dirs())
@@ -451,10 +639,10 @@ def test_allows_graveyard_lookalike_name(sandbox, d):
 
 
 def test_root_pip_cache_still_refused(sandbox):
-    """Control: green today."""
+    """Control: green today (root-prefix graveyard check exists on main)."""
     _write(sandbox, ".pip-cache/x", "x\n")
     _stage(sandbox, ".pip-cache/x")
-    _assert_refused(_run_hook(sandbox))
+    _assert_refused(_run_hook(sandbox), name=".pip-cache/x", reason=REASON_GRAVEYARD)
 
 
 # ==========================================================================
@@ -471,15 +659,20 @@ ENV_BLOCK = [
     ".env‍",  # trailing Cf
     ".еnv.local",
 ]
+ENV_ASCII_CONTROLS = {".env", ".ENV", ".Env.local"}  # enforced by today's hook
+ENV_BLOCK_PARAMS = [
+    pytest.param(n, id=ascii(n), marks=() if n in ENV_ASCII_CONTROLS else PART_B)
+    for n in ENV_BLOCK
+]
 ENV_ALLOW = [".env.example", ".envrc_notes.md", "env.md", "dotenv.txt"]
 
 
-@pytest.mark.parametrize("name", ENV_BLOCK, ids=[ascii(n) for n in ENV_BLOCK])
+@pytest.mark.parametrize("name", ENV_BLOCK_PARAMS)
 def test_rejects_env_homoglyph(sandbox, name):
     _write(sandbox, f"cfg/{name}", "SECRET=1\n")
     _stage(sandbox, f"cfg/{name}")
-    proc = _run_hook(sandbox)
-    assert proc.returncode == REFUSED, f"{ascii(name)} accepted: {_err(proc)!r}"
+    shown = f"cfg/{name}" if name.isascii() and name.isprintable() else "cfg/"
+    _assert_refused(_run_hook(sandbox), name=shown, reason=REASON_ENV)
 
 
 @pytest.mark.parametrize("name", ENV_ALLOW)
@@ -498,6 +691,7 @@ def _install(repo: Path) -> None:
                    capture_output=True, timeout=HOOK_TIMEOUT_S)
 
 
+@PART_B
 def test_installed_hook_blocks_real_commit(sandbox):
     _install(sandbox)
     _write(sandbox, "doc.md", "cd " + LEAK + "\n")
@@ -613,25 +807,28 @@ def test_ci_clean_tree_passes(tmp_path):
     assert ok, log
 
 
+@PART_B
 def test_ci_rejects_home_path(tmp_path):
     ok, log = _run_workflow(_ci_tree(tmp_path, {"docs/guide.md": "cd " + LEAK + "\n"}))
     assert not ok, "workflow passed a tree containing a user-home path"
     assert LEAK not in log, "workflow log re-leaks the home path (F8)"
 
 
+@PART_B
 def test_ci_rejects_nested_pip_cache(tmp_path):
     ok, log = _run_workflow(_ci_tree(tmp_path, {"src/backend/.pip-cache/selfcheck/x": "{}\n"}))
     assert not ok, "workflow passed a tree with a nested .pip-cache/"
 
 
-@pytest.mark.parametrize("name", [".еnv", ".ｅnv", ".e​nv"], ids=["cyrillic", "fullwidth", "zwsp"])
+@PART_B
+@pytest.mark.parametrize("name", [".\u0435nv", ".\uff45nv", ".e\u200bnv"], ids=["cyrillic", "fullwidth", "zwsp"])
 def test_ci_rejects_env_homoglyph(tmp_path, name):
     ok, log = _run_workflow(_ci_tree(tmp_path, {f"cfg/{name}": "SECRET=1\n"}))
     assert not ok, f"workflow passed {ascii(name)}"
 
 
 def test_ci_real_tree_passes(tmp_path):
-    """Positive control: the workflow must not false-positive on the real tree."""
+    """Positive control (green today): no false positive on the real tree."""
     raw = subprocess.run(["git", "archive", "--format=tar", "HEAD"], cwd=REPO_ROOT,
                          capture_output=True, check=True).stdout
     tree = tmp_path / "tree"
