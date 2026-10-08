@@ -20,7 +20,7 @@ zero findings at any severity (owner directives 2026-07-03 and 2026-07-04):
 |---|---|---|
 | Review jobs | `security-review` and `grumpy-review` run Claude with the vendored briefs on every PR to `main` | `.github/workflows/p9-review.yml`, `.github/p9/*.md` |
 | Verdict gate | Each job fails unless `p9-verdict.json` says PASS with no findings | `.github/p9/check_verdict.py` |
-| Merge block | Branch protection on `main` requires both jobs | GitHub repository settings |
+| Merge block | Pending: the owner adds both jobs as required checks on `main` after the first green run | GitHub repository settings |
 
 The local `.githooks/pre-push` signoff gate, `.git/reviews/*.signoff.json`
 files and the `enforce-p9-review.yml` text check are retired.

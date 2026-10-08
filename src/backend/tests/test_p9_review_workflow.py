@@ -25,7 +25,9 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -81,20 +83,20 @@ def _write(tmp_path: Path, content: str | bytes) -> Path:
     return target
 
 
-def _workflow() -> dict:
+def _workflow() -> dict[str, Any]:
     return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
 
 
-def _triggers(doc: dict) -> dict:
+def _triggers(doc: dict[str, Any]) -> dict[str, Any]:
     # PyYAML (YAML 1.1) reads the bare key `on` as boolean True.
     return doc.get("on", doc.get(True))
 
 
-def _jobs() -> dict:
+def _jobs() -> dict[str, Any]:
     return _workflow()["jobs"]
 
 
-def _action_step(job: dict) -> dict:
+def _action_step(job: dict[str, Any]) -> dict[str, Any]:
     steps = [s for s in job["steps"] if str(s.get("uses", "")).startswith("anthropics/claude-code-action@")]
     assert len(steps) == 1, f"expected exactly one claude-code-action step, got {len(steps)}"
     return steps[0]
@@ -315,7 +317,7 @@ def test_each_job_prompts_with_its_vendored_brief() -> None:
 # --- workflow steps, run for real with a fake reviewer -----------------------
 
 
-def _shell_steps(job: dict) -> tuple[list[str], list[str]]:
+def _shell_steps(job: dict[str, Any]) -> tuple[list[str], list[str]]:
     """Return the `run:` scripts before and after the action step."""
     before: list[str] = []
     after: list[str] = []
@@ -329,7 +331,10 @@ def _shell_steps(job: dict) -> tuple[list[str], list[str]]:
     return before, after
 
 
-def _run_job(tmp_path: Path, job: dict, reviewer) -> subprocess.CompletedProcess[str]:
+Reviewer = Callable[[Path], object]  # stands in for the review action
+
+
+def _run_job(tmp_path: Path, job: dict[str, Any], reviewer: Reviewer) -> subprocess.CompletedProcess[str]:
     """Run the job's shell steps in a copy of the repo files they touch."""
     workspace = tmp_path / "ws"
     runner_temp = tmp_path / "runner-temp"
@@ -352,7 +357,7 @@ def _run_job(tmp_path: Path, job: dict, reviewer) -> subprocess.CompletedProcess
     return result
 
 
-def _writes(doc: object):
+def _writes(doc: object) -> Reviewer:
     return lambda ws: (ws / "p9-verdict.json").write_text(json.dumps(doc), encoding="utf-8")
 
 
@@ -365,7 +370,7 @@ def _writes(doc: object):
         pytest.param(lambda ws: None, EXIT_INVALID, id="reviewer-wrote-nothing"),
     ],
 )
-def test_job_steps_gate_on_the_reviewer_verdict(tmp_path: Path, name: str, reviewer, expected: int) -> None:
+def test_job_steps_gate_on_the_reviewer_verdict(tmp_path: Path, name: str, reviewer: Reviewer, expected: int) -> None:
     proc = _run_job(tmp_path, _jobs()[name], reviewer)
     assert proc.returncode == expected, proc.stderr
 

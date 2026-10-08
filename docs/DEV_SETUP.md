@@ -18,8 +18,9 @@ fast local convenience, not the only line of defense.
 
 There is no local pre-push gate. Every PR to `main` runs the
 `security-review` and `grumpy-review` jobs
-(`.github/workflows/p9-review.yml`), and both must pass before the PR can
-merge. See `automations/p9-pre-push.md`.
+(`.github/workflows/p9-review.yml`). Once the owner makes both required
+checks on `main` (pending, after the first green run), both must pass before
+the PR can merge. See `automations/p9-pre-push.md`.
 
 ## What patterns are protected
 

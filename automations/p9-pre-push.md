@@ -64,9 +64,11 @@ writes nothing fails the job.
 
 ## Merging
 
-Branch protection on `main` requires `security-review` and `grumpy-review`
-(source: GitHub Actions). A PR merges only when both pass on its head commit.
-A new push re-runs both. Only the owner can waive a finding, at merge time.
+Branch protection is not enabled yet (pending). After the first green run,
+the owner adds `security-review` and `grumpy-review` (source: GitHub Actions)
+as required status checks on `main` (see Owner setup). From then on a PR
+merges only when both pass on its head commit. A new push re-runs both. Only
+the owner can waive a finding, at merge time.
 
 ## Owner setup
 
