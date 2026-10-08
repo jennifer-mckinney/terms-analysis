@@ -157,7 +157,7 @@ classifier friction: subagent + Write both blocked when writing signoff files. W
 xref: [[SO11]]
 
 ### SO14: sibling-project-legal-corpus-ingester
-rule: sibling project `~/Documents/05_Technical_Development/01_AUTOMATION/01_Claude_Projects/legal-corpus-ingester/` bootstrapped 2026-07-04. Phase 0.1 Tasks 1-40 complete and pushed at `459a1b8`.
+rule: sibling project `~/<projects>/legal-corpus-ingester/` bootstrapped 2026-07-04. Phase 0.1 Tasks 1-40 complete and pushed at `459a1b8`.
 remote: `jennifer-mckinney/legal-corpus-ingester` (private)
 plan: `docs/plans/2026-07-04-legal-corpus-ingester.md` (this repo) — complete; Phase 1 EU plan at `docs/plans/2026-07-04-legal-corpus-ingester-phase1-EU.md`
 consumer contract: `src/backend/app/services/legal_kb.py` — consumes corpus bundles from ingester per plan Task 28

@@ -2,7 +2,7 @@
 
 ## Intent
 
-Write ONE markdown plan doc at `/Users/jennifermckinney/Documents/05_Technical_Development/01_AUTOMATION/01_Claude_Projects/terms-analysis/docs/plans/2026-07-04-corpus-INTL.md` covering INTERNATIONAL soft-law + international-court legal-corpus jurisdictions blocking Q11=B of the results-view revamp. Plan work only. No code, no git, no statute-text downloads.
+Write ONE markdown plan doc at `<repo>/docs/plans/2026-07-04-corpus-INTL.md` covering INTERNATIONAL soft-law + international-court legal-corpus jurisdictions blocking Q11=B of the results-view revamp. Plan work only. No code, no git, no statute-text downloads.
 
 ## Source-verification pass (already completed via WebFetch + WebSearch on 2026-07-04)
 
