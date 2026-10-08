@@ -1,0 +1,69 @@
+# G0-5 red run (terms-analysis, base 8797180) 2026-10-07T21:37:28Z
+# cmd: cd src/backend && python -m pytest tests/test_p9_prepush_gate.py -rA --tb=line
+.F.FF.F.F                                                                [100%]
+=================================== FAILURES ===================================
+E   AssertionError: push from worktree with signoff at <tmp>/test_push_with_valid_signoff_i1/main/.git/reviews was refused:
+      P9 pre-push gate: signoff not found for HEAD c880fc09ea73
+      
+      Expected signoff: .git/reviews/c880fc09ea7315654fff1f02ff114953eacb824a.signoff.json
+      
+      To satisfy P9: ask Claude to dispatch security-engineer + grumpy-developer
+      review, then write the signoff. Example prompt:
+          "run p9 review on HEAD and write signoff"
+      
+      Emergency override (records who + why): write a signoff with
+      override.used = true. See automations/p9-pre-push.md for schema.
+      error: failed to push some refs to '<tmp>/test_push_with_valid_signoff_i1/remote.git'
+      
+    assert 1 == 0
+     +  where 1 = CompletedProcess(args=['git', 'push', 'origin', 'HEAD:refs/heads/a-worktree'], returncode=1, stdout='', stderr='P9 pre...<tmp>/<pytest-tmp>/pytest-113/test_push_with_valid_signoff_i1/remote.git\'\n').returncode
+<worktree>/src/backend/tests/test_p9_prepush_gate.py:159: AssertionError: push from worktree with signoff at <tmp>/test_push_with_valid_signoff_i1/main/.git/reviews was refused:
+E   AssertionError: gate in worktree names <tmp>/test_push_without_signoff_is_r1/wt/.git/reviews/62aae000191be931d8fcedf4ce7f435d65af103e.signoff.json, but signoffs live at <tmp>/test_push_without_signoff_is_r1/main/.git/reviews/62aae000191be931d8fcedf4ce7f435d65af103e.signoff.json
+    assert '/private/var....signoff.json' == '/private/var....signoff.json'
+      
+      Skipping 117 identical leading characters in diff, use -v to show
+      - off_is_r1/main/.git/reviews/62aae000191be931d8fcedf4ce7f435d65af103e.signoff.json
+      ?           ^^^^
+      + off_is_r1/wt/.git/reviews/62aae000191be931d8fcedf4ce7f435d65af103e.signoff.json
+      ?           ^^
+<worktree>/src/backend/tests/test_p9_prepush_gate.py:190: AssertionError: gate in worktree names <tmp>/test_push_without_signoff_is_r1/wt/.git/reviews/62aae000191be931d8fcedf4ce7f435d65af103e.signoff.json, but signoffs live at <tmp>/test_push_without_signoff_is_r1/main/.git/reviews/62aae000191be931d8fcedf4ce7f435d65af103e.signoff.json
+E   AssertionError: signoff=True: main=(True, True) worktree=(False, False) (pushed_ok, remote_updated)
+    assert (True, True) == (False, False)
+      
+      At index 0 diff: True != False
+      Use -v to get more diff
+<worktree>/src/backend/tests/test_p9_prepush_gate.py:205: AssertionError: signoff=True: main=(True, True) worktree=(False, False) (pushed_ok, remote_updated)
+E   AssertionError: install-hooks.sh from worktree failed:
+      mkdir: .git: Not a directory
+      
+    assert 1 == 0
+     +  where 1 = CompletedProcess(args=['bash', 'scripts/install-hooks.sh'], returncode=1, stdout='', stderr='mkdir: .git: Not a directory\n').returncode
+<worktree>/src/backend/tests/test_p9_prepush_gate.py:223: AssertionError: install-hooks.sh from worktree failed:
+E   AssertionError: install-hooks.sh from worktree exited 1 without naming core.hooksPath:
+      mkdir: .git: Not a directory
+      
+    assert 'hooksPath' in 'mkdir: .git: Not a directory\n'
+     +  where 'mkdir: .git: Not a directory\n' = CompletedProcess(args=['bash', 'scripts/install-hooks.sh'], returncode=1, stdout='', stderr='mkdir: .git: Not a directory\n').stderr
+<worktree>/src/backend/tests/test_p9_prepush_gate.py:247: AssertionError: install-hooks.sh from worktree exited 1 without naming core.hooksPath:
+=============================== warnings summary ===============================
+../../../terms-analysis/src/backend/.venv/lib/python3.14/site-packages/fastapi/testclient.py:1
+  <venv>/lib/python3.14/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+app/schemas.py:441
+  <worktree>/src/backend/app/schemas.py:441: PydanticDeprecatedSince20: `min_items` is deprecated and will be removed, use `min_length` instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    items: List[BatchItem] = Field(..., min_items=1, description="Documents to analyze")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+==================================== PASSES ====================================
+=========================== short test summary info ============================
+PASSED tests/test_p9_prepush_gate.py::test_push_with_valid_signoff_in_common_dir_succeeds[main]
+PASSED tests/test_p9_prepush_gate.py::test_push_without_signoff_is_refused_and_names_common_dir_path[main]
+PASSED tests/test_p9_prepush_gate.py::test_install_hooks_sets_relative_hookspath[main]
+PASSED tests/test_p9_prepush_gate.py::test_install_hooks_overrides_or_refuses_absolute_git_hooks_path[main]
+FAILED tests/test_p9_prepush_gate.py::test_push_with_valid_signoff_in_common_dir_succeeds[worktree]
+FAILED tests/test_p9_prepush_gate.py::test_push_without_signoff_is_refused_and_names_common_dir_path[worktree]
+FAILED tests/test_p9_prepush_gate.py::test_main_checkout_and_worktree_behave_identically
+FAILED tests/test_p9_prepush_gate.py::test_install_hooks_sets_relative_hookspath[worktree]
+FAILED tests/test_p9_prepush_gate.py::test_install_hooks_overrides_or_refuses_absolute_git_hooks_path[worktree]
+5 failed, 4 passed, 2 warnings in 6.12s
