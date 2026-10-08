@@ -153,6 +153,9 @@ BLOCK_ROWS = [
     ("posix-home", "cd " + home() + "\n"),
     ("posix-home", "cd " + home("home", "bob") + "\n"),
     ("posix-home", "file://" + home()),
+    ("posix-home", "file://" + home("home", "bob")),  # file: URL, home root
+    ("posix-home", "file://localhost" + home()),  # file: URL with a host
+    ("posix-home", "file:///Volumes/X" + home()),  # file: URL under a volume
     ("posix-home", '"' + home("Users", "Alice") + '"'),
     ("posix-home", "[doc](" + home("Users", "j.doe") + ")"),
     ("posix-home", "`" + home("home", "a_b-1") + "`"),
@@ -401,6 +404,7 @@ BAD_PATTERN_CONFIGS = {
     "matches-empty": b".*\n",
     "optional-only": b"x?\n",
     "edge-whitespace": b"/Users/[a-z] \n",
+    "indented-comment": b"  # c\n/Users/[a-z]\n",  # grep -v '^#' would compile it
 }
 
 
