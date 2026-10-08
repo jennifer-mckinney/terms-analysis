@@ -176,6 +176,16 @@ BLOCK_ROWS = [
     ("posix-home", "[doc](" + home("Users", "j.doe") + ")"),
     ("posix-home", "`" + home("home", "a_b-1") + "`"),
     ("posix-home", "PATH=" + home("Users", "9z")),
+    # final-r2 F5 (regression vs 22475ca): empty, dot or relative item before
+    # the colon. Owner policy 2026-10-08: block home paths in ALL list forms.
+    *[
+        ("posix-home", prefix + home(root, user, ""))
+        for root, user in (("home", "x"), ("Users", "x"))
+        for prefix in ("PATH=:", "PATH=/a::", "PATH=.:", "PATH=bin:")
+    ],
+    ("posix-home", '"bin:' + home("Users", "bob", "") + '"'),  # quoted list item
+    # owner: over-block accepted; word:/home/... is list-shaped (was an allow row).
+    ("posix-home", "profile:/" + "Users" + "/x"),
     ("posix-home", "/" + "Users" + "/\u200balice/x"),  # Cf right after the slash
     ("posix-home", "/" + "Us\u200bers" + "/alice/x"),  # Cf inside the root
     ("posix-home", "/" + "home" + "/\u202ebob/x"),  # bidi override
@@ -200,8 +210,6 @@ ALLOW_ROWS = [
     ("posix-home", "the /" + "Users" + "/ directory"),
     ("posix-home", "Users/alice (relative, no root)"),
     ("posix-home", "https://api.github.com/" + "users/alice"),  # public URL, any case
-    # `file:` only as a substring (owner ruling: profile:/Users/x stays allowed).
-    ("posix-home", "profile:/" + "Users" + "/x"),
     ("posix-lowercase", "src/" + "home/x"),  # relative: no anchor
     ("posix-lowercase", "api/" + "users/42"),  # relative REST route
     ("windows", "C:" + "\\" + "Users" + "\\<name>\\x"),
