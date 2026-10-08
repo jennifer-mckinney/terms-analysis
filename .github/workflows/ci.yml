@@ -90,9 +90,13 @@ jobs:
             --cov=app \
             --cov-report=term-missing \
             --cov-fail-under=98 \
+            --cov-precision=2 \
             -v
-        # Gate: --cov-fail-under=98 above fails this step when total app
-        # coverage is below 98%.
+        # Floor: 98% (owner standard). --cov-precision=2 makes the exit-code
+        # gate compare at 2 decimals: with the default precision 0, pytest-cov
+        # rounds e.g. 97.58 up to 98 and exits 0 while printing FAIL (#177).
+        # src/backend/.coveragerc sets the same precision for local runs.
+        # Branch coverage is not gated yet (tracked under G3).
 
   evidence-scan:
     # Issue #91 P9 round 2 (security R2-F2(b), grumpy #4(b)): server-side

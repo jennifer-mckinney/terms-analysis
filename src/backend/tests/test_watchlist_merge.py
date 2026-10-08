@@ -255,3 +255,59 @@ def test_policy_watch_snapshot_returns_410_gone(app_client):
     body = response.json()
     assert body["successor"] == "/watchlist/{id}/refresh"
     assert response.headers.get("Deprecation") == "true"
+
+
+# ---------------------------------------------------------------------------
+# G0-6 (#177): cadence fallback when the item has no per-item frequency
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def global_refresh_seconds():
+    """Set ``settings.watchlist_refresh_seconds`` for one test, then restore it."""
+    from app.config import settings
+
+    original = settings.watchlist_refresh_seconds
+
+    def _set(value: int) -> None:
+        object.__setattr__(settings, "watchlist_refresh_seconds", value)
+
+    yield _set
+    object.__setattr__(settings, "watchlist_refresh_seconds", original)
+
+
+def test_item_without_cadence_inherits_global_refresh_interval(global_refresh_seconds):
+    from app.main import _compute_next_check_at, _effective_check_frequency
+
+    global_refresh_seconds(900)
+    last = datetime(2026, 1, 1, 12, 0, 0)  # naive, as SQLite returns it
+    item = WatchlistItem(vendor="v", check_frequency=None, enabled=True, last_checked=last)
+
+    assert _effective_check_frequency(item) == 900
+    assert _compute_next_check_at(item) == datetime(
+        2026, 1, 1, 12, 15, 0, tzinfo=timezone.utc
+    )
+
+
+def test_item_without_any_cadence_is_never_scheduled(global_refresh_seconds):
+    from app.main import _compute_next_check_at, _effective_check_frequency
+
+    global_refresh_seconds(0)
+    item = WatchlistItem(
+        vendor="v",
+        check_frequency=None,
+        enabled=True,
+        last_checked=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    assert _effective_check_frequency(item) == 0
+    assert _compute_next_check_at(item) is None
+
+
+def test_item_never_checked_has_no_next_check_time(global_refresh_seconds):
+    from app.main import _compute_next_check_at
+
+    global_refresh_seconds(0)
+    item = WatchlistItem(vendor="v", check_frequency=3600, enabled=True, last_checked=None)
+
+    assert _compute_next_check_at(item) is None
