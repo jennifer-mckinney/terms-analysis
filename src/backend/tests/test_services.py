@@ -920,6 +920,13 @@ class TestDetectLanguage:
         result = _detect_language("")
         assert result is None or isinstance(result, str)
 
+    def test_localai_detect_language_returns_none_without_langdetect(self, monkeypatch):
+        # G0-6 (#177): when langdetect is not installed, detection is disabled
+        # and must return None so routing falls back to the world model.
+        from app.services import localai
+        monkeypatch.setattr(localai, "_LANGDETECT_AVAILABLE", False)
+        assert localai._detect_language("Ceci est un texte en français.") is None
+
 
 class TestSelectModel:
     def test_localai_select_model_detection_disabled_returns_world(self):

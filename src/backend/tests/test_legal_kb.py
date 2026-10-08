@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
+import numpy as np
 import pytest
 
 import sys
@@ -312,3 +314,68 @@ def test_cli_main_rejects_invalid_action(monkeypatch):
 
     with pytest.raises(SystemExit):
         asyncio.run(_main())
+
+
+# --- G0-6 (#177): build() and _load() degraded paths -------------------------
+
+
+def test_build_returns_zero_and_writes_nothing_when_every_embedding_fails(
+    patched_paths, monkeypatch
+):
+    """An unreachable embedding endpoint must yield 0 chunks and no index files,
+    so the caller can tell "not built" apart from a successful build."""
+    corpus_dir, index_path, metadata_path = patched_paths
+    _write_corpus_file(
+        corpus_dir, "eu", "gdpr", "## Article 17 — Erasure\nErasure rights text.\n"
+    )
+
+    async def unreachable_embed(self, text, model=None):
+        return None
+
+    monkeypatch.setattr(LocalAIClient, "embed", unreachable_embed)
+    kb = LegalKnowledgeBase()
+    assert asyncio.run(kb.build(LocalAIClient())) == 0
+    assert kb.chunk_count == 0
+    assert not index_path.exists()
+    assert not metadata_path.exists()
+
+
+def test_build_skips_chunks_whose_embedding_is_a_zero_vector(patched_paths, monkeypatch):
+    """A zero vector cannot be L2-normalized; that chunk is dropped while the
+    others are still indexed and persisted."""
+    corpus_dir, _, metadata_path = patched_paths
+    _write_corpus_file(
+        corpus_dir,
+        "eu",
+        "gdpr",
+        "## Article 7 — Consent\nConsent text.\n\n## Article 99 — Misc\nOther text.\n",
+    )
+
+    async def partial_embed(self, text, model=None):
+        # "Misc" chunk gets an all-zero embedding; the consent chunk is valid.
+        return [0.0, 0.0, 0.0] if "Misc" in text else _toy_embed(text)
+
+    monkeypatch.setattr(LocalAIClient, "embed", partial_embed)
+    kb = LegalKnowledgeBase()
+    assert asyncio.run(kb.build(LocalAIClient())) == 1
+    persisted = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert [c["section"] for c in persisted] == ["Article 7 — Consent"]
+
+
+def test_load_rejects_index_whose_row_count_disagrees_with_metadata(
+    patched_paths, toy_client
+):
+    """A 2-row matrix next to 1 metadata entry is a stale/mixed bundle: _load()
+    must refuse it and retrieve() must return no context."""
+    _, index_path, metadata_path = patched_paths
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(index_path, np.eye(2, 3, dtype="float32"))
+    metadata_path.write_text(
+        json.dumps([{"text": "only one", "section": None, "jurisdiction": "EU"}]),
+        encoding="utf-8",
+    )
+
+    kb = LegalKnowledgeBase()
+    assert kb._load() is False
+    assert kb.chunk_count == 0
+    assert asyncio.run(kb.retrieve("erasure", toy_client)) == []

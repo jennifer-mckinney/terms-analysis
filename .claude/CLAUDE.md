@@ -53,7 +53,7 @@ rule: risk scores (0-10, higher=worse) map to grades: A (<3.5), A- (3.5-4.5), B 
 | `src/webapp/` | Streamlit UI: `app_streamlit_v2.py` (primary, issue #19) + `app_streamlit_legacy.py` (v1 rollback via `STREAMLIT_UI=v1`) |
 | `src/backend/app/` | FastAPI: `main.py` (25 endpoints + `/health`), `services/`, `schemas.py`, `models.py` |
 | `src/backend/app/services/` | Core: `rules.py`, `analyzer.py`, `validation.py`, `ingest.py`, `localai.py`, `embedding.py`, `legal_kb.py`, `diffing.py`, `prompts.py` |
-| `src/backend/tests/` | pytest suite (unit tests, 24 files, 828 tests, 98% coverage as of 2026-07-31) |
+| `src/backend/tests/` | pytest suite (unit tests, 25 files; measured 2026-10-07 on `feat/g0-6-coverage-precision`: 836 passed, 98.17% line coverage; branch coverage not gated yet, see G3) |
 | `tests/` | Root integration/E2E tests separate from unit tests in `src/backend/tests/`; 4 files: `test_api_endpoints.py`, `test_batch_analysis.py`, `test_child_context_simplification.py`, `test_quick_mode.py` |
 | `data/legal_corpus/` | Legal-KB source text (tracked; placeholder pending real statute ingestion — see `.claude/skills/legal-kb`) |
 | `src/backend/evaluation/` | Gold dataset + F1/Kappa scripts |
@@ -82,7 +82,7 @@ rule: active development branch is `claude/issue-19-arch-docs-followup`; prior b
 ## session-outcomes-2026-07-03
 
 ### SO1: PR34-shipped
-rule: PR #34 (`claude/issue-19-plain-language-redesign`) landed across 4 commits — `e4fd706` -> `2626e2b` -> `671d3e5` -> `b5ea947`; at merge time 873 tests / 98.06% coverage. Post-PR-#87 baseline (2026-07-31): **828 tests, 98% coverage** (2187 stmts, 53 missed, verified via `pytest --cov=app`)
+rule: PR #34 (`claude/issue-19-plain-language-redesign`) landed across 4 commits — `e4fd706` -> `2626e2b` -> `671d3e5` -> `b5ea947`; earlier figures (873 tests / 98.06% at PR #34 merge; 828 tests / "98%" on 2026-07-31) were rounded or unverified: that 2026-07-31 baseline measured 97.58% (2187 stmts, 53 missed) and passed only because the gate rounded at precision 0 (#177). Measured baseline (2026-10-07, `feat/g0-6-coverage-precision`, CI command with `--cov-precision=2`): **836 passed, 98.17% line coverage** (2187 stmts, 40 missed); branch coverage is not gated yet (G3)
 
 ### SO2: IRP-scoring-shipped
 rule: `impact`, `likelihood`, `safeguard_score`, `irp_score` fields live on `Finding`; was "planned" in prior LIB-ARCH text
