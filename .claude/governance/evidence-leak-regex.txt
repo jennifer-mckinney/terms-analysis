@@ -1,0 +1,93 @@
+# Single source of truth for the docs/evidence/ local-path leak patterns
+# (issue #91: P9 security F1 / R2-F3 / R3-F1 / R3-F2; grumpy rounds 2-5).
+#
+# Matched by scripts/governance/leak_scan.py, the ONE implementation used by
+# .githooks/pre-commit (check 4, staged blobs) and by
+# scripts/governance/scan-evidence-leaks.sh (CI: the checkout tip AND every
+# line added under docs/evidence/ by each commit in the PR / push range).
+#
+# Format: one pattern per line, "<name><TAB><python regex>". Comment lines
+# start with #. Patterns are written in LOWER CASE because they run against
+# NORMALISED text: each line is URL-decoded (%2F and %2f, up to 3 passes),
+# JSON/backslash-unescaped (\/ , \\ , \u002f, \x2f), backslash-folded to /
+# and case-folded BEFORE matching. Encoded or escaped spellings of a path
+# are therefore covered by the canonical pattern; do NOT add encoded
+# alternatives here (grumpy round 5, whack-a-mole rule).
+#
+# Every pattern ends on a REAL path segment: the prefix must be followed by a
+# name character (or, for the macOS temp root, a 2-character bucket and a
+# slash). Prose that quotes a pattern (prefix followed by |, ., ), ], `, [,
+# whitespace or <) does not match, and neither do scrubbed placeholders such
+# as <user>, <tmp>, <uid>, <hex>, <repo>, <projects>.
+#
+# Format, optional third column: "<name><TAB><regex><TAB><context>". The
+# context names a check in leak_scan.CONTEXTS that every regex hit must pass.
+#
+# home-root context "absolute-path" (#91 r7, replaces the r6 lookbehind,
+# which missed home roots under a parent segment): /users/<n> or /home/<n> is
+# a leak ANYWHERE inside a local absolute path, at any depth, e.g.
+# /System/Volumes/Data/Users/<n>, /Volumes/<vol>/Users/<n>, /host_mnt/Users/
+# <n>, /var/home/<n>, //wsl.localhost/<distro>/home/<n>, d:/backup/users/<n>,
+# file://localhost/Users/<n>. A path is absolute when, back to the nearest
+# hard delimiter (" ' ` ( ) [ ] { } < > = , ; | :) or line start, it has an
+# anchor: the start of a path token ("/", "~/", "./", "../", ".../", "$NAME/"
+# or "${NAME}/") not preceded by a path character. A bare "$", "~" or "."
+# (shell prompt, sentence end, ellipsis) is not an anchor (#91 r8). Spaces do
+# not end the path (a volume name may contain one), and a ":", "=" or ","
+# between two path characters does not end it either (host:8501/, a:b/,
+# run=1/, My,Drive/; #91 r8). The ONE exemption is an http(s) URL on a public
+# DNS host (dotted, alphabetic TLD, optional :port, not localhost and not a
+# special-use or private TLD such as .local, .internal, .lan, .home.arpa,
+# .corp, .test, .example; full list leak_scan._PRIVATE_TLDS), with only
+# unreserved segments before the hit, e.g. the GitHub Projects v2 board
+# github.com/users/<login>/projects/7, or example.com/en/home/<page>.
+# A relative path such as api/users/<id> has no anchor and is allowed.
+# Accepted residuals (owner rule leans toward blocking):
+#   * a bare REST path with a leading slash ("gh api /users/<login>");
+#   * a relative path that follows an absolute one in the same delimiter run
+#     ("cd /tmp && ls api/users/<id>");
+#   * OWNER RULING 2026-10-07 (#91 r8 F9, "Accept as residual"): a relative
+#     rendering of a home path with its leading "/" stripped, as tar, zip and
+#     rsync listings print it ("System/Volumes/Data/Users/<n>/x",
+#     "backup/home/<n>/.ssh", "mnt/c/Users/<n>", "Macintosh HD/Users/<n>").
+#     It has no anchor, so it is allowed; no rule or vector blocks it.
+#
+# Account names (#91 r8, security F8): the first name character may be a
+# non-ASCII byte (UTF-8 is matched byte-wise as latin-1), so /home/<n>,
+# C:\Users\<n>, pytest-of-<n> and -Users-<n> are caught for names such as
+# Emile with an accent or a Cyrillic profile name. The byte \xe2 is excluded
+# from that class: it starts U+2000-U+2FFF punctuation (the ellipsis in prose
+# "/Users/<ellipsis>") and, after case-folding, U+0080-U+00BF symbols.
+#
+# opaque-container (#91 r8, security F1): not a regex in this file. A line
+# that starts with a compressed or archived signature (zip / docx / xlsx,
+# gzip, bzip2, xz, zstd, 7z, PDF; table leak_scan.CONTAINER_SIGNATURES) is
+# refused as "opaque-container", because a path inside it cannot be read.
+# Commit evidence as plain text.
+#
+# dashed-home (#91 r7): a slug token starts with "-" (the path's leading "/")
+# that is not preceded by a name character, then any number of "<seg>-"
+# segments before users- or home-, so -System-Volumes-Data-Users-<n>,
+# -var-home-<n>, C--Users-<n> and projects/-Users-<n> are blocked while
+# hyphenated prose (end-users-rights, nav-users-x) is not.
+#
+# Every pattern MUST have at least one block and one allow vector in
+# .claude/governance/leak-vectors.tsv (contract test:
+# src/backend/tests/test_leak_scan_vectors.py).
+#
+# home-root      /Users/<name>, /home/<name> inside a local absolute path
+#                (any depth; also C:/Users/<name>, C:\Users\<name>)
+# macos-temp     /var/folders/<2-char bucket>/ (also under /private)
+# pytest-tmp     pytest-of-<name>
+# dashed-home    -Users-<name>, -home-<name> (Claude Code project-slug form)
+# claude-tmp     /tmp/claude-<uid> (also under /private)
+# home-private   ~/, $HOME/ or ${HOME}/ followed by a standard macOS home
+#                folder and a slash (a bare ~/.claude/... stays allowed)
+# agent-worktree .claude/worktrees/agent-<hex>
+home-root	/(?:users|home)/[a-z0-9_\x80-\xe1\xe3-\xff-]	absolute-path
+macos-temp	/var/folders/[a-z0-9_+-]{2}/
+pytest-tmp	pytest-of-[a-z0-9_\x80-\xe1\xe3-\xff]
+dashed-home	(?<![a-z0-9_])-(?:[a-z0-9_]+-)*(?:users|home)-[a-z0-9_\x80-\xe1\xe3-\xff]
+claude-tmp	/tmp/claude-[0-9]
+home-private	(?:~|\$home|\$\{home\})/(?:applications|desktop|developer|documents|downloads|library|movies|music|pictures|public|sites)/
+agent-worktree	\.claude/worktrees/agent-[0-9a-f]
