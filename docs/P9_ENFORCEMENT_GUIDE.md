@@ -2,7 +2,7 @@
 
 Implementation of **LIB-PRINCIPLES P9: pre-push-independent-review** for terms-analysis project.
 
-> See `automations/p9-pre-push.md` for the current signoff-based gate reference. The prior interactive-checklist reminder hook has been retired; the authoritative local gate is now `.githooks/pre-push`, which validates a signoff file at `.git/reviews/<HEAD_SHA>.signoff.json`.
+> See `automations/p9-pre-push.md` for the current signoff-based gate reference. The prior interactive-checklist reminder hook has been retired; the local gate is now `.githooks/pre-push`, which requires a valid signoff file at `$(git rev-parse --git-common-dir)/reviews/<sha>.signoff.json` for the commit at the tip of every pushed ref, and refuses a push that would publish any commit outside the signoff's reviewed range (`range.base..tip`). The signoff lives in the shared common git dir, so the main checkout and every `git worktree` use the same location. The local gate guards against honest mistakes; GitHub branch protection on `main` is the enforcing control (see "Limits" under Layer 1).
 
 ## What is P9?
 
@@ -18,22 +18,19 @@ P9 mandates that before ANY push to main, two independent agents must review the
    - Swallowed errors, dead code, brittle assumptions
    - Missed edge cases, tautological tests
    - Dispatch-boundary artifacts from multi-agent sessions
-   - **Policy**: CRITICAL/HIGH must be fixed; MEDIUM/LOW/NIT can be follow-up issues
+   - **Policy**: ALL findings (CRITICAL → NIT) must be fixed (zero-tolerance, `.claude/CLAUDE.md` G3 and SO11, owner directive 2026-07-04)
 
 ## Enforcement Layers
 
-### Layer 1: Local Hard Gate (`.githooks/pre-push`)
+### Layer 1: Local gate (`.githooks/pre-push`)
 
-**Triggers**: `git push` (any remote, any ref); runs locally before the transport step, so nothing leaves the machine until the gate passes.
+**Triggers**: `git push` (any remote, any ref); runs locally before the transport step and checks every ref git is about to push.
 
-**Behavior**:
-- Reads current `HEAD` SHA via `git rev-parse HEAD`.
-- Looks for `.git/reviews/<HEAD_SHA>.signoff.json`.
-- If the signoff is missing, malformed, or the `head_sha` field does not match, the push is refused.
-- If both `security_engineer.verdict` and `grumpy_developer.verdict` are `PASS` (or `override.used == true`), the hook exits 0.
-- Override signoffs print the reason and authorizer to stderr and remain auditable via `.git/reviews/`.
+**Behavior**: the enforced contract (per-ref signoff, zero-tolerance findings for both reviewers, reviewed-range check, override, deletions, the nothing-to-push case) is stated once, in the "Enforced contract" section of `automations/p9-pre-push.md`, which a test keeps word-for-word equal to the hook header. It is not restated here.
 
-**Usage**: Automatic on `git push`. To satisfy the gate, ask the orchestrator to run the P9 review pair; the review agents write the signoff file to `.git/reviews/<HEAD_SHA>.signoff.json`.
+**Usage**: Automatic on `git push`. To satisfy the gate, ask the orchestrator to run the P9 review pair; the review agents write the signoff file to `$(git rev-parse --git-common-dir)/reviews/<sha>.signoff.json`.
+
+**Limits**: the hook is client-side. `git push --no-verify`, `git -c core.hooksPath=... push`, a commit that edits `.githooks/pre-push`, or a hand-written signoff all bypass it. `main` is branch-protected on GitHub (PR required, required checks, `enforce_admins`), which is what actually blocks a direct push. A required CI check that verifies a committed signoff for the PR head is not in place yet. Full list: `automations/p9-pre-push.md`, "Limits and server-side enforcement".
 
 **Authoritative reference**: `automations/p9-pre-push.md` documents the signoff schema, verdict rules, override path, and failure modes. That doc is the source of truth; this section is a pointer.
 
@@ -70,7 +67,7 @@ P9 mandates that before ANY push to main, two independent agents must review the
    ## P9 Reviews
 
    ✅ security-engineer: approved (no findings)
-   ✅ grumpy-developer: approved (found 3 items: 1 HIGH resolved, 2 MEDIUM filed as follow-ups)
+   ✅ grumpy-developer: approved (found 3 items: 1 HIGH, 2 MEDIUM, all resolved)
 
    ### Security Review Summary
    - No auth/secret/input validation issues
@@ -78,8 +75,8 @@ P9 mandates that before ANY push to main, two independent agents must review the
    
    ### Code Quality Review Summary
    - [RESOLVED] HIGH: error swallowing in `utils.py::parse_date()` — fixed with try/except + logging
-   - [FOLLOW-UP] MEDIUM: brittle assumption in `models.py` line 42 (assumes non-null role)
-   - [FOLLOW-UP] MEDIUM: dead code in `services.py` — `legacy_analyzer()` not called anywhere
+   - [RESOLVED] MEDIUM: brittle assumption in `models.py` line 42 (assumes non-null role) — null role now handled
+   - [RESOLVED] MEDIUM: dead code in `services.py` — `legacy_analyzer()` removed
    ```
 
 5. **Push to main** after reviews are documented and GitHub Actions passes
@@ -114,7 +111,7 @@ git config --get core.hooksPath
 # Expected: .githooks
 ```
 
-The installer (`bash scripts/install-hooks.sh`) is idempotent and sets this automatically. To verify the hard gate is in place:
+The installer (`bash scripts/install-hooks.sh`) is idempotent and sets this automatically. It works from the main checkout or any worktree, replaces any other value (for example an absolute `<repo>/.git/hooks`, which disables the gate) with a stderr notice naming the old value, fails if a higher-precedence scope still shadows it, and creates `<git-common-dir>/reviews/`. To verify the local gate is in place:
 
 ```bash
 # Confirm hooks path is wired
@@ -124,7 +121,7 @@ git config --get core.hooksPath          # expected: .githooks
 test -x .githooks/pre-push && echo "hook installed"
 
 # Confirm the signoff directory exists
-ls -d .git/reviews                       # expected: directory exists
+ls -d "$(git rev-parse --path-format=absolute --git-common-dir)/reviews"   # expected: directory exists
 ```
 
 To smoke-test the refuse path without actually pushing:
@@ -133,7 +130,7 @@ To smoke-test the refuse path without actually pushing:
 git push --dry-run
 ```
 
-With no signoff present the hook prints a "signoff not found" diagnostic and exits 1; nothing leaves the machine.
+With no signoff present the hook prints a "signoff not found" diagnostic and exits 1; nothing leaves the machine. If the remote is already up to date, the hook prints "nothing to push" and exits 0.
 
 ## CI/CD Enforcement Details
 
@@ -175,10 +172,14 @@ git config core.hooksPath
 # Should output: .githooks
 ```
 
-**If not set, configure manually**:
+**If not set, or set to an absolute `.git/hooks` path, re-run the installer** (it replaces the value and reports what it replaced):
 ```bash
-git config core.hooksPath .githooks
+bash scripts/install-hooks.sh
 ```
+
+### "Push refused from a worktree even though I have a signoff"
+
+The signoff must be in the common git dir, not in the worktree's own git dir (`.git/worktrees/<name>/`). The refusal's "Expected signoff:" line prints the exact absolute path; move the file there.
 
 ### "GitHub Actions workflow not triggering"
 
@@ -217,7 +218,7 @@ Refactored policy analyzer to use async/await pattern for I/O
 ## P9 Reviews
 
 ✅ security-engineer: approved (no findings)
-✅ grumpy-developer: approved (no blocking findings)
+✅ grumpy-developer: approved (no findings)
 
 ### Security Engineer Review
 - Reviewed async/await pattern for race conditions: none found
@@ -241,7 +242,7 @@ Added new GDPR jurisdiction to analyzer
 ## P9 Reviews
 
 ✅ security-engineer: approved (found 1 CRITICAL, resolved)
-✅ grumpy-developer: approved (found 2 items: 1 HIGH resolved, 1 MEDIUM follow-up)
+✅ grumpy-developer: approved (found 2 items: 1 HIGH, 1 MEDIUM, both resolved)
 
 ### Security Engineer Review
 - [CRITICAL] SQL injection in jurisdiction filter → RESOLVED: added parameterized query in commit c3f4e5d
@@ -249,7 +250,7 @@ Added new GDPR jurisdiction to analyzer
 
 ### Grumpy Developer Review
 - [HIGH] Hard-coded language assumptions in GDPR rules → RESOLVED: now reads from config
-- [MEDIUM] Test for GDPR jurisdiction doesn't cover mixed-language cases → Filed as #412 (follow-up)
+- [MEDIUM] Test for GDPR jurisdiction doesn't cover mixed-language cases → RESOLVED: mixed-language cases added in commit d4e5f6a
 ```
 
 ## See Also
