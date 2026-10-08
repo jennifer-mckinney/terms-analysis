@@ -50,6 +50,11 @@ jobs:
             pytest-cov \
             respx
 
+      # Install the tracked P9 hooks (core.hooksPath) so the real-checkout gate
+      # test runs against them instead of failing under CI (terms-analysis#175).
+      - name: Install tracked git hooks
+        run: bash scripts/install-hooks.sh
+
       # Cross-repo P9 parity (terms-analysis#175, Copilot C3): compare the
       # shared P9 files with the sibling's branch of the same name when it
       # exists, else main, at that branch's commit sha (immutable).
