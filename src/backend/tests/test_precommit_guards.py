@@ -184,7 +184,7 @@ BLOCK_ROWS = [
         for prefix in ("PATH=:", "PATH=/a::", "PATH=.:", "PATH=bin:")
     ],
     ("posix-home", '"bin:' + home("Users", "bob", "") + '"'),  # quoted list item
-    # owner: over-block accepted; word:/home/... is list-shaped (was an allow row).
+    # owner: over-block accepted; word:/<home>/... is list-shaped (was an allow row).
     ("posix-home", "profile:/" + "Users" + "/x"),
     ("posix-home", "/" + "Users" + "/\u200balice/x"),  # Cf right after the slash
     ("posix-home", "/" + "Us\u200bers" + "/alice/x"),  # Cf inside the root
