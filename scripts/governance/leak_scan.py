@@ -47,7 +47,6 @@ from __future__ import annotations
 
 import re
 import sys
-import unicodedata
 from pathlib import Path
 from bisect import bisect_right
 from typing import BinaryIO, Callable, Dict, List, Optional, Sequence, Tuple
@@ -181,14 +180,19 @@ def load_patterns(path: Path) -> List[Pattern]:
     """Parse the pattern SSoT. Raises ValueError on any malformed line."""
     patterns: List[Pattern] = []
     seen = set()
-    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        # #192 fix r1: a Unicode format (Cf) character anywhere on a line (BOM,
-        # zero-width, bidi, tag) can glue itself to a column and silently
-        # disable a pattern. Refuse the file; name the code point, never echo it.
+    # #192 fix r2: split on "\n" only (splitlines() also splits on U+2028, VT,
+    # FF, NEL...). A trailing "\r" is stripped so CRLF files still load.
+    for number, raw in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
+        if raw.endswith("\r"):
+            raw = raw[:-1]
+        # Structural allowlist: only TAB and printable ASCII (0x20-0x7E) on every
+        # line, comments included. Anything else (format, control, bidi,
+        # non-ASCII) can glue to a column or hide a pattern. Fail closed; name
+        # the code point, never echo the raw character.
         for char in raw:
-            if unicodedata.category(char) == "Cf":
+            if char != "\t" and not (0x20 <= ord(char) <= 0x7E):
                 raise ValueError(
-                    f"{path}:{number}: format character U+{ord(char):04X} is not allowed in the pattern file"
+                    f"{path}:{number}: character U+{ord(char):04X} is not allowed in the pattern file"
                 )
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue
