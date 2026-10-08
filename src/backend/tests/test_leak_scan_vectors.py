@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import unicodedata
 from pathlib import Path
 from types import ModuleType
 from typing import Dict, List, NamedTuple
@@ -1258,79 +1259,141 @@ def test_scanner_bom_pattern_file_fails_self_test(tmp_path: Path) -> None:
     assert "(matcher exit 2)" in result.stderr
 
 
-# #192 fix r1 (grumpy MEDIUM, lead ruling): a BOM or any other Cf (format)
-# character ANYWHERE in a pattern line must fail the loader closed. Today only
-# a byte-0 BOM is refused; a BOM glued to the start of a regex column is
-# accepted and silently disables that one pattern (probe: home-root mutated,
-# stdin "/Users/someone/x" scanned CLEAN, exit 1).
-_CF_CHARS = {
-    "bom": "\ufeff",
-    "zwsp": "\u200b",
-    "lrm": "\u200e",
-    "word-joiner": "\u2060",
-    "soft-hyphen": "\u00ad",
-    "rlo": "\u202e",
-    "tag-a": "\U000e0041",
+# #192 fix r2 (lead ruling, grumpy r2 LOW 1/2 + security N1): the loader accepts
+# ONLY printable ASCII (0x20-0x7E) plus TAB on every line (patterns, names and
+# comments alike). Any other code point fails closed (exit 2); the message names
+# the line and the literal "U+XXXX" and never echoes the character. The old
+# Cf-only deny-list missed NBSP, U+3000, U+3164, combining marks, private-use
+# and unassigned code points, DEL, NUL and the C0 controls (probe: a regex
+# column starting with U+00A0 loads and silently disables the pattern).
+# label -> (character, literal token expected in the message). The token is a
+# literal on purpose: it must not be derived from ord() by the test.
+_BAD_CHARS = {
+    # Cf (the r1 set; already red-then-green, kept as regression)
+    "bom": ("\ufeff", "U+FEFF"),
+    "zwsp": ("\u200b", "U+200B"),
+    "lrm": ("\u200e", "U+200E"),
+    "word-joiner": ("\u2060", "U+2060"),
+    "soft-hyphen": ("\u00ad", "U+00AD"),
+    "rlo": ("\u202e", "U+202E"),
+    "tag-a": ("\U000e0041", "U+E0041"),
+    # not Cf: red today
+    "del": ("\x7f", "U+007F"),
+    "nul": ("\x00", "U+0000"),
+    "c0-soh": ("\x01", "U+0001"),
+    "c0-esc": ("\x1b", "U+001B"),
+    "c0-vt": ("\x0b", "U+000B"),
+    "c0-ff": ("\x0c", "U+000C"),
+    "c0-fs": ("\x1c", "U+001C"),
+    "c1-nel": ("\x85", "U+0085"),
+    "line-sep": ("\u2028", "U+2028"),
+    "nbsp": ("\u00a0", "U+00A0"),
+    "ideographic-space": ("\u3000", "U+3000"),
+    "combining-acute": ("\u0301", "U+0301"),
+    "private-use": ("\ue000", "U+E000"),
+    "unassigned": ("\u0378", "U+0378"),
+    "hangul-filler": ("\u3164", "U+3164"),
+    "e-acute": ("\u00e9", "U+00E9"),
 }
-# Column positions inside the first real pattern line (name TAB regex TAB context).
-_CF_POSITIONS = ("name-start", "regex-start", "regex-middle", "context-start")
+# Positions inside the first real pattern line (name TAB regex TAB context),
+# plus a comment line inserted above it.
+_BAD_POSITIONS = ("name", "regex-start", "regex-middle", "regex-end", "comment")
 
 
-def _cf_pattern_bytes(position: str, char: str) -> "tuple[bytes, int]":
+def _bad_pattern_bytes(position: str, char: str) -> "tuple[bytes, int]":
     text = _PATTERNS.read_text(encoding="utf-8").split("\n")
     index = next(i for i, ln in enumerate(text) if ln.strip() and not ln.lstrip().startswith("#"))
-    name, regex, context = text[index].split("\t")
-    if position == "name-start":
-        name = char + name
+    if position == "comment":
+        text.insert(index, "# plain note " + char + " tail")
+        return "\n".join(text).encode("utf-8"), index + 1
+    cols = text[index].split("\t")
+    name, regex = cols[0], cols[1]
+    if position == "name":
+        cols[0] = name[:1] + char + name[1:]
     elif position == "regex-start":
-        regex = char + regex
+        cols[1] = char + regex
     elif position == "regex-middle":
-        regex = regex[: len(regex) // 2] + char + regex[len(regex) // 2 :]
+        cols[1] = regex[: len(regex) // 2] + char + regex[len(regex) // 2 :]
     else:
-        context = char + context
-    text[index] = "\t".join((name, regex, context))
+        cols[1] = regex + char
+    text[index] = "\t".join(cols)
     return "\n".join(text).encode("utf-8"), index + 1
 
 
-@pytest.mark.parametrize("position", _CF_POSITIONS)
-@pytest.mark.parametrize("label", sorted(_CF_CHARS))
-def test_cli_cf_char_anywhere_in_pattern_line_is_a_config_error(tmp_path: Path, label: str, position: str) -> None:
-    char = _CF_CHARS[label]
-    data, line_no = _cf_pattern_bytes(position, char)
-    cfg = tmp_path / "patterns-cf.txt"
+def test_bad_char_table_has_the_required_classes() -> None:
+    cats = {unicodedata.category(c) for c, _ in _BAD_CHARS.values()}
+    assert {"Cf", "Cc", "Zs", "Zl", "Mn", "Co", "Cn", "Lo", "Ll"} <= cats
+    for char, token in _BAD_CHARS.values():
+        assert token == f"U+{ord(char):04X}"  # table self-check only
+
+
+@pytest.mark.parametrize("position", _BAD_POSITIONS)
+@pytest.mark.parametrize("label", sorted(_BAD_CHARS))
+def test_cli_non_ascii_or_control_char_in_pattern_file_is_a_config_error(
+    tmp_path: Path, label: str, position: str
+) -> None:
+    char, token = _BAD_CHARS[label]
+    data, line_no = _bad_pattern_bytes(position, char)
+    cfg = tmp_path / "patterns-bad.txt"
     cfg.write_bytes(data)
     # Input the unmutated home-root pattern flags; a silent accept scans CLEAN.
     result = _cli(str(cfg), stdin=b"/Users/someone/x\n")
     assert result.returncode == 2, (result.returncode, result.stdout)
     assert result.stdout == b""
-    err = result.stderr.decode()
+    err = result.stderr.decode("utf-8", "replace")
     assert f":{line_no}:" in err
-    # Message honesty and output safety: name the code point, never echo it raw.
-    assert f"U+{ord(char):04X}" in err
-    assert char not in err
+    # Message honesty and output safety: the literal code point, never the raw char.
+    assert token in err
+    assert char.encode("utf-8") not in result.stderr
 
 
-@pytest.mark.parametrize("position", ("regex-start", "regex-middle"))
-@pytest.mark.parametrize("label", ("bom", "zwsp"))
-def test_precommit_cf_char_in_pattern_line_fails_closed(tmp_path: Path, label: str, position: str) -> None:
+@pytest.mark.parametrize("position", ("regex-start", "comment"))
+@pytest.mark.parametrize("label", ("bom", "nbsp", "del", "private-use"))
+def test_precommit_bad_char_in_pattern_file_fails_closed(tmp_path: Path, label: str, position: str) -> None:
     root = _hook_repo(tmp_path)
-    data, _ = _cf_pattern_bytes(position, _CF_CHARS[label])
+    data, _ = _bad_pattern_bytes(position, _BAD_CHARS[label][0])
     (root / ".claude" / "governance" / "evidence-leak-regex.txt").write_bytes(data)
     result = _stage_and_hook(root, {"docs/evidence/a.txt": b"clean\n"})
     assert result.returncode == 1
     assert "evidence path scan failed for docs/evidence/a.txt (matcher exit 2" in result.stderr
 
 
-@pytest.mark.parametrize("position", ("regex-start", "regex-middle"))
-@pytest.mark.parametrize("label", ("bom", "zwsp"))
-def test_scanner_cf_char_in_pattern_line_fails_self_test(tmp_path: Path, label: str, position: str) -> None:
+@pytest.mark.parametrize("position", ("regex-start", "comment"))
+@pytest.mark.parametrize("label", ("bom", "nbsp", "del", "private-use"))
+def test_scanner_bad_char_in_pattern_file_fails_self_test(tmp_path: Path, label: str, position: str) -> None:
     root = _checkout(tmp_path, {"docs/evidence/a.txt": b"clean\n"})
-    data, _ = _cf_pattern_bytes(position, _CF_CHARS[label])
+    data, _ = _bad_pattern_bytes(position, _BAD_CHARS[label][0])
     (root / ".claude" / "governance" / "evidence-leak-regex.txt").write_bytes(data)
     result = subprocess.run(["bash", str(_SCANNER), str(root)], capture_output=True, text=True)
     assert result.returncode == 2
     assert "invalid pattern SSoT" in result.stderr
     assert "(matcher exit 2)" in result.stderr
+
+
+def test_cli_tag_a_and_nbsp_messages_carry_the_literal_code_point(tmp_path: Path) -> None:
+    # Grumpy r2 LOW 2: literal strings, not a formatted ord().
+    for char, literal in (("\U000e0041", "U+E0041"), ("\u00a0", "U+00A0")):
+        data, _ = _bad_pattern_bytes("regex-start", char)
+        cfg = tmp_path / "p.txt"
+        cfg.write_bytes(data)
+        err = _cli(str(cfg), stdin=b"x\n").stderr.decode("utf-8", "replace")
+        assert literal in err
+
+
+def test_cli_printable_ascii_comment_and_tab_columns_still_load(tmp_path: Path) -> None:
+    # Positive control: the full printable range 0x20-0x7E in a comment, and the
+    # TAB-separated shipped lines, stay accepted and behave like the original.
+    printable = "".join(chr(c) for c in range(0x20, 0x7F))
+    text = _PATTERNS.read_text(encoding="utf-8").split("\n")
+    index = next(i for i, ln in enumerate(text) if ln.strip() and not ln.lstrip().startswith("#"))
+    text.insert(index, "# " + printable)
+    cfg = tmp_path / "patterns-ok.txt"
+    cfg.write_bytes("\n".join(text).encode("utf-8"))
+    stdin = b"/Users/someone/x\n"
+    mutated = _cli(str(cfg), stdin=stdin)
+    original = _cli(str(_PATTERNS), stdin=stdin)
+    assert mutated.returncode == original.returncode == 0, (mutated.stderr, original.stderr)
+    assert mutated.stdout == original.stdout != b""
 
 
 # #192 fix r1 (security F1, scoped to the evidence-scan job; repo-wide pinning
