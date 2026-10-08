@@ -28,6 +28,7 @@ EXIT_REJECTED = 1
 EXIT_INVALID = 2
 
 VERDICTS = frozenset({"PASS", "FAIL"})
+DOC_FIELDS = ("verdict", "findings")
 FINDING_FIELDS = ("severity", "title", "file", "line")
 # Finding text comes from a model that read untrusted PR content; it is shown
 # in the Actions log one finding per line, so each field is cut to this size.
@@ -64,13 +65,16 @@ def load(path: Path) -> dict[str, object]:
         raise
     except (OSError, UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise InvalidVerdict(f"{path.name} is not valid JSON ({type(exc).__name__})") from None
-    verdict = doc.get("verdict") if isinstance(doc, dict) else None
-    findings = doc.get("findings") if isinstance(doc, dict) else None
+    # Exact key sets: the document and every finding carry the contract keys
+    # and nothing else, so an unknown or missing key fails closed.
+    is_doc = isinstance(doc, dict) and set(doc) == set(DOC_FIELDS)
+    verdict = doc.get("verdict") if is_doc else None
+    findings = doc.get("findings") if is_doc else None
     if (
         not isinstance(verdict, str)
         or verdict not in VERDICTS
         or not isinstance(findings, list)
-        or not all(isinstance(item, dict) for item in findings)
+        or not all(isinstance(item, dict) and set(item) == set(FINDING_FIELDS) for item in findings)
     ):
         raise InvalidVerdict(
             f"{path.name} does not match the verdict contract "

@@ -4,7 +4,8 @@ name: P9 Review
 # Two Claude reviewers run on every pull request to main. Each one posts a
 # summary comment on the PR and writes p9-verdict.json; the job fails unless
 # the verdict is PASS with zero findings (.github/p9/check_verdict.py).
-# Branch protection on main requires both jobs: security-review, grumpy-review.
+# Branch protection is pending: after the first green run the owner makes both
+# jobs (security-review, grumpy-review) required checks on main.
 #
 # Auth: the ANTHROPIC_API_KEY repo secret. Fork PRs receive no secrets, so the
 # review step fails and the job fails closed.
