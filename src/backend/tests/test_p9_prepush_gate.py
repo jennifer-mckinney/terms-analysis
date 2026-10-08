@@ -60,7 +60,7 @@ def _run(args: list[str], cwd: Path, env: dict[str, str]) -> subprocess.Complete
     assert real_cwd == Path(root) or Path(root) in real_cwd.parents, (
         f"refusing to run {args[0]} in {real_cwd}: outside sandbox {root}"
     )
-    return subprocess.run(args, cwd=cwd, env=env, capture_output=True, text=True, timeout=60)
+    return subprocess.run(args, cwd=cwd, env=env, capture_output=True, text=True, timeout=60, check=False)
 
 
 def _git(cwd: Path, env: dict[str, str], *args: str) -> str:
@@ -564,6 +564,7 @@ def _tracked_mode(rel: str) -> str:
         capture_output=True,
         text=True,
         timeout=30,
+        check=False,  # callers inspect returncode themselves
         env={
             **{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
             "GIT_TERMINAL_PROMPT": "0",
