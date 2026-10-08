@@ -50,26 +50,27 @@ jobs:
             pytest-cov \
             respx
 
-      # Cross-repo P9 hook parity (terms-analysis#175, Copilot C3): compare
-      # against the sibling's branch of the same name when it exists, else main.
+      # Cross-repo P9 parity (terms-analysis#175, Copilot C3): compare the
+      # shared P9 files with the sibling's branch of the same name when it
+      # exists, else main, at that branch's commit sha (immutable).
       - name: Resolve sibling ref for P9 hook parity
         id: p9_sibling
         env:
           HEAD_REF: ${{ github.head_ref }}
         run: |
-          ref="$(bash scripts/ci/p9-sibling-parity.sh resolve-ref jennifer-mckinney/legal-corpus-ingester "${HEAD_REF}")"
-          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          resolved="$(bash scripts/ci/p9-sibling-parity.sh resolve-ref jennifer-mckinney/legal-corpus-ingester "${HEAD_REF}")"
+          printf '%s\n' "${resolved}" >> "$GITHUB_OUTPUT"
 
       - name: P9 hook parity with legal-corpus-ingester (must run, never skip)
         working-directory: src/backend
         env:
-          P9_SIBLING_REF: ${{ steps.p9_sibling.outputs.ref }}
-        run: bash ../../scripts/ci/p9-sibling-parity.sh check tests/test_p9_gate_copilot.py::test_pre_push_hook_matches_the_sibling_repos_published_hook
+          P9_SIBLING_SHA: ${{ steps.p9_sibling.outputs.sha }}
+        run: bash ../../scripts/ci/p9-sibling-parity.sh check tests/test_p9_gate_r5.py::test_p9_shared_files_match_the_sibling_at_the_resolved_sha
 
       - name: Run test suite with coverage
         working-directory: src/backend
         env:
-          P9_SIBLING_REF: ${{ steps.p9_sibling.outputs.ref }}
+          P9_SIBLING_SHA: ${{ steps.p9_sibling.outputs.sha }}
         run: |
           python -m pytest \
             --cov=app \
