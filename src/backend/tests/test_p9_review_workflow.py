@@ -169,6 +169,7 @@ def test_gate_fails_closed_on_unparseable_file(tmp_path: Path, content: str | by
         pytest.param({"verdict": "PASS​", "findings": []}, id="verdict-zero-width"),
         pytest.param({"verdict": True, "findings": []}, id="verdict-bool"),
         pytest.param({"verdict": None, "findings": []}, id="verdict-null"),
+        pytest.param({"verdict": ["PASS"], "findings": []}, id="verdict-list-unhashable"),
         pytest.param({"verdict": "APPROVED", "findings": []}, id="verdict-unknown"),
         pytest.param({"verdict": "PASS"}, id="findings-missing"),
         pytest.param({"verdict": "PASS", "findings": None}, id="findings-null"),

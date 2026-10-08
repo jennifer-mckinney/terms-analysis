@@ -133,8 +133,8 @@ xref: [[.claude/rules/testing.md]]
 ## session-outcomes-2026-07-04
 
 ### SO11: p9-loop-pattern-active
-rule: every push runs the parallel security+grumpy review loop. ANY finding of ANY severity triggers a fix-Coder dispatch; iterate to fixed-point (both PASS zero findings) before writing signoff and pushing
-codified: `.git/reviews/<sha>.signoff.json` schema in `automations/p9-pre-push.md`; hook validates signoff before allowing push
+rule: every PR to `main` runs the parallel security+grumpy review loop. ANY finding of ANY severity triggers a fix-Coder dispatch; iterate to fixed-point (both PASS zero findings) before the PR is ready to merge
+codified: since 2026-10-09 (#191) the loop runs in CI: `.github/workflows/p9-review.yml` jobs `security-review` + `grumpy-review`, verdict contract in `automations/p9-pre-push.md`
 because: user directive 2026-07-04 extends P9 zero-tolerance-security to zero-tolerance-grumpy
 whack-a-mole warning: when name-based deny-lists keep growing across rounds, switch to structural fix (pattern-based rules, schema-driven ordering, input normalization). Two structural-fix wins this session:
   - SO12 F2 (chip order): switched `_ACTION_ITEMS_BY_CHIP.items()` → `typing.get_args(ContextChip)`
@@ -147,13 +147,12 @@ commits: `569260b` (st.form intake), `a4b4c66` (chip-tune action_items), `f1d8ca
 detail: `/infer` handler verified to ignore context arg (main.py:340-349, inference.py:535) — arg dropped from call_infer signature + docstring explains why
 xref: [[automations/p9-pre-push.md]] [[SO11]]
 
-### SO13: p9-hard-gate-mirrored
-rule: `.githooks/pre-push` is the P9 hard-gate (mirrored from legal-corpus-ingester at commit `3fb017e`). Refuses push unless `.git/reviews/<HEAD_SHA>.signoff.json` exists with security_engineer.verdict=PASS + grumpy_developer.verdict=PASS (or override.used=true with reason + authorized_by)
-existing: `.githooks/pre-commit` unchanged (project-specific gitignore-SSoT + graveyard + case-insensitive .env guards)
-deleted: `.githooks/pre-push-p9-check` (dormant interactive checklist superseded by the hard gate)
-replaced: `scripts/install-hooks.sh` — was stale copy-based, now `core.hooksPath`-based (idempotent glob-chmod + `.git/reviews/` ensure)
-docs: `automations/p9-pre-push.md` + `docs/P9_ENFORCEMENT_GUIDE.md` (both updated 2026-07-04)
-classifier friction: subagent + Write both blocked when writing signoff files. Workaround: hand user a paste-block containing mkdir + cat heredoc + git push
+### SO13: p9-gate-in-ci
+rule: P9 is enforced in CI (2026-10-09, #191, superseding the 2026-07-04 local hook). `.github/workflows/p9-review.yml` runs `security-review` + `grumpy-review` on `pull_request` to `main`; each job runs `anthropics/claude-code-action` (SHA-pinned) with its brief from `.github/p9/`, posts one PR summary comment, writes `p9-verdict.json`, and fails unless `.github/p9/check_verdict.py` sees verdict PASS with `findings: []`. Branch protection on `main` requires both jobs
+retired: `.githooks/pre-push` + its `.sha256` pin, `.git/reviews/<sha>.signoff.json` signoffs, `.github/workflows/enforce-p9-review.yml`, `scripts/ci/p9-sibling-parity.sh` and the #175 hook-only test suites
+existing: `.githooks/pre-commit` unchanged (project-specific gitignore-SSoT + graveyard + case-insensitive .env guards); `scripts/install-hooks.sh` still sets `core.hooksPath=.githooks` for it
+owner_steps: add the `ANTHROPIC_API_KEY` repo secret; after the first green run, require `security-review` + `grumpy-review` in branch protection
+docs: `automations/p9-pre-push.md` + `docs/P9_ENFORCEMENT_GUIDE.md` + `docs/DEV_SETUP.md` (updated 2026-10-09)
 xref: [[SO11]]
 
 ### SO14: sibling-project-legal-corpus-ingester
@@ -192,7 +191,7 @@ Access via `@.claude/library/<file>` when deeper context is needed.
 | **LIB-EVAL** | `@.claude/library/LIB-EVAL.md` | Rubric, F1/Kappa, grading thresholds |
 | **LIB-CONTEXT** | `@.claude/library/LIB-CONTEXT.md` | Context chip taxonomy, weight tiers, sort semantics, verdict copy |
 | **LIB-VOICE** | `@.claude/library/LIB-VOICE.md` | Two-voice copy, no-em-dash, scope-honesty gap |
-| **LIB-PRINCIPLES** | `@.claude/library/LIB-PRINCIPLES.md` | Governance principles P1-P9 (P8 agent-separation, P9 pre-push review) |
+| **LIB-PRINCIPLES** | `@.claude/library/LIB-PRINCIPLES.md` | Governance principles P1-P9 (P8 agent-separation, P9 PR review in CI) |
 
 ## governance-monitoring
 
@@ -214,10 +213,10 @@ regen_policy: only after intentional governance-file change reviewed via PR
 because: catches silent governance drift between sessions
 xref: [[LIB-PRINCIPLES#P8]]
 
-### G3: pre-push-independent-review
-rule: enforce LIB-PRINCIPLES P9 — dispatch security-engineer + grumpy-developer before any push. Zero-tolerance for BOTH per 2026-07-04 user directive: ANY finding of ANY severity triggers a fix-Coder + re-review loop until both PASS
-automation: `.githooks/pre-push` hard-gate refuses push without `.git/reviews/<sha>.signoff.json` (see [[SO11]] [[SO13]])
-gate: ANY finding of ANY severity blocks push until resolved or user-overridden via `override.used=true` with reason + authorized_by
+### G3: pr-independent-review
+rule: enforce LIB-PRINCIPLES P9 — every PR to `main` gets security-engineer + grumpy-developer reviews in CI. Zero-tolerance for BOTH per 2026-07-04 user directive: ANY finding of ANY severity triggers a fix-Coder + new push until both PASS
+automation: `.github/workflows/p9-review.yml` jobs `security-review` + `grumpy-review`, required checks on `main` (see [[SO11]] [[SO13]])
+gate: ANY finding of ANY severity, or a missing/unparseable verdict, fails the job and blocks merge; only the owner can waive
 xref: [[LIB-PRINCIPLES#P9]] [[SO11]] [[SO13]] [[automations/p9-pre-push.md]]
 
 ## plans-and-analysis
