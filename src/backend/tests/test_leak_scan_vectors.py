@@ -1229,13 +1229,16 @@ def test_scanner_crlf_pattern_file_still_reports_every_vector(tmp_path: Path) ->
 
 def test_cli_bom_pattern_file_is_a_config_error(tmp_path: Path) -> None:
     # N4: a UTF-8 BOM glues itself to the first line; the loader must refuse
-    # the file (exit 2, malformed-line message), never load a partial set.
+    # the file (exit 2, honest message), never load a partial set.
     bom = tmp_path / "patterns-bom.txt"
     bom.write_bytes(_pattern_bytes("bom"))
     result = _cli(str(bom), stdin=f"{_WIRING_VECTOR.sample}\n".encode())
     assert result.returncode == 2
     assert result.stdout == b""
-    assert ":1: expected '<name><TAB><regex>[<TAB><context>]'" in result.stderr.decode()
+    # fix r1: the generic Cf check now owns this case; it names line 1 and U+FEFF.
+    err = result.stderr.decode()
+    assert ":1:" in err
+    assert "U+FEFF" in err
 
 
 def test_precommit_bom_pattern_file_fails_closed(tmp_path: Path) -> None:
@@ -1253,6 +1256,112 @@ def test_scanner_bom_pattern_file_fails_self_test(tmp_path: Path) -> None:
     assert result.returncode == 2
     assert "invalid pattern SSoT" in result.stderr
     assert "(matcher exit 2)" in result.stderr
+
+
+# #192 fix r1 (grumpy MEDIUM, lead ruling): a BOM or any other Cf (format)
+# character ANYWHERE in a pattern line must fail the loader closed. Today only
+# a byte-0 BOM is refused; a BOM glued to the start of a regex column is
+# accepted and silently disables that one pattern (probe: home-root mutated,
+# stdin "/Users/someone/x" scanned CLEAN, exit 1).
+_CF_CHARS = {
+    "bom": "\ufeff",
+    "zwsp": "\u200b",
+    "lrm": "\u200e",
+    "word-joiner": "\u2060",
+    "soft-hyphen": "\u00ad",
+    "rlo": "\u202e",
+    "tag-a": "\U000e0041",
+}
+# Column positions inside the first real pattern line (name TAB regex TAB context).
+_CF_POSITIONS = ("name-start", "regex-start", "regex-middle", "context-start")
+
+
+def _cf_pattern_bytes(position: str, char: str) -> "tuple[bytes, int]":
+    text = _PATTERNS.read_text(encoding="utf-8").split("\n")
+    index = next(i for i, ln in enumerate(text) if ln.strip() and not ln.lstrip().startswith("#"))
+    name, regex, context = text[index].split("\t")
+    if position == "name-start":
+        name = char + name
+    elif position == "regex-start":
+        regex = char + regex
+    elif position == "regex-middle":
+        regex = regex[: len(regex) // 2] + char + regex[len(regex) // 2 :]
+    else:
+        context = char + context
+    text[index] = "\t".join((name, regex, context))
+    return "\n".join(text).encode("utf-8"), index + 1
+
+
+@pytest.mark.parametrize("position", _CF_POSITIONS)
+@pytest.mark.parametrize("label", sorted(_CF_CHARS))
+def test_cli_cf_char_anywhere_in_pattern_line_is_a_config_error(tmp_path: Path, label: str, position: str) -> None:
+    char = _CF_CHARS[label]
+    data, line_no = _cf_pattern_bytes(position, char)
+    cfg = tmp_path / "patterns-cf.txt"
+    cfg.write_bytes(data)
+    # Input the unmutated home-root pattern flags; a silent accept scans CLEAN.
+    result = _cli(str(cfg), stdin=b"/Users/someone/x\n")
+    assert result.returncode == 2, (result.returncode, result.stdout)
+    assert result.stdout == b""
+    err = result.stderr.decode()
+    assert f":{line_no}:" in err
+    # Message honesty and output safety: name the code point, never echo it raw.
+    assert f"U+{ord(char):04X}" in err
+    assert char not in err
+
+
+@pytest.mark.parametrize("position", ("regex-start", "regex-middle"))
+@pytest.mark.parametrize("label", ("bom", "zwsp"))
+def test_precommit_cf_char_in_pattern_line_fails_closed(tmp_path: Path, label: str, position: str) -> None:
+    root = _hook_repo(tmp_path)
+    data, _ = _cf_pattern_bytes(position, _CF_CHARS[label])
+    (root / ".claude" / "governance" / "evidence-leak-regex.txt").write_bytes(data)
+    result = _stage_and_hook(root, {"docs/evidence/a.txt": b"clean\n"})
+    assert result.returncode == 1
+    assert "evidence path scan failed for docs/evidence/a.txt (matcher exit 2" in result.stderr
+
+
+@pytest.mark.parametrize("position", ("regex-start", "regex-middle"))
+@pytest.mark.parametrize("label", ("bom", "zwsp"))
+def test_scanner_cf_char_in_pattern_line_fails_self_test(tmp_path: Path, label: str, position: str) -> None:
+    root = _checkout(tmp_path, {"docs/evidence/a.txt": b"clean\n"})
+    data, _ = _cf_pattern_bytes(position, _CF_CHARS[label])
+    (root / ".claude" / "governance" / "evidence-leak-regex.txt").write_bytes(data)
+    result = subprocess.run(["bash", str(_SCANNER), str(root)], capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "invalid pattern SSoT" in result.stderr
+    assert "(matcher exit 2)" in result.stderr
+
+
+# #192 fix r1 (security F1, scoped to the evidence-scan job; repo-wide pinning
+# stays on #197): every `uses:` there is pinned to a full 40-hex commit SHA.
+_SHA_PINNED = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}")
+
+
+@pytest.mark.parametrize(
+    "ref,ok",
+    [
+        ("actions/checkout@" + "a" * 40, True),
+        ("actions/checkout@v4", False),
+        ("actions/checkout@main", False),
+        ("actions/checkout@" + "a" * 39, False),
+        ("actions/checkout@" + "A" * 40, False),
+        ("actions/checkout@" + "a" * 41, False),
+        ("actions/checkout", False),
+    ],
+)
+def test_sha_pin_matcher_has_positive_and_negative_cases(ref: str, ok: bool) -> None:
+    assert bool(_SHA_PINNED.fullmatch(ref)) is ok
+
+
+def test_evidence_scan_job_actions_are_pinned_to_full_shas() -> None:
+    import yaml
+
+    ci = yaml.safe_load((_REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+    uses = [step["uses"] for step in ci["jobs"]["evidence-scan"]["steps"] if "uses" in step]
+    assert uses, "evidence-scan has no `uses:` steps: the pin check would attest nothing"
+    unpinned = [u for u in uses if not _SHA_PINNED.fullmatch(u)]
+    assert unpinned == []
 
 
 def test_tracked_evidence_corpus_is_clean() -> None:
