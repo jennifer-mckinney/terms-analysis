@@ -269,7 +269,12 @@ def test_gate_rejects_inexact_key_sets(tmp_path: Path, doc: object) -> None:
         pytest.param("line", 3.0, id="line-float"),
         pytest.param("line", None, id="line-null"),
         *[pytest.param("line", v, id=f"line-hostile-{k}") for k, v in HOSTILE_TEXT.items()],
-        # title and file: non-empty strings.
+        # title and file: non-blank strings; whitespace-only counts as blank.
+        *[
+            pytest.param(f, v, id=f"{f}-blank-{k}")
+            for f in ("title", "file")
+            for k, v in {"spaces": "   ", "tab": "\t", "newline": "\n"}.items()
+        ],
         pytest.param("title", "", id="title-empty"),
         pytest.param("title", None, id="title-null"),
         pytest.param("title", 7, id="title-int"),
