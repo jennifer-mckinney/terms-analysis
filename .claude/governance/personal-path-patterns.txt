@@ -2,9 +2,11 @@
 # (terms-analysis #145 Part A, LIB-PRINCIPLES P7). Interim: Part B (#192)
 # replaces this file with the one leak_scan.py scanner config.
 #
-# The pre-commit hook, the gitignore-enforcement workflow and
-# src/backend/tests/test_precommit_guards.py all read this file. Do not
-# restate these patterns anywhere else.
+# In Part A only the pytest tree test (src/backend/tests/test_precommit_guards.py)
+# reads this file. Hook and workflow wiring is Part B (#192). Do not restate
+# these patterns anywhere else.
+# Known residual for Part B: the bare double-slash forms `//Users/` and
+# `/Users//` are not matched by the rows below.
 #
 # Format:
 #   * One POSIX extended regular expression per line (also valid Python re).
@@ -37,7 +39,10 @@
 #      the `e:` of `file:` reads as the drive and `///` as the separators.
 #   3. Standard home folders (Documents, Desktop, Downloads) under `~` or
 #      `$HOME`: they publish the private folder layout (#145 owner ruling O3).
+#   4. `file:` URLs: any slash count after `file:`, with an optional host or
+#      volume segment before Users or home.
 
 (^|[^A-Za-z0-9._~/-])(/[A-Za-z0-9._-]+)*/(Users|home)/[A-Za-z0-9._-]
 [A-Za-z]:[\\/]+Users[\\/]+[A-Za-z0-9._-]
 (~|\$HOME|\$\{HOME\})/(Documents|Desktop|Downloads)([^A-Za-z0-9._-]|$)
+file:/+([A-Za-z0-9._-]*/+)*(Users|home)/[A-Za-z0-9._-]
