@@ -36,6 +36,7 @@ import subprocess
 import sys
 import tarfile
 import io
+import json
 import unicodedata
 from pathlib import Path
 
@@ -188,6 +189,9 @@ ALLOW_ROWS = [
     ("posix-home", "the /" + "Users" + "/ directory"),
     ("posix-home", "Users/alice (relative, no root)"),
     ("posix-home", "https://api.github.com/" + "users/alice"),  # public URL, any case
+    # grumpy r2 F2: no home root, so these must not block (boundary + non-home dir).
+    ("posix-home", "profile:/" + "Users" + "/x"),  # `file:` only as a substring
+    ("posix-home", "file:/tmp/" + "home" + "/x"),  # `home` as a plain dir, not a root
     ("posix-lowercase", "src/" + "home/x"),  # relative: no anchor
     ("posix-lowercase", "api/" + "users/42"),  # relative REST route
     ("windows", "C:" + "\\" + "Users" + "\\<name>\\x"),
@@ -370,6 +374,69 @@ def test_matcher_blocks_vector(family, vector):
 @pytest.mark.parametrize("family,vector", ALLOW_ROWS, ids=[f"{f}:{ascii(v)}" for f, v in ALLOW_ROWS])
 def test_matcher_allows_vector(family, vector):
     assert not _leaks(vector, _home_patterns()), f"[{family}] allow vector falsely detected: {vector!r}"
+
+
+# grumpy r2 F1 (ReDoS): every pattern row must answer a hostile line inside the
+# budget. A subprocess with a hard timeout keeps a catastrophic regex from
+# hanging CI; the child measures its own match time.
+REDOS_BUDGET_S = 0.5
+REDOS_KILL_S = 20  # hard stop for the child: a hang fails instead of stalling CI
+REDOS_SLASHES = 5000
+REDOS_LINES = {
+    "file-slash-run-then-x": "file:" + "/" * REDOS_SLASHES + "x",
+    # security r2: 2 MB line, the size a committed blob can reach, ending in `!`.
+    "file-slash-run-2mb-bang": "file:" + "/" * (2 * 1024 * 1024) + "!",
+    "file-slash-run-only": "file:" + "/" * REDOS_SLASHES,
+    "file-named-slash-runs": "file:" + "/a" * (REDOS_SLASHES // 2) + "//" * 50 + "x",
+    "bare-slash-run": "/" * REDOS_SLASHES + "x",
+    "bare-segments": "/a" * (REDOS_SLASHES // 2) + "x",
+    "windows-sep-run": "C:" + "\\" * REDOS_SLASHES + "x",
+}
+_REDOS_CHILD = (
+    "import json, re, sys, time\n"
+    "pat, line = json.load(sys.stdin)\n"
+    "rx = re.compile(pat, re.IGNORECASE)\n"
+    "t = time.perf_counter()\n"
+    "hit = bool(rx.search(line))\n"
+    "print(json.dumps([hit, time.perf_counter() - t]))\n"
+)
+
+
+@pytest.mark.parametrize("line_id", sorted(REDOS_LINES))
+@pytest.mark.parametrize("pattern", [p.pattern for p in _home_patterns()])
+def test_pattern_rows_answer_hostile_line_within_budget(pattern, line_id):
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-I", "-c", _REDOS_CHILD],
+            input=json.dumps([pattern, REDOS_LINES[line_id]]),
+            capture_output=True, text=True, timeout=REDOS_KILL_S,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"ReDoS: {pattern!r} did not finish {line_id} in {REDOS_KILL_S}s")
+    assert proc.returncode == 0, proc.stderr[-300:]
+    _, elapsed = json.loads(proc.stdout)
+    assert elapsed < REDOS_BUDGET_S, f"{pattern!r} took {elapsed:.2f}s on {line_id}"
+
+
+def test_file_url_long_slash_run_without_home_root_is_allowed():
+    """grumpy r2 F1 allow vector: 40 slashes after `file:`, no home root.
+
+    Run in the budgeted child, not in-process: the row 4 regex takes hours on
+    this line today, and an in-process search would hang the whole suite.
+    """
+    line = "file:" + "/" * 40 + "x"
+    for pattern in [p.pattern for p in _home_patterns()]:
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-I", "-c", _REDOS_CHILD],
+                input=json.dumps([pattern, line]),
+                capture_output=True, text=True, timeout=REDOS_KILL_S,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail(f"ReDoS: {pattern!r} did not finish in {REDOS_KILL_S}s")
+        hit, elapsed = json.loads(proc.stdout)
+        assert elapsed < REDOS_BUDGET_S, f"{pattern!r} took {elapsed:.2f}s"
+        assert not hit, f"{pattern!r} falsely blocks a home-less file: line"
 
 
 def test_vector_table_families_have_both_sides():
