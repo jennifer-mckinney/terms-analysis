@@ -92,10 +92,14 @@ def _load_home_patterns(path: Path) -> list[re.Pattern[str]]:
         raise PatternConfigError(f"pattern config has CR line endings: {path.name}")
     lines = []
     for raw in data.decode("utf-8").split("\n"):
-        if not raw.strip() or raw.lstrip().startswith("#"):
+        if not raw.strip():
             continue
+        # Edge whitespace first: an indented "# ..." is not a comment to a shell
+        # `grep -v '^#'`, so it must fail closed rather than be skipped here.
         if raw != raw.strip():
             raise PatternConfigError(f"pattern config line has edge whitespace: {path.name}")
+        if raw.startswith("#"):
+            continue
         lines.append(raw)
     if not lines:
         raise PatternConfigError(f"pattern config has no patterns: {path.name}")
