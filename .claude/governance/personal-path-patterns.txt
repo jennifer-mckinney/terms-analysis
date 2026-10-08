@@ -1,0 +1,19 @@
+# personal-path-patterns.txt: SSoT for absolute user-home path detection
+# (terms-analysis #145, LIB-PRINCIPLES P7).
+#
+# The pre-commit hook, the gitignore-enforcement workflow and
+# src/backend/tests/test_precommit_guards.py all read this file. Do not
+# restate these patterns anywhere else.
+#
+# Format:
+#   * One POSIX extended regular expression per line (also valid Python re).
+#   * Lines starting with `#` are comments; blank lines are ignored.
+#   * Content is normalised before matching: Unicode format characters
+#     (category Cf, e.g. U+200B, U+202E) are removed first.
+#   * A file is a leak if any pattern matches anywhere in its content.
+#   * Placeholders such as `/Users/<name>/` and `/home/<user>/` do not match
+#     because `<` is outside the user-name character class.
+#   * An empty or comment-only file is a configuration error (fail closed).
+
+/Users/[A-Za-z0-9._-]
+/home/[A-Za-z0-9._-]
