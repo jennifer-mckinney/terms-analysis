@@ -1,0 +1,7 @@
+# P9 review follow-up targeted test run
+# Date: 2026-10-08
+# Tested revision: 145aa61671e015ef764a03df706439c9a7dab3a8
+# Command (from src/backend):
+#   python -m pytest tests/test_p9_prepush_gate.py tests/test_p9_gate_fix_r1.py tests/test_p9_gate_fix_r2.py -q
+# Result: 123 passed, 1 skipped
+
