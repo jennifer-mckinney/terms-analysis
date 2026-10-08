@@ -7,7 +7,9 @@
 # these patterns anywhere else.
 # Known residuals for Part B (#192): bare `//Users/` and `/Users//`; the 4
 # `file:` bypasses from security r2 F2; `.gitattributes eol=lf` (security r1
-# F3). None is matched or enforced by the rows below.
+# F3); a home root after a colon that follows a non-slash word
+# (`word:/<home>/x`, e.g. rsync `host:` or `key:` forms) is not matched.
+# None is matched or enforced by the rows below.
 #
 # Format:
 #   * One POSIX extended regular expression per line (also valid Python re).
@@ -31,8 +33,10 @@
 #      absolute path, at any depth (so the deep macOS forms under
 #      /System/Volumes/Data and /Volumes/<disk> are leaks). The path must
 #      begin at the start of the text or after a character that cannot be
-#      part of a path; `:` is NOT such a character, so `profile:/Users/x` and
-#      `file:/tmp/home/x` stay allowed (the `file:` forms are row 4). A
+#      part of a path; `:` is NOT such a character, so `profile:/Users/x` stays
+#      allowed (the `file:` forms are row 4), but a `:` that ends a
+#      slash-led list item (a colon-joined library or executable search path)
+#      is a boundary. A
 #      relative path such as `src/` + `home/x` or `api/` + `users/42`, and a
 #      URL path after a host name (`https://<host>/` + `users/<login>`), are
 #      not anchored and stay allowed.
@@ -42,12 +46,11 @@
 #   3. Standard home folders (Documents, Desktop, Downloads) under `~` or
 #      `$HOME`: they publish the private folder layout (#145 owner ruling O3).
 #   4. `file:` URLs (must start at a boundary, so `profile:` is not one): any
-#      slash count after `file:`; Users at any depth, home only directly or
-#      after a `localhost` or `Volumes/<disk>` segment (so `file:/tmp/home/x`
-#      is allowed). Path segments are separated by slash runs, so the
+#      slash count after `file:`; Users or home at any depth (owner ruling
+#      2026-10-08, so a `file` URL into /tmp then home is a leak). Path segments are separated by slash runs, so the
 #      repetition is unambiguous and cannot backtrack catastrophically.
 
-(^|[^A-Za-z0-9._~/:-])(/[A-Za-z0-9._-]+)*/(Users|home)/[A-Za-z0-9._-]
+(^|[^A-Za-z0-9._~/:-]|/[A-Za-z0-9._-]*:)(/[A-Za-z0-9._-]+)*/(Users|home)/[A-Za-z0-9._-]
 (^|[^A-Za-z0-9])[A-Za-z]:[\\/]+Users[\\/]+[A-Za-z0-9._-]
 (~|\$HOME|\$\{HOME\})/(Documents|Desktop|Downloads)([^A-Za-z0-9._-]|$)
-(^|[^A-Za-z0-9])file:/+(([A-Za-z0-9._-]+/+)*Users|((localhost|Volumes/+[A-Za-z0-9._-]+)/+)?home)/[A-Za-z0-9._-]
+(^|[^A-Za-z0-9])file:/+([A-Za-z0-9._-]+/+)*(Users|home)/[A-Za-z0-9._-]
