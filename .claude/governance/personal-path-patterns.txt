@@ -5,8 +5,9 @@
 # In Part A only the pytest tree test (src/backend/tests/test_precommit_guards.py)
 # reads this file. Hook and workflow wiring is Part B (#192). Do not restate
 # these patterns anywhere else.
-# Known residual for Part B: the bare double-slash forms `//Users/` and
-# `/Users//` are not matched by the rows below.
+# Known residuals for Part B (#192): bare `//Users/` and `/Users//`; the 4
+# `file:` bypasses from security r2 F2; `.gitattributes eol=lf` (security r1
+# F3). None is matched or enforced by the rows below.
 #
 # Format:
 #   * One POSIX extended regular expression per line (also valid Python re).
@@ -30,19 +31,23 @@
 #      absolute path, at any depth (so the deep macOS forms under
 #      /System/Volumes/Data and /Volumes/<disk> are leaks). The path must
 #      begin at the start of the text or after a character that cannot be
-#      part of a path (`:` counts, so PATH-style lists are covered). A
+#      part of a path; `:` is NOT such a character, so `profile:/Users/x` and
+#      `file:/tmp/home/x` stay allowed (the `file:` forms are row 4). A
 #      relative path such as `src/` + `home/x` or `api/` + `users/42`, and a
 #      URL path after a host name (`https://<host>/` + `users/<login>`), are
 #      not anchored and stay allowed.
 #   2. Windows home: a drive letter, then Users, with either separator (one
-#      or more). The `file:` + `///` + `Users/<name>` URL form is caught here:
-#      the `e:` of `file:` reads as the drive and `///` as the separators.
+#      or more), starting at a boundary so `profile:` is not a drive. The
+#      `file:` URL forms are row 4.
 #   3. Standard home folders (Documents, Desktop, Downloads) under `~` or
 #      `$HOME`: they publish the private folder layout (#145 owner ruling O3).
-#   4. `file:` URLs: any slash count after `file:`, with an optional host or
-#      volume segment before Users or home.
+#   4. `file:` URLs (must start at a boundary, so `profile:` is not one): any
+#      slash count after `file:`; Users at any depth, home only directly or
+#      after a `localhost` or `Volumes/<disk>` segment (so `file:/tmp/home/x`
+#      is allowed). Path segments are separated by slash runs, so the
+#      repetition is unambiguous and cannot backtrack catastrophically.
 
-(^|[^A-Za-z0-9._~/-])(/[A-Za-z0-9._-]+)*/(Users|home)/[A-Za-z0-9._-]
-[A-Za-z]:[\\/]+Users[\\/]+[A-Za-z0-9._-]
+(^|[^A-Za-z0-9._~/:-])(/[A-Za-z0-9._-]+)*/(Users|home)/[A-Za-z0-9._-]
+(^|[^A-Za-z0-9])[A-Za-z]:[\\/]+Users[\\/]+[A-Za-z0-9._-]
 (~|\$HOME|\$\{HOME\})/(Documents|Desktop|Downloads)([^A-Za-z0-9._-]|$)
-file:/+([A-Za-z0-9._-]*/+)*(Users|home)/[A-Za-z0-9._-]
+(^|[^A-Za-z0-9])file:/+(([A-Za-z0-9._-]+/+)*Users|((localhost|Volumes/+[A-Za-z0-9._-]+)/+)?home)/[A-Za-z0-9._-]
