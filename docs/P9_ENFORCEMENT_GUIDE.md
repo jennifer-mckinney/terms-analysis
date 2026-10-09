@@ -27,9 +27,6 @@ gate as non-blocking so they can be filed as cards:
 
 The local `.githooks/pre-push` signoff gate, `.git/reviews/*.signoff.json`
 files and the `enforce-p9-review.yml` text check are retired.
-The ingester's copies retire in jennifer-mckinney/legal-corpus-ingester#20,
-which merges right after #214; until then the ingester's main-branch parity
-step fails. See "Companion change" in `automations/p9-pre-push.md`.
 
 ## Developer workflow
 
