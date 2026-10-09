@@ -191,20 +191,45 @@ def test_legal_kb_retrieve_ok_returns_chunks_with_scores(kb_paths):
     assert "score" in result.chunks[0]
 
 
-def test_legal_kb_retrieve_zero_norm_query_is_error_not_no_match(kb_paths, caplog):
+# Degenerate query vectors a broken embedder can return, with the reason the
+# ERROR log must name. httpx's response.json() accepts bare NaN / Infinity
+# tokens, so LocalAIClient.embed passes non-finite floats straight through;
+# 1e39 is finite JSON but overflows float32 to inf once cast.
+_DEGENERATE_QUERY_VECTORS = [
+    pytest.param([0.0, 0.0], "zero-norm", id="zero"),
+    pytest.param([float("nan"), 0.0], "non-finite", id="nan"),
+    pytest.param([float("nan"), float("nan")], "non-finite", id="all-nan"),
+    pytest.param([float("inf"), 1.0], "non-finite", id="pos-inf"),
+    pytest.param([1.0, float("-inf")], "non-finite", id="neg-inf"),
+    pytest.param([1e39, 0.0], "non-finite", id="float32-overflow"),
+]
+
+
+@pytest.mark.parametrize("floor", [0.5, None], ids=["floor-set", "floor-disabled"])
+@pytest.mark.parametrize("vector, reason", _DEGENERATE_QUERY_VECTORS)
+def test_legal_kb_retrieve_degenerate_query_is_error_not_no_match(
+    kb_paths, caplog, min_score, vector, reason, floor
+):
     # Grumpy F1: the query is never empty, so a zero vector means a broken
     # embedder. It must be ERROR (ungrounded), never "grounded, no match".
+    # Round 3 (CI review MEDIUM): a NaN / inf vector normalises to all-NaN, so
+    # every dense score is NaN. With a floor, NaN >= floor is False and the
+    # result was NO_MATCH (grounded); with the floor disabled NaN scores
+    # reached rrf_fuse and an arbitrary ranking came back OK. Both are ERROR.
     _write_index(*kb_paths, _CHUNKS)
+    min_score(floor)
     with caplog.at_level(logging.ERROR, logger=_LOGGER_NAME):
-        result = _retrieve(LegalKnowledgeBase(), _FixedEmbedClient([0.0, 0.0]))
-    assert result.chunks == ()
+        result = _retrieve(LegalKnowledgeBase(), _FixedEmbedClient(vector))
     assert result.status is RetrievalStatus.ERROR
+    assert result.chunks == ()
     assert result.grounded is False
-    assert any(
-        r.exc_info and r.exc_info[0] is LegalKBRetrievalError
-        and "zero-norm" in r.getMessage()
-        for r in caplog.records
-    )
+    errors = [
+        r for r in caplog.records
+        if r.exc_info and r.exc_info[0] is LegalKBRetrievalError
+    ]
+    assert len(errors) == 1
+    message = errors[0].getMessage()
+    assert reason in message and "query vector" in message
 
 
 def test_legal_kb_retrieve_all_candidates_below_min_score_is_no_match(kb_paths, min_score):

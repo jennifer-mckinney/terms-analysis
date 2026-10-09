@@ -358,10 +358,25 @@ def test_build_returns_zero_and_writes_nothing_when_every_embedding_fails(
     assert not metadata_path.exists()
 
 
-def test_build_skips_chunks_whose_embedding_is_a_zero_vector(patched_paths, monkeypatch):
-    """A zero vector cannot be L2-normalized; that chunk is dropped while the
-    others are still indexed and persisted."""
-    corpus_dir, _, metadata_path = patched_paths
+@pytest.mark.parametrize(
+    "bad_vector",
+    [
+        pytest.param([0.0, 0.0, 0.0], id="zero"),
+        # Round 3 (CI review MEDIUM, ref #91): a non-finite embedding used to
+        # normalise to an all-NaN row and be written into the index.
+        pytest.param([float("nan"), 0.0, 1.0], id="nan"),
+        pytest.param([float("inf"), 1.0, 0.0], id="pos-inf"),
+        pytest.param([1.0, float("-inf"), 0.0], id="neg-inf"),
+        pytest.param([1e39, 0.0, 0.0], id="float32-overflow"),
+    ],
+)
+def test_build_skips_chunks_whose_embedding_is_a_zero_vector(
+    patched_paths, monkeypatch, bad_vector
+):
+    """A zero or non-finite vector cannot be L2-normalized; that chunk is
+    dropped while the others are still indexed and persisted, and no NaN or
+    inf row ever reaches the on-disk matrix."""
+    corpus_dir, index_path, metadata_path = patched_paths
     _write_corpus_file(
         corpus_dir,
         "eu",
@@ -370,14 +385,17 @@ def test_build_skips_chunks_whose_embedding_is_a_zero_vector(patched_paths, monk
     )
 
     async def partial_embed(self, text, model=None):
-        # "Misc" chunk gets an all-zero embedding; the consent chunk is valid.
-        return [0.0, 0.0, 0.0] if "Misc" in text else _toy_embed(text)
+        # "Misc" chunk gets the degenerate embedding; the consent chunk is valid.
+        return list(bad_vector) if "Misc" in text else _toy_embed(text)
 
     monkeypatch.setattr(LocalAIClient, "embed", partial_embed)
     kb = LegalKnowledgeBase()
     assert asyncio.run(kb.build(LocalAIClient())) == 1
     persisted = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert [c["section"] for c in persisted] == ["Article 7 — Consent"]
+    matrix = np.load(index_path)
+    assert matrix.shape[0] == 1
+    assert np.isfinite(matrix).all()
 
 
 def test_load_rejects_index_whose_row_count_disagrees_with_metadata(
