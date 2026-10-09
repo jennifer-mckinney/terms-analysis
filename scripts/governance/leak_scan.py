@@ -180,10 +180,11 @@ def normalise(text: str) -> str:
 #
 # .claude/governance/leak-vectors.tsv is tracked, and the tracked tree must not
 # contain a literal home path (test_tracked_tree_has_no_home_paths). Its
-# samples therefore spell each home root as a "<<NAME>>" token, and this table
-# is the ONLY place the tokens are expanded (expand_vector_tokens). Each value
-# is the exact root it stands for, byte for byte; no value ends in a path
-# separator, so this source file is not a home-path leak either.
+# samples therefore spell each home root (or the bare root word, WORD_*) as a
+# "<<NAME>>" token, and this table is the ONLY place the tokens are expanded
+# (expand_vector_tokens). Each value is the exact text it stands for, byte for
+# byte; no value ends in a path separator, so this source file is not a
+# home-path leak either.
 VECTOR_TOKENS: Dict[str, str] = {
     "USERS": "/Users",
     "USERSUPPER": "/USERS",  # case-variant vector
@@ -193,6 +194,13 @@ VECTOR_TOKENS: Dict[str, str] = {
     "TILDE": "~",
     "ENVHOME": "$HOME",
     "ENVHOMEBR": "${HOME}",
+    # Word-level tokens: the bare root word, for samples where the separator
+    # in front of it is itself the vector (URL-encoded, JSON-escaped, dashed
+    # slugs, UNC and URL paths). Values hold no separator at all.
+    "WORD_USERS": "Users",
+    "WORD_USERS_LOWER": "users",
+    "WORD_USERS_UPPER": "USERS",
+    "WORD_HOME": "home",
 }
 _VECTOR_TOKEN = re.compile(r"<<([^<>]*)>>")
 

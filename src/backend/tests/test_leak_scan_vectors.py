@@ -171,6 +171,10 @@ _TOKEN_EXPECTED: Dict[str, str] = {
     "TILDE": "~",
     "ENVHOME": "$" + "HOME",
     "ENVHOMEBR": "${" + "HOME}",
+    "WORD_USERS": _U[1:],
+    "WORD_USERS_LOWER": _U[1:].lower(),
+    "WORD_USERS_UPPER": _U[1:].upper(),
+    "WORD_HOME": _H[1:],
 }
 
 
