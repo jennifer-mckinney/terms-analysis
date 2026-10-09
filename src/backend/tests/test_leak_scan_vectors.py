@@ -297,6 +297,63 @@ def test_every_vector_row_decodes_with_no_leftover_tokens() -> None:
     assert len(rows) == len(VECTORS)
 
 
+def _home_form_patterns() -> list:
+    """The scanner's own home-path patterns, selected from the SSoT by content.
+
+    A pattern is a home-path form when its regex names a home root (``users``
+    or ``home``; the file is lower case). No pattern name is restated here, so
+    a new home-path pattern added to evidence-leak-regex.txt is picked up.
+    """
+    return [p for p in PATTERNS if re.search(r"users|home", p[1].pattern)]
+
+
+def _personal_path_patterns() -> list:
+    """personal-path-patterns.txt through its one loader (test_precommit_guards)."""
+    spec = importlib.util.spec_from_file_location(
+        "_ppg_for_vectors", Path(__file__).with_name("test_precommit_guards.py")
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module._home_patterns()
+
+
+def test_vector_table_raw_text_has_no_literal_home_path() -> None:
+    """#192 review (MEDIUM, leak-vectors.tsv:9): the header promises the tracked
+    table holds no literal home path; every home root is a <<NAME>> token.
+
+    The RAW file bytes (before expand_vector_tokens) go through the scanner's
+    own scan_bytes with every home-path pattern it ships, AND through every
+    personal-path-patterns.txt row; a line flagged by either is an offender.
+    """
+    home = _home_form_patterns()
+    personal = _personal_path_patterns()
+    # Not vacuous: both detectors load, and every selected scanner pattern
+    # bites on the DECODED table, so a broken selection cannot pass silently.
+    assert home and personal
+    decoded = "\n".join("\t".join(v) for v in VECTORS).encode("utf-8")
+    decoded_hits = {name for _, name in leak_scan.scan_bytes(decoded, home)}
+    assert decoded_hits == {p[0] for p in home}, decoded_hits
+
+    raw = _VECTORS.read_bytes()
+    flagged: Dict[int, List[str]] = {}
+    for number, name in leak_scan.scan_bytes(raw, home):
+        flagged.setdefault(number, []).append(name)
+    lines = raw.decode("utf-8").split("\n")
+    for number, line in enumerate(lines, 1):
+        clean = "".join(ch for ch in line if unicodedata.category(ch) != "Cf")
+        if any(p.search(clean) for p in personal):
+            flagged.setdefault(number, []).append("personal-path-patterns")
+    offenders = [
+        f"  line {n} [{','.join(flagged[n])}]: {ascii(lines[n - 1])[1:-1][:100]}"
+        for n in sorted(flagged)
+    ]
+    assert not offenders, (
+        f"{len(offenders)} leak-vectors.tsv line(s) hold a literal home path; "
+        "spell each home root as a <<NAME>> token (VECTOR_TOKENS):\n" + "\n".join(offenders)
+    )
+
+
 def test_pattern_file_quoting_itself_is_allowed() -> None:
     # A review that pastes the whole SSoT (comments and patterns) is not a leak.
     assert leak_scan.scan_bytes(_PATTERNS.read_bytes(), PATTERNS) == []
