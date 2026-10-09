@@ -16,7 +16,9 @@ Subcommands:
            cancelled while pending or run out of order (GitHub guarantees
            neither) and the board still converges on the latest state.
            Resolves the project, the status field and the option by name on
-           every run, so no board ID is stored anywhere.
+           every run, so no board ID is stored anywhere. The Done-guard
+           (held_reason) applies to every move: a closed issue, or a card
+           already in a Done status, is never moved backwards.
 
 Config: config.json next to this file (or --config). It is the only place the
 board URL, the field name, the status per event and the call bounds live; this
@@ -71,9 +73,11 @@ PR_READY_ACTIONS = ("opened", "reopened", "ready_for_review")
 # Issue close reasons GitHub sends. Only not_planned moves a card; an unknown
 # reason fails closed so a new GitHub value is noticed, not ignored.
 SKIPPED_CLOSE_REASONS = ("completed", "duplicate", None)
-# A withdrawn PR (closed unmerged, or back to draft) never pulls a linked card
-# out of the status these events set: that work is finished.
+# The statuses these events set are the Done statuses: that work is finished.
 DONE_EVENT_KEYS = ("pr_merged", "issue_closed_not_planned")
+# The moves the Done-guard lets through: the Done moves themselves, and an
+# explicit reopen. Every other move leaves a closed issue or a Done card alone.
+UNGUARDED_EVENT_KEYS = (*DONE_EVENT_KEYS, "issue_reopened")
 # Current-state tables used by apply. GraphQL enum values; anything else fails
 # closed. A PR: MERGED -> merged; CLOSED or a draft -> withdrawn; else ready.
 PR_STATES = ("OPEN", "CLOSED", "MERGED")
@@ -86,6 +90,8 @@ ISSUE_STATE_EVENTS: dict[tuple[str, str | None], str | None] = {
     ("CLOSED", "DUPLICATE"): None,
     ("CLOSED", None): None,
 }
+# GraphQL IssueState values, derived from the table above.
+ISSUE_STATES = frozenset(state for state, _ in ISSUE_STATE_EVENTS)
 
 CONFIG_FIELDS = (
     "project_url",
@@ -132,7 +138,7 @@ query BoardSyncLinkedIssues($owner: String!, $repo: String!, $number: Int!, $fir
     pullRequest(number: $number) {
       state
       isDraft
-      closingIssuesReferences(first: $first) { totalCount nodes { id number } }
+      closingIssuesReferences(first: $first) { totalCount nodes { id number state } }
     }
   }
 }
@@ -518,8 +524,8 @@ def pr_event(state: object, draft: object, number: int) -> str:
     return "pr_ready"
 
 
-def linked_issues(cfg: Config, repository: str, number: int) -> tuple[str, list[str]]:
-    """The PR's current event key and the node IDs of the issues it closes."""
+def linked_issues(cfg: Config, repository: str, number: int) -> tuple[str, list[tuple[str, str]]]:
+    """The PR's current event key, and the node ID and state of each issue it closes."""
     owner, repo = repository.split("/", 1)
     data = _graphql(
         cfg,
@@ -541,18 +547,25 @@ def linked_issues(cfg: Config, repository: str, number: int) -> tuple[str, list[
         )
     if len(nodes) != total:
         raise GitHubError(f"GitHub listed {len(nodes)} of {total} linked issues for PR #{number}")
-    return event, [_api_id(_dig(node, "id"), "linked issue id") for node in nodes]
+    issues = []
+    for node in nodes:
+        content_id = _api_id(_dig(node, "id"), "linked issue id")
+        state = _dig(node, "state")
+        if state not in ISSUE_STATES:
+            raise GitHubError(f"GitHub returned a malformed linked issue state for PR #{number}")
+        issues.append((content_id, state))
+    return event, issues
 
 
-def issue_event(cfg: Config, node_id: str) -> str | None:
-    """The event key the issue's current state means, or None for a skip."""
+def issue_event(cfg: Config, node_id: str) -> tuple[str, str | None]:
+    """The issue's current state, and the event key it means (None for a skip)."""
     node = _dig(_graphql(cfg, ISSUE_STATE_QUERY, {"id": node_id}), "node")
     if not isinstance(node, dict) or node.get("__typename") != "Issue":
         raise GitHubError("the issue was not found, or the node is not an issue")
     key = (node.get("state"), node.get("stateReason"))
     if key not in ISSUE_STATE_EVENTS:
         raise GitHubError("GitHub returned a malformed or unknown issue state")
-    return ISSUE_STATE_EVENTS[key]  # type: ignore[index]
+    return key[0], ISSUE_STATE_EVENTS[key]  # type: ignore[index,return-value]
 
 
 def add_item(cfg: Config, board: BoardTarget, content_id: str) -> tuple[str, str | None]:
@@ -569,6 +582,22 @@ def add_item(cfg: Config, board: BoardTarget, content_id: str) -> tuple[str, str
     if status is not None and not isinstance(status, str):
         raise GitHubError("GitHub returned a malformed card status")
     return item_id, status
+
+
+def held_reason(cfg: Config, event: str, issue_state: str, card_status: str | None) -> str | None:
+    """The Done-guard: why this move must leave the card where it is, or None to move it.
+
+    The one check every route goes through. A card already in a Done status,
+    or a closed issue, is never moved backwards; only the Done moves and an
+    explicit reopen (UNGUARDED_EVENT_KEYS) move it.
+    """
+    if event in UNGUARDED_EVENT_KEYS:
+        return None
+    if card_status in {cfg.statuses[key] for key in DONE_EVENT_KEYS}:
+        return f'already "{card_status}"'
+    if issue_state != "OPEN":
+        return "closed"
+    return None
 
 
 def set_status(cfg: Config, board: BoardTarget, item_id: str) -> None:
@@ -612,43 +641,41 @@ def apply(cfg: Config) -> int:
 
     # Reconcile: the current PR or issue state picks the event key.
     if decision.pr_number is not None:
-        event, content_ids = linked_issues(cfg, repository, decision.pr_number)
-        print(f"board-sync: PR #{decision.pr_number} links {len(content_ids)} issue(s)")
+        event, issues = linked_issues(cfg, repository, decision.pr_number)
+        print(f"board-sync: PR #{decision.pr_number} links {len(issues)} issue(s)")
     elif decision.issue_node_id is not None:
-        current = issue_event(cfg, decision.issue_node_id)
+        issue_state, current = issue_event(cfg, decision.issue_node_id)
         if current is None:
             print(f"board-sync: skip (the issue is closed as completed or duplicate now; {decision.reason})")
             return EXIT_OK
-        event, content_ids = current, [decision.issue_node_id]
+        event, issues = current, [(decision.issue_node_id, issue_state)]
     else:
         raise InvalidInput(f"route {decision.event} carries no issue or PR")
     if event != decision.event:
         print(f"board-sync: current state means {event}, not {decision.event} ({decision.reason})")
 
     board = resolve_board(cfg, cfg.statuses[event])
-    if decision.event == "issue_opened":
-        # actions/add-to-project already added the issue and gave its item id.
-        set_status(cfg, board, item_id)
-        print(f'board-sync: moved 1 issue(s) to "{board.status}" ({decision.reason})')
-        return EXIT_OK
-
-    done = {cfg.statuses[key] for key in DONE_EVENT_KEYS} if event == "pr_withdrawn" else set()
     moved = 0
-    left: list[str] = []
-    for content_id in content_ids:
+    left: dict[str, int] = {}
+    for content_id, issue_state in issues:
         try:
+            # The add is idempotent: for a card already on the board (including
+            # the one actions/add-to-project made) it returns that card and its
+            # current status, which the Done-guard needs.
             item, status = add_item(cfg, board, content_id)
-            if status in done:
-                left.append(status)
+            if item_id and item != item_id:
+                raise GitHubError("the board item for the issue is not ITEM_ID from actions/add-to-project")
+            reason = held_reason(cfg, event, issue_state, status)
+            if reason is not None:
+                left[reason] = left.get(reason, 0) + 1
                 continue
             set_status(cfg, board, item)
         except GitHubError as exc:
-            raise GitHubError(f"{exc} (moved {moved} of {len(content_ids)} before the failure)") from None
+            raise GitHubError(f"{exc} (moved {moved} of {len(issues)} before the failure)") from None
         moved += 1
     kept = ""
     if left:
-        names = " or ".join(f'"{name}"' for name in sorted(set(left)))
-        kept = f"; left {len(left)} already {names}"
+        kept = "; left " + ", ".join(f"{count} {reason}" for reason, count in sorted(left.items()))
     print(f'board-sync: moved {moved} issue(s) to "{board.status}" ({decision.reason}){kept}')
     return EXIT_OK
 

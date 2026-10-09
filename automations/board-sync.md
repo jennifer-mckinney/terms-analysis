@@ -18,7 +18,7 @@ project-manager agent dispatched after every event (agent-setup audit item 5,
 | `issue_reopened` | An issue is reopened. | In progress |
 | `issue_closed_not_planned` | An issue is closed as not planned. | Done |
 | `pr_ready` | A PR is opened, reopened or marked ready for review, and is not a draft. Every issue it links with a closing keyword (`Fixes #12`) moves. | In review |
-| `pr_withdrawn` | A PR is converted to a draft, or closed without merging. Every linked issue moves, except cards already in the `pr_merged` or `issue_closed_not_planned` status. | In progress |
+| `pr_withdrawn` | A PR is converted to a draft, or closed without merging. Every linked issue moves (subject to the Done-guard below). | In progress |
 | `pr_merged` | A PR is merged. Every issue it links with a closing keyword moves. | Done |
 
 Everything else is a deliberate skip, logged as `board-sync: plan: skip
@@ -26,6 +26,17 @@ Everything else is a deliberate skip, logged as `board-sync: plan: skip
 completed or duplicate. Issues closed as completed are normally closed by a
 merged PR, which already moved them to Done. Linked issues not yet on the
 board are added first.
+
+### Done-guard
+
+A closed issue, or a card already in a Done status (the `pr_merged` or
+`issue_closed_not_planned` status), is never moved backwards. Only
+`pr_merged`, `issue_closed_not_planned` and `issue_reopened` (an explicit
+reopen) move such a card; every other row leaves it where it is. So a
+follow-up PR that says `Fixes #5` after #5 was merged and closed does not
+drag #5 back to In review. Held cards are counted on the last line, for
+example `moved 1 issue(s) to "In review" (PR #12 opened); left 1 already
+"Done", 1 closed`. The check is `held_reason` in `board_sync.py`.
 
 ### Order of runs
 
