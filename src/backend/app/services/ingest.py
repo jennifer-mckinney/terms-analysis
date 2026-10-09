@@ -480,12 +480,17 @@ async def _fetch_bytes(url: str, cfg: Settings) -> tuple[bytes, str]:
                 if target.scheme == "https" and not target.is_literal
                 else {}
             )
-            request = client.build_request(
-                "GET",
-                target.request_url,
-                headers={"Host": target.host_header},
-                extensions=extensions,
-            )
+            try:
+                request = client.build_request(
+                    "GET",
+                    target.request_url,
+                    headers={"Host": target.host_header},
+                    extensions=extensions,
+                )
+            except httpx.InvalidURL:
+                # httpx refuses what it cannot encode (e.g. a URL over 65536
+                # characters); refuse it cleanly instead of escaping as a 500.
+                raise UnsafeUrlError("malformed", _MSG_MALFORMED) from None
             response = None
             try:
                 response = await client.send(request, stream=True)

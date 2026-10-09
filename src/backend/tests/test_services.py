@@ -842,6 +842,14 @@ class TestFetchUrlTextErrorPaths:
         assert self._fetch_error(f"http://{raw}/").reason == "host"
         assert requests == []
 
+    def test_url_httpx_cannot_encode_is_malformed_not_a_crash(self, monkeypatch):
+        """A path long enough that httpx.InvalidURL fires is a clean refusal."""
+        handler, requests = self._refused()
+        self._serve(monkeypatch, handler)
+        exc = self._fetch_error("http://example.com/" + "a" * 70_000)
+        assert exc.reason == "malformed"
+        assert requests == []
+
     def test_redirect_to_unparseable_location_is_refused(self, monkeypatch):
         """httpx itself may reject the Location first (connect); either way
         the hop is refused cleanly and never requested."""
