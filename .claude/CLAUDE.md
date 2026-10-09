@@ -40,6 +40,7 @@ These identifiers mean different things in the ingester repo. Never cite a bare 
 - HR9 grades: A <3.5, A- <4.5, B <5.5, B- <6.5, C+ <7.5, C <8.5, D+ >=8.5.
 - Model bars (screen before any research): no Meta, no Chinese-origin, no VC-funded LLM house, no ANN index. Memory: `model_constraint_stack`.
 - ADR 0001 (`docs/adr/0001-dependency-rules-scope-ci-review-tooling.md`): HR1-HR4 and HR6 cover the PRODUCT. CI review tooling (claude-code-action, CodeQL, Copilot) is exempt.
+- ADR 0002 (`docs/adr/0002-wiring-audit-batch-api-exemption.md`): the weekly wiring audit (#224, `scripts/audit/`, two scheduled workflows) may send allowlisted, leak-scanned repository source to the Message Batches API under nine conditions (source only, GitHub-hosted trusted triggers, dedicated environment-scoped key with its own cap, budget before submission, no silent success, model output as data, batch deleted on every exit path, no SDK in the app).
 
 ## project-map
 
@@ -54,7 +55,8 @@ These identifiers mean different things in the ingester repo. Never cite a bare 
 | `.github/workflows/` | `ci.yml` (lint, test, evidence-scan, audit; job timeouts; least-privilege permissions), `p9-review.yml` (CI reviews), `gitignore-enforcement.yml`, `board-sync.yml` (#219; needs the `PROJECT_TOKEN` secret) |
 | `.claude/governance/` | `required-gitignore.txt`, `personal-path-patterns.txt` (#145), `evidence-leak-regex.txt` + `leak-vectors.tsv` (#192) |
 | `scripts/governance/` | `leak_scan.py` + `scan-evidence-leaks.sh` (#192), `verify-hashes.sh`, `regen-manifest.sh` (regen needs owner intent) |
-| `docs/adr/` | ADR 0001 (dependency rules scope) |
+| `docs/adr/` | ADR 0001 (dependency rules scope), ADR 0002 (wiring audit exemption) |
+| `scripts/audit/` | Weekly wiring audit (#224): `inventory.py`, `submit.py`, `collect.py`, `client.py`, `config.py`, `config.json`, `fixtures/canary_unwired.py`. Runs from `wiring-audit-submit.yml` / `-collect.yml` under ADR 0002 |
 | `docs/evidence/` | review, design and status evidence. UNTRACKED. Never commit it; the evidence-scan job and pre-commit check 4 refuse local paths |
 | `docs/plans/`, `docs/specs/`, `docs/reports/`, `docs/research/` | plans, specs, reports, research |
 
