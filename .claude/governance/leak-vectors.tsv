@@ -4,17 +4,22 @@
 #            allow = the sample MUST NOT be reported by ANY pattern
 #   pattern  a name from .claude/governance/evidence-leak-regex.txt
 #   sample   literal text, one line, written exactly as it would appear in an
-#            evidence file (encoded and escaped forms included verbatim)
+#            evidence file (encoded and escaped forms included verbatim),
+#            except that each home root is a <<NAME>> token. This file is
+#            tracked and must hold no literal home path (#145 Part A), so
+#            readers expand the sample with expand_vector_tokens() in
+#            scripts/governance/leak_scan.py, the only token table
+#            (VECTOR_TOKENS); an unknown or malformed token is an error.
 # Contract (src/backend/tests/test_leak_scan_vectors.py): every pattern has
 # >= 1 block and >= 1 allow vector; every vector runs through the CLI tree
 # scan, the --range history scan and the pre-commit hook.
 # This file lives outside docs/evidence/, so it is never scanned itself.
-block	home-root	/Users/someuser/Documents/project/app.py	plain macOS home
-block	home-root	/home/someuser/project	plain Linux home
-block	home-root	C:/Users/someuser/project	Windows, forward slashes
-block	home-root	C:\Users\someuser\project	Windows, backslashes (folded to /)
-block	home-root	C:\\Users\\someuser\\x	JSON-escaped Windows path
-block	home-root	/mnt/c/Users/someuser/x	WSL mount of a Windows home
+block	home-root	<<USERS>>/someuser/Documents/project/app.py	plain macOS home
+block	home-root	<<HOME>>/someuser/project	plain Linux home
+block	home-root	C:<<USERS>>/someuser/project	Windows, forward slashes
+block	home-root	<<WINUSERS>>\someuser\project	Windows, backslashes (folded to /)
+block	home-root	<<WINUSERSESC>>\\someuser\\x	JSON-escaped Windows path
+block	home-root	/mnt/c<<USERS>>/someuser/x	WSL mount of a Windows home
 block	home-root	%2FUsers%2Fsomeuser/x	URL-encoded, upper-case hex
 block	home-root	%2fusers%2fsomeuser	URL-encoded, lower-case hex and name
 block	home-root	%2Fhome%2Fsomeuser	URL-encoded Linux home
@@ -23,11 +28,11 @@ block	home-root	"p":"\/Users\/someuser\/x"	JSON-escaped slash
 block	home-root	\/home\/someuser	JSON-escaped Linux home
 block	home-root	\u002fUsers\u002fsomeuser	JSON unicode escape
 block	home-root	\x2fhome\x2fsomeuser	hex escape
-block	home-root	/USERS/SomeUser/x	case variant
-block	home-root	/Users/some-user/x	dash in the account name
+block	home-root	<<USERSUPPER>>/SomeUser/x	case variant
+block	home-root	<<USERS>>/some-user/x	dash in the account name
 block	home-root	./Users/someuser/x	relative path, dot before the prefix
-block	home-root	file:///Users/someuser/x	file URL
-block	home-root	(/Users/someuser/x)	parenthesised path
+block	home-root	file://<<USERS>>/someuser/x	file URL
+block	home-root	(<<USERS>>/someuser/x)	parenthesised path
 allow	home-root	api%2FUsers%2Fid=7	encoded REST path segment after a word char: allowed (grumpy r6 path boundary)
 allow	home-root	/Users/<user>/project/app.py	scrubbed placeholder
 allow	home-root	/home/<user>/project	scrubbed placeholder
@@ -40,21 +45,21 @@ allow	home-root	`/Users/` prefix	quoted prefix
 allow	home-root	https://github.com/users/someuser/projects/7	GitHub Projects v2 user board URL (grumpy r6)
 allow	home-root	https://example.com/home/about	policy page URL with a /home/ segment (grumpy r6)
 allow	home-root	https://example.com/Users/terms	policy page URL with a /Users/ segment (grumpy r6)
-block	home-root	/System/Volumes/Data/Users/someuser/x	macOS firmlinked data volume (r7)
-block	home-root	/Volumes/Backup/Users/someuser/x	external or Time Machine volume (r7)
+block	home-root	/System/Volumes/Data<<USERS>>/someuser/x	macOS firmlinked data volume (r7)
+block	home-root	/Volumes/Backup<<USERS>>/someuser/x	external or Time Machine volume (r7)
 block	home-root	/Volumes/Macintosh HD/Users/someuser/x	volume name with a space (r7)
-block	home-root	/host_mnt/Users/someuser/x	Docker Desktop for Mac host mount (r7)
-block	home-root	/run/desktop/mnt/host/c/Users/someuser	Docker Desktop for Windows host mount (r7)
-block	home-root	/var/home/someuser/x	Fedora Atomic / ostree home (r7)
-block	home-root	/export/home/someuser	Solaris-style exported home (r7)
+block	home-root	/host_mnt<<USERS>>/someuser/x	Docker Desktop for Mac host mount (r7)
+block	home-root	/run/desktop/mnt/host/c<<USERS>>/someuser	Docker Desktop for Windows host mount (r7)
+block	home-root	/var<<HOME>>/someuser/x	Fedora Atomic / ostree home (r7)
+block	home-root	/export<<HOME>>/someuser	Solaris-style exported home (r7)
 block	home-root	\\wsl.localhost\Ubuntu\home\someuser	WSL UNC path, dotted host (r7)
 block	home-root	\\wsl$\Ubuntu-22.04\home\someuser	WSL legacy UNC path (r7)
 block	home-root	D:\Backup\Users\someuser	Windows backup folder under a drive (r7)
-block	home-root	file://localhost/Users/someuser	file URL with localhost authority (r7)
-block	home-root	http://localhost:8501/?p=/Users/someuser	path in a localhost query string (r7)
-block	home-root	cwd=/Users/someuser/x	path after =
-block	home-root	host:/home/someuser	path after a colon
-block	home-root	**/Users/someuser/x**	markdown emphasis around the path (r7)
+block	home-root	file://localhost<<USERS>>/someuser	file URL with localhost authority (r7)
+block	home-root	http://localhost:8501/?p=<<USERS>>/someuser	path in a localhost query string (r7)
+block	home-root	cwd=<<USERS>>/someuser/x	path after =
+block	home-root	host:<<HOME>>/someuser	path after a colon
+block	home-root	**<<USERS>>/someuser/x**	markdown emphasis around the path (r7)
 block	home-root	see https://localhost/users/someuser	localhost URL is not a public host (r7)
 allow	home-root	https://example.com/en/home/about	URL with /home/ below a first segment (grumpy r7)
 allow	home-root	https://www.example.co.uk:8443/users/terms	URL with subdomain and port (r7)
@@ -91,16 +96,16 @@ block	claude-tmp	%2Ftmp%2Fclaude-503	URL-encoded
 block	claude-tmp	/TMP/Claude-503/x	case variant
 allow	claude-tmp	/private/tmp/claude-<uid>/x	scrubbed uid
 allow	claude-tmp	/tmp/claude-[0-9] in the regex	prose quoting the pattern
-block	home-private	~/Documents/project/src	tilde + Documents
+block	home-private	<<TILDE>>/Documents/project/src	tilde + Documents
 block	home-private	~/Library/Mobile Documents/x	tilde + Library
-block	home-private	$HOME/Documents/x	$HOME form
-block	home-private	${HOME}/Desktop/x	${HOME} form
+block	home-private	<<ENVHOME>>/Documents/x	$HOME form
+block	home-private	<<ENVHOMEBR>>/Desktop/x	${HOME} form
 block	home-private	~%2FDownloads%2Fa.pdf	URL-encoded slashes
 block	home-private	~\/documents\/x	JSON-escaped, lower case
-block	home-private	~/DOCUMENTS/x	case variant
+block	home-private	<<TILDE>>/DOCUMENTS/x	case variant
 allow	home-private	~/.claude/CLAUDE.md	tilde path, not a private folder
 allow	home-private	~/project/src	tilde path, not a private folder
-allow	home-private	the ~/Documents folder	folder name with no trailing slash
+allow	home-private	the <<TILDE>>/Documents folder	folder name with no trailing slash
 allow	home-private	(~|$HOME)/(Documents|Desktop)/	prose quoting the pattern
 allow	home-private	<projects>/ta-g0-2/src	scrubbed projects placeholder
 block	agent-worktree	.claude/worktrees/agent-af118a54/src	agent worktree id

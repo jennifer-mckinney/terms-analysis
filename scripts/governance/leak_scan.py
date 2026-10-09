@@ -55,8 +55,8 @@ from urllib.parse import unquote
 MAX_PASSES = 3
 
 # Only these escapes are undone. Other backslash sequences (\n, \U ...) are
-# left alone so a Windows path such as C:\Users\nancy is not mangled before
-# the backslash fold in step 3.
+# left alone so a Windows home path whose account name starts with "n" is not
+# mangled before the backslash fold in step 3.
 _ESCAPE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|([/\\]))")
 
 # (name, compiled regex, context or None). A context is built once per
@@ -174,6 +174,48 @@ def normalise(text: str) -> str:
             break
         text = decoded
     return text.replace("\\", "/").lower()
+
+
+# --- vector placeholder tokens (#192, #145 Part A) --------------------------
+#
+# .claude/governance/leak-vectors.tsv is tracked, and the tracked tree must not
+# contain a literal home path (test_tracked_tree_has_no_home_paths). Its
+# samples therefore spell each home root as a "<<NAME>>" token, and this table
+# is the ONLY place the tokens are expanded (expand_vector_tokens). Each value
+# is the exact root it stands for, byte for byte; no value ends in a path
+# separator, so this source file is not a home-path leak either.
+VECTOR_TOKENS: Dict[str, str] = {
+    "USERS": "/Users",
+    "USERSUPPER": "/USERS",  # case-variant vector
+    "HOME": "/home",
+    "WINUSERS": "C:\\Users",
+    "WINUSERSESC": "C:\\\\Users",  # JSON-escaped Windows root
+    "TILDE": "~",
+    "ENVHOME": "$HOME",
+    "ENVHOMEBR": "${HOME}",
+}
+_VECTOR_TOKEN = re.compile(r"<<([^<>]*)>>")
+
+
+def expand_vector_tokens(text: str) -> str:
+    """Expand every "<<NAME>>" token in a leak-vectors.tsv field.
+
+    Fails closed (ValueError) on an unknown token name and on any "<<" or ">>"
+    left outside a well-formed token (unterminated or nested), so a typo can
+    never turn a block vector into an inert string. The error names the token
+    only in ASCII-escaped, truncated form.
+    """
+    outside = _VECTOR_TOKEN.sub("", text)
+    if "<<" in outside or ">>" in outside:
+        raise ValueError("malformed vector token: '<<' or '>>' outside a <<NAME>> token")
+
+    def repl(match: "re.Match[str]") -> str:
+        name = match.group(1)
+        if name not in VECTOR_TOKENS:
+            raise ValueError(f"unknown vector token <<{ascii(name)[1:-1][:40]}>>")
+        return VECTOR_TOKENS[name]
+
+    return _VECTOR_TOKEN.sub(repl, text)
 
 
 def load_patterns(path: Path) -> List[Pattern]:

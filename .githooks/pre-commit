@@ -70,7 +70,8 @@ fi
 for pattern in "${REQUIRED_GITIGNORE_PATTERNS[@]}"; do
     # Exact-line match against .gitignore. Comments and inline whitespace on the
     # pattern line are not accepted -- must be a clean line-for-line match.
-    if ! grep -Fxq "${pattern}" "${GITIGNORE}"; then
+    # "--": a required pattern starting with "-" is a pattern, not an option.
+    if ! grep -Fxq -- "${pattern}" "${GITIGNORE}"; then
         fail ".gitignore is missing required pattern: \`${pattern}\`. This entry is protected -- see .claude/governance/required-gitignore.txt."
     fi
 done
@@ -95,7 +96,9 @@ fi
 if [[ -n "${STAGED}" ]]; then
     while IFS= read -r path; do
         [[ -z "${path}" ]] && continue
-        base="$(basename "${path}")"
+        # #192: parameter expansion, not basename(1). A staged name such as
+        # "-n.md" or "--help.md" was parsed as an option and killed the hook.
+        base="${path##*/}"
         # Case-insensitive regex: .env or .env.<suffix>
         if [[ "${base}" =~ ^\.[Ee][Nn][Vv](\..*)?$ ]]; then
             allowed=0
