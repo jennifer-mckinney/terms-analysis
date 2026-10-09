@@ -1,4 +1,4 @@
-format: agent-optimized (refreshed 2026-10-10; replaces the 2026-07-03 version)
+format: agent-optimized (refreshed 2026-10-09; replaces the 2026-07-03 version)
 # terms-analysis: project identity, hard requirements, index
 loads: auto
 scope: project
@@ -18,7 +18,7 @@ xref: [[LIB-ARCH]] [[LIB-STACK]] [[LIB-LEGAL]] [[LIB-TEST]] [[LIB-API]] [[LIB-RU
 |-----|-------|
 | Purpose | Analyse ToS and privacy policies for compliance risk, using rule + LLM + RAG detection |
 | Stack | FastAPI backend; Streamlit UI (v2 primary, v1 legacy rollback; Vue 3 planned under D2/G4); SQLite; LocalAI (Apertus-8B, EuroLLM-22B); numpy exhaustive search for the legal KB (no FAISS, no ANN) |
-| Python | CI runs 3.11 (`ci.yml`); local dev is 3.14. Moving CI to 3.14 is #215, blocked by #265 |
+| Python | CI runs 3.11 (`ci.yml`); local dev is 3.14. Moving CI to 3.14 via one `.python-version` file is #215 (in progress) |
 | Jurisdictions | 30 codes (full list in `schemas.py`); empty `jurisdictions=[]` means no filter |
 | Risk method | IRP composite per finding. Details: [[LIB-RULES#IRP]] |
 | Sibling repo | `legal-corpus-ingester` (PUBLIC, like this one). Corpus bundles feed `legal_kb.py`; `load_from_bundle` is still unwired (D9 / two silent failures) |
@@ -90,14 +90,16 @@ These identifiers mean different things in the ingester repo. Never cite a bare 
 
 - P9 (LIB-PRINCIPLES): independent security and code-quality review before code reaches main. Since 2026-10-09 it runs in CI (`p9-review.yml`, claude-code-action on Opus, read-only tool allowlist, deny rules for `/proc`, `.git` and credentials). Reviews cost API credit; a `billing_error` shows as `is_error:true`, $0, under 1 s.
 - Retired on 2026-10-09 (#214): the local pre-push hard gate, `.git/reviews/*.signoff.json`, owner push scripts and evidence comments. `automations/p9-pre-push.md` stays as the verdict-contract reference the CI jobs use (cited by `docs/P9_ENFORCEMENT_GUIDE.md` and `docs/DEV_SETUP.md`).
-- Required checks on `main` today: `Lint (ruff)`, `Test (pytest + coverage)`, `Dependency audit (pip-audit)`. `security-review`, `grumpy-review` and `Evidence leak scan (docs/evidence)` are NOT required yet (owner action; a red review does not block the merge button until then). `main` requires conversation resolution, so an unresolved thread blocks the merge.
+- Required checks on `main` as of 2026-10-09: `Lint (ruff)`, `Test (pytest + coverage)`, `Dependency audit (pip-audit)`. `security-review`, `grumpy-review` and `Evidence leak scan (docs/evidence)` are NOT required yet (owner action; a red review does not block the merge button until then). `main` requires conversation resolution, so an unresolved thread blocks the merge.
 - Round cap: a third review FAIL on a card goes to the owner (re-scope, or ship LOW/NIT with cards).
 
 ## governance-monitoring
 
-- G1 injection: `~/.claude/scripts/verify-injection.sh`, which reads `~/.claude/session-start.log`.
-- G2 content: `.claude/_governance-manifest.json` tracks this file, LIB-PRINCIPLES and `required-gitignore.txt`; the owner's global CLAUDE.md and PEAS live in the untracked `.claude/_governance-manifest.local.json` (#200). Run `verify-hashes.sh`. Regenerate only with owner intent, as part of a reviewed PR.
-- G3 periodic "is it wired" pass. Reviews catch diffs, not absences, so grep for callers of every public entry point and watch for success paths that can't tell "nothing to do" from "not wired". Automating this is #224.
+IDs here are M1-M3 so they never collide with the git-and-review G-rules above. The old SO1-SO16 session-outcome anchors are gone; cite git history or `docs/reports/` instead.
+
+- M1 injection: `~/.claude/scripts/verify-injection.sh`, which reads `~/.claude/session-start.log`.
+- M2 content: `.claude/_governance-manifest.json` tracks this file, LIB-PRINCIPLES and `required-gitignore.txt`; the owner's global CLAUDE.md and PEAS live in the untracked `.claude/_governance-manifest.local.json` (#200). Run `verify-hashes.sh`. Regenerate only with owner intent, as part of a reviewed PR.
+- M3 periodic "is it wired" pass. Reviews catch diffs, not absences, so grep for callers of every public entry point and watch for success paths that can't tell "nothing to do" from "not wired". Automating this is #224.
 
 ## reference-library
 
