@@ -1,0 +1,86 @@
+name: Wiring audit (collect)
+
+# Weekly "is it wired" audit, step 2 of 2 (card #224, ADR 0002). A day after
+# wiring-audit-submit.yml, downloads that workflow's batch hand-off from its
+# latest successful run on the default branch, checks the batch against the
+# result contract (ended, every request present once and succeeded, end_turn,
+# schema-valid output, the canary's defect reported), files the findings as
+# issues through the REST API, logs the actual cost, and deletes the batch on
+# every exit path. Code and config: scripts/audit/ (the cron below is pinned
+# to config.json by a test).
+#
+# Model output never reaches a shell: the only step that sees it is the
+# Python collector, which posts validated, escaped fields. Conditions as in
+# the submit workflow: GitHub-hosted, schedule and dispatch only, default
+# branch and wiring-audit environment only, SHA pins, least privilege.
+
+on:
+  schedule:
+    - cron: "0 4 * * 2"
+  workflow_dispatch:
+
+# Nothing by default; the job grants only what it uses.
+permissions: {}
+
+concurrency:
+  group: wiring-audit-collect
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    name: collect
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    environment: wiring-audit
+    # Longer than the 600 s cancel timeout in config.json.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - name: Require the wiring-audit API key
+        env:
+          WIRING_AUDIT_API_KEY: ${{ secrets.WIRING_AUDIT_API_KEY }}
+        run: |
+          if [ -z "${WIRING_AUDIT_API_KEY//[[:space:]]/}" ]; then
+            echo "::error title=wiring-audit::MISSING_SECRET: the WIRING_AUDIT_API_KEY secret is not set in the wiring-audit environment. Add the dedicated audit key there (ADR 0002 condition 4)."
+            exit 1
+          fi
+          echo "wiring-audit: WIRING_AUDIT_API_KEY is set"
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version-file: .python-version
+
+      # Attack sketch T10: the hand-off comes only from a successful run of the
+      # submit workflow on the default branch, never from another workflow's
+      # artifact of the same name.
+      - name: Download the hand-off from the latest successful submit run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow wiring-audit-submit.yml \
+            --branch "$DEFAULT_BRANCH" --status success --limit 1 --json databaseId \
+            --jq '.[0].databaseId // empty')"
+          if ! [[ "$run_id" =~ ^[0-9]+$ ]]; then
+            echo "::error title=wiring-audit::ARTIFACT_INVALID: no successful wiring-audit-submit.yml run on the default branch to collect."
+            exit 1
+          fi
+          echo "wiring-audit: collecting the hand-off of submit run ${run_id}"
+          gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name wiring-audit-batch \
+            --dir "$RUNNER_TEMP/wiring-audit"
+
+      - name: Check the batch, file findings and delete the batch
+        env:
+          WIRING_AUDIT_API_KEY: ${{ secrets.WIRING_AUDIT_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python3 -I scripts/audit/collect.py --config scripts/audit/config.json
+          --artifact "$RUNNER_TEMP/wiring-audit/wiring-audit-batch.json"
