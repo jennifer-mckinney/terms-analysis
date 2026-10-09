@@ -795,7 +795,7 @@ class TestFetchUrlTextErrorPaths:
     _fetch_error = staticmethod(TestFetchUrlText._fetch_error)
 
     @staticmethod
-    def _refused(url):
+    def _refused():
         import httpx
 
         requests = []
@@ -808,34 +808,34 @@ class TestFetchUrlTextErrorPaths:
 
     @pytest.mark.parametrize("url", ["http://[::1/x", "http://[::1]x/"])
     def test_unparseable_authority_is_malformed(self, monkeypatch, url):
-        handler, requests = self._refused(url)
+        handler, requests = self._refused()
         self._serve(monkeypatch, handler)
         assert self._fetch_error(url).reason == "malformed"
         assert requests == []
 
     @pytest.mark.parametrize("port", ["0", "65536", "99999", "8a", "123456"])
     def test_invalid_port_is_malformed(self, monkeypatch, port):
-        handler, requests = self._refused(port)
+        handler, requests = self._refused()
         self._serve(monkeypatch, handler)
         assert self._fetch_error(f"http://example.com:{port}/").reason == "malformed"
         assert requests == []
 
     @pytest.mark.parametrize("host", ["[v1.fe]", "[fe80::1%25en0]"])
     def test_bracketed_host_that_is_not_plain_ipv6_is_refused(self, monkeypatch, host):
-        handler, requests = self._refused(host)
+        handler, requests = self._refused()
         self._serve(monkeypatch, handler)
         assert self._fetch_error(f"http://{host}/").reason == "host"
         assert requests == []
 
     def test_idn_label_too_long_after_encoding_is_refused(self, monkeypatch):
-        handler, requests = self._refused("idn")
+        handler, requests = self._refused()
         self._serve(monkeypatch, handler)
         exc = self._fetch_error("http://" + "\u00fc" * 70 + ".example/")
         assert exc.reason == "host"
         assert requests == []
 
     def test_idn_name_over_253_octets_after_encoding_is_refused(self, monkeypatch):
-        handler, requests = self._refused("idn")
+        handler, requests = self._refused()
         self._serve(monkeypatch, handler)
         raw = ".".join(["\u00fc" * 5] * 30) + ".example"
         assert len(raw) <= 253  # only the encoded form is over the limit
