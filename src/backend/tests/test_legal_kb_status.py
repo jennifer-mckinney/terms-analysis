@@ -202,6 +202,9 @@ _DEGENERATE_QUERY_VECTORS = [
     pytest.param([float("inf"), 1.0], "non-finite", id="pos-inf"),
     pytest.param([1.0, float("-inf")], "non-finite", id="neg-inf"),
     pytest.param([1e39, 0.0], "non-finite", id="float32-overflow"),
+    # Round 4: every component is a finite float32, but the float32 L2 norm
+    # overflows to inf, so the "unit" vector would be all zeros / NaN.
+    pytest.param([3e38, 3e38], "non-finite", id="float32-norm-overflow"),
 ]
 
 
@@ -398,6 +401,88 @@ def test_legal_kb_retrieve_row_count_mismatch_is_error(kb_paths, caplog):
     assert any(
         r.exc_info and r.exc_info[0] is LegalKBIndexCorruptError for r in caplog.records
     )
+
+
+# Round 4 (CI review MEDIUM, card #278): _load() used to accept any matrix on
+# disk. A NaN row gave a NaN dense score: with a floor it was dropped silently
+# (an all-NaN index reported NO_MATCH, "grounded, no relevant law"); with the
+# floor disabled NaN / inf scores reached rrf_fuse and an arbitrary ranking
+# came back OK. A non-floating matrix (int / bool / complex / str / object)
+# is not an embedding index at all. Each is a corrupt index: ERROR, like the
+# row-count mismatch above. ``reason`` is the cause the message must state
+# (None: only the category is pinned, e.g. numpy refuses the object array
+# before its dtype is visible).
+_NAN = float("nan")
+_INF = float("inf")
+_CORRUPT_MATRICES = [
+    pytest.param(np.array([[_NAN, 0.0], [0.0, 1.0]], dtype="float32"), "non-finite", id="nan-row"),
+    pytest.param(np.array([[1.0, 0.0], [_NAN, _NAN]], dtype="float32"), "non-finite", id="nan-second-row"),
+    pytest.param(np.full((2, 2), _NAN, dtype="float32"), "non-finite", id="all-nan"),
+    pytest.param(np.array([[_INF, 0.0], [0.0, 1.0]], dtype="float32"), "non-finite", id="pos-inf"),
+    pytest.param(np.array([[1.0, 0.0], [0.0, -_INF]], dtype="float32"), "non-finite", id="neg-inf"),
+    pytest.param(np.array([[_NAN, 0.0], [0.0, 1.0]], dtype="float64"), "non-finite", id="nan-float64"),
+    pytest.param(np.eye(2, dtype="int64"), "int64", id="int64"),
+    pytest.param(np.eye(2, dtype="int8"), "int8", id="int8"),
+    pytest.param(np.eye(2, dtype=bool), "bool", id="bool"),
+    pytest.param(np.eye(2, dtype="complex64"), "complex64", id="complex64"),
+    pytest.param(np.array([["1", "0"], ["0", "1"]]), "<U1", id="unicode-str"),
+    pytest.param(np.eye(2).astype(object), None, id="object"),
+]
+
+
+@pytest.mark.parametrize("floor", [0.5, None], ids=["floor-set", "floor-disabled"])
+@pytest.mark.parametrize("matrix, reason", _CORRUPT_MATRICES)
+def test_legal_kb_retrieve_non_finite_or_non_float_matrix_is_error(
+    kb_paths, caplog, min_score, matrix, reason, floor
+):
+    index_path, metadata_path = kb_paths
+    # allow_pickle only so the object-dtype file can be written; _load()
+    # must still read every file with allow_pickle=False.
+    np.save(index_path, matrix, allow_pickle=True)
+    metadata_path.write_text(json.dumps(_CHUNKS), encoding="utf-8")
+    min_score(floor)
+
+    with pytest.raises(LegalKBIndexCorruptError) as info:
+        LegalKnowledgeBase()._load()
+    message = info.value.args[0]
+    # Message honesty and no leak (F8): names the index and the true cause,
+    # never the local absolute path.
+    assert "legal kb index" in message.lower()
+    if reason is not None:
+        assert reason in message
+    assert str(index_path.parent) not in message
+    message.encode("utf-8")
+
+    kb = LegalKnowledgeBase()
+    with caplog.at_level(logging.ERROR, logger=_LOGGER_NAME):
+        result = _retrieve(kb, _FixedEmbedClient([1.0, 0.0]))
+    assert result.status is RetrievalStatus.ERROR
+    assert result.chunks == ()
+    assert result.grounded is False
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    assert errors[0].exc_info and errors[0].exc_info[0] is LegalKBIndexCorruptError
+    assert str(index_path.parent) not in errors[0].getMessage()
+    # Nothing is cached: a corrupt matrix never becomes the serving index.
+    assert kb._matrix is None and kb.chunk_count == 0
+
+
+def test_legal_kb_finite_float32_matrix_still_loads(kb_paths, min_score):
+    # Positive control for the round-4 check: finite float32 rows, including
+    # negative, zero and subnormal components, load and retrieve as before.
+    index_path, metadata_path = kb_paths
+    matrix = np.array([[1.0, 0.0], [-0.6, 1e-45]], dtype="float32")
+    assert np.isfinite(matrix).all()
+    np.save(index_path, matrix)
+    metadata_path.write_text(json.dumps(_CHUNKS), encoding="utf-8")
+    kb = LegalKnowledgeBase()
+    kb._load()
+    assert kb.chunk_count == 2
+    for floor in (0.5, None):
+        min_score(floor)
+        result = _retrieve(LegalKnowledgeBase(), _FixedEmbedClient([1.0, 0.0]), top_k=1)
+        assert result.status is RetrievalStatus.OK
+        assert result.chunks[0]["jurisdiction"] == "GDPR"
 
 
 def test_legal_kb_retrieve_empty_index_is_no_index_logged_as_empty_not_missing(kb_paths, caplog):
@@ -1446,6 +1531,48 @@ def test_legal_kb_bundle_with_non_string_metadata_is_rejected(tmp_path, metadata
         kb.load_from_bundle(bundle)
     info.value.args[0].encode("utf-8")
     assert kb.chunk_count == 0
+
+
+@pytest.mark.parametrize(
+    "matrix",
+    [
+        pytest.param(np.array([[_NAN, 0.0], [0.0, 1.0]], dtype="float32"), id="nan-row"),
+        pytest.param(np.full((2, 2), _NAN, dtype="float32"), id="all-nan"),
+        pytest.param(np.array([[_INF, 0.0], [0.0, -_INF]], dtype="float32"), id="inf"),
+    ],
+)
+def test_legal_kb_bundle_with_non_finite_matrix_is_rejected(tmp_path, matrix):
+    # Round 4 (card #278): load_from_bundle() has its own np.load seam and
+    # already insists on float32, but accepted NaN / inf rows. Same rule and
+    # same error as _load(): a non-finite matrix is a corrupt index.
+    bundle = tmp_path / "bundle"
+    (bundle / "index").mkdir(parents=True)
+    (bundle / "MANIFEST.yaml").write_text("chunker_version: v1\n", encoding="utf-8")
+    np.save(bundle / "index" / "legal_kb.npy", matrix)
+    (bundle / "index" / "legal_kb_metadata.json").write_text(
+        json.dumps(_CHUNKS), encoding="utf-8"
+    )
+    kb = LegalKnowledgeBase()
+    with pytest.raises(LegalKBIndexCorruptError) as info:
+        kb.load_from_bundle(bundle)
+    message = info.value.args[0]
+    assert "non-finite" in message
+    assert str(tmp_path) not in message
+    assert kb._matrix is None and kb.chunk_count == 0
+
+
+def test_legal_kb_bundle_with_finite_float32_matrix_loads(tmp_path):
+    # Positive control for the bundle seam.
+    bundle = tmp_path / "bundle"
+    (bundle / "index").mkdir(parents=True)
+    (bundle / "MANIFEST.yaml").write_text("chunker_version: v1\n", encoding="utf-8")
+    np.save(bundle / "index" / "legal_kb.npy", np.array([[1.0, 0.0], [-0.6, 1e-45]], dtype="float32"))
+    (bundle / "index" / "legal_kb_metadata.json").write_text(
+        json.dumps(_CHUNKS), encoding="utf-8"
+    )
+    kb = LegalKnowledgeBase()
+    kb.load_from_bundle(bundle)
+    assert kb.chunk_count == 2
 
 
 @pytest.mark.parametrize(
