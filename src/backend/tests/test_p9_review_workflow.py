@@ -19,6 +19,7 @@ Covered here:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -331,11 +332,28 @@ def test_gate_accepts_non_negative_int_lines(tmp_path: Path, line: int) -> None:
     assert f"(app/x.py:{line})" in proc.stderr
 
 
-def test_severity_table_has_positive_and_negative_cases() -> None:
-    # Contract test (QUALITY-BAR 9): each allowed tag has a lower-case
-    # variant that must be refused; the briefs' list is non-trivial.
-    assert len(SEVERITIES) >= 2
-    assert all(s.isupper() and s.lower() not in SEVERITIES for s in SEVERITIES)
+# Independent literal: the severity scale the P9 contract defines. Not derived
+# from the gate or the briefs, so drift in either one turns this red.
+EXPECTED_SEVERITIES = frozenset({"CRITICAL", "HIGH", "MEDIUM", "LOW", "NIT"})
+
+
+def _gate_severities() -> frozenset[str]:
+    """The gate's own accepted severity set, loaded from check_verdict.py."""
+    spec = importlib.util.spec_from_file_location("p9_check_verdict", GATE)
+    assert spec is not None and spec.loader is not None, f"cannot load {GATE}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return frozenset(module.SEVERITIES)
+
+
+def test_severity_table_matches_gate_briefs_and_contract() -> None:
+    # Contract test (QUALITY-BAR 9, F3): the gate accepts exactly the tags the
+    # briefs tell reviewers to emit, and both match the fixed P9 scale.
+    gate = _gate_severities()
+    assert gate == EXPECTED_SEVERITIES
+    assert frozenset(SEVERITIES) == EXPECTED_SEVERITIES
+    assert gate == frozenset(SEVERITIES)
+    assert all(s.isupper() and s.lower() not in gate for s in gate)
 
 
 @pytest.mark.parametrize("args", [(), ("a.json", "b.json")], ids=["no-args", "two-args"])
