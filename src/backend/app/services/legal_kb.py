@@ -328,12 +328,27 @@ def _iter_corpus_files(corpus_dir: Path) -> List[Path]:
     return sorted(corpus_dir.glob("*/*.txt"))
 
 
-def _normalize(vector: List[float]) -> Optional[np.ndarray]:
-    array = np.array(vector, dtype="float32")
-    norm = np.linalg.norm(array)
+def _normalize(vector: List[float]) -> Tuple[Optional[np.ndarray], str]:
+    """L2-normalize ``vector`` as float32.
+
+    Returns ``(unit_vector, "")`` on success, or ``(None, reason)`` where
+    reason is ``"zero-norm"`` or ``"non-finite"``. A NaN/inf component (or a
+    value that overflows float32, e.g. 1e39) would make every cosine score
+    NaN, so it is rejected like the zero vector instead of being normalized
+    (CI review MEDIUM, ref #91). Both build and retrieve go through here.
+    """
+    # Overflow to inf in the float32 cast is detected below, so silence the
+    # numpy RuntimeWarning for it rather than letting it reach the log.
+    with np.errstate(over="ignore", invalid="ignore"):
+        array = np.array(vector, dtype="float32")
+        norm = np.linalg.norm(array)
+    # The norm check also catches finite components whose float32 norm
+    # overflows (e.g. [3e38, 3e38]).
+    if not (np.isfinite(array).all() and np.isfinite(norm)):
+        return None, "non-finite"
     if norm == 0:
-        return None
-    return array / norm
+        return None, "zero-norm"
+    return array / norm, ""
 
 
 class LegalKnowledgeBase:
@@ -387,7 +402,8 @@ class LegalKnowledgeBase:
             embedding = await client.embed(chunk["text"], model=settings.model_world)
             if embedding is None:
                 continue
-            normalized = _normalize(embedding)
+            # Zero-norm or non-finite embeddings are skipped, never written.
+            normalized, _reason = _normalize(embedding)
             if normalized is None:
                 continue
             vectors.append(normalized)
@@ -672,14 +688,17 @@ class LegalKnowledgeBase:
         query_embedding = await client.embed(query, model=settings.model_world)
         if query_embedding is None:
             raise LegalKBRetrievalError("embedding endpoint returned no query vector")
-        query_vec = _normalize(query_embedding)
+        query_vec, defect = _normalize(query_embedding)
         if query_vec is None:
             # Grumpy F1: the query is never empty (jurisdiction codes + up to
             # 500 chars of document), so a working embedder never returns a
             # zero vector. A zero-norm vector means the embedder is broken or
             # degenerate; reporting it as NO_MATCH would claim "grounded, no
-            # relevant law" for a dead embedder. Treat it as a failure.
-            raise LegalKBRetrievalError("embedding endpoint returned a zero-norm query vector")
+            # relevant law" for a dead embedder. Treat it as a failure. A
+            # non-finite vector (NaN/inf) is the same class of failure.
+            raise LegalKBRetrievalError(
+                f"embedding endpoint returned a {defect} query vector"
+            )
 
         if query_vec.shape[0] != matrix.shape[1]:
             raise LegalKBRetrievalError(
