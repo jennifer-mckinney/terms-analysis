@@ -3,8 +3,9 @@ name: P9 Review
 # P9 independent review as standard CI jobs (terms-analysis#191).
 # Two Claude reviewers run on every pull request to main. Each one comments
 # inline on its findings and writes p9-verdict.json; a separate gate step,
-# run from a copy in RUNNER_TEMP, fails the job unless the verdict is PASS
-# with zero findings (.github/p9/check_verdict.py).
+# run from a copy in RUNNER_TEMP, fails the job on any CRITICAL, HIGH or
+# MEDIUM finding and passes when every finding is LOW or NIT, printing those
+# as non-blocking (.github/p9/check_verdict.py, owner decision 2026-10-09).
 #
 # The reviewer gets an explicit tool allowlist (#214 security finding): Read,
 # Grep, Glob, writes to p9-verdict.json only, and the inline PR-comment MCP

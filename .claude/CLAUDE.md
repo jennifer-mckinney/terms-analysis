@@ -138,9 +138,9 @@ xref: [[.claude/rules/testing.md]]
 ## session-outcomes-2026-07-04
 
 ### SO11: p9-loop-pattern-active
-rule: every PR to `main` runs the parallel security+grumpy review loop. ANY finding of ANY severity triggers a fix-Coder dispatch; iterate to fixed-point (both PASS zero findings) before the PR is ready to merge
+rule: every PR to `main` runs the parallel security+grumpy review loop. A CRITICAL, HIGH or MEDIUM finding triggers a fix-Coder dispatch; iterate until neither job reports a blocking finding. LOW and NIT findings are posted and carded, not chased (owner, 2026-10-09)
 codified: since 2026-10-09 (#191) the loop runs in CI: `.github/workflows/p9-review.yml` jobs `security-review` + `grumpy-review`, verdict contract in `automations/p9-pre-push.md`
-because: user directive 2026-07-04 extends P9 zero-tolerance-security to zero-tolerance-grumpy
+because: user directive 2026-07-04 made P9 zero-tolerance; narrowed 2026-10-09 to CRITICAL/HIGH/MEDIUM after Anthropic guidance and our own round data showed nit-chasing drove over-engineering
 whack-a-mole warning: when name-based deny-lists keep growing across rounds, switch to structural fix (pattern-based rules, schema-driven ordering, input normalization). Two structural-fix wins this session:
   - SO12 F2 (chip order): switched `_ACTION_ITEMS_BY_CHIP.items()` → `typing.get_args(ContextChip)`
   - ingester rounds 6-9: added `_REDACT_SUFFIXES` + `_normalize_key(camelCase→snake_case)` instead of growing exact-name list further
@@ -219,9 +219,9 @@ because: catches silent governance drift between sessions
 xref: [[LIB-PRINCIPLES#P8]]
 
 ### G3: pr-independent-review
-rule: enforce LIB-PRINCIPLES P9 — every PR to `main` gets security-engineer + grumpy-developer reviews in CI. Zero-tolerance for BOTH per 2026-07-04 user directive: ANY finding of ANY severity triggers a fix-Coder + new push until both PASS
+rule: enforce LIB-PRINCIPLES P9 — every PR to `main` gets security-engineer + grumpy-developer reviews in CI. A CRITICAL, HIGH or MEDIUM finding from either triggers a fix-Coder + new push until neither reports a blocking finding; LOW and NIT are carded (owner, 2026-10-09)
 automation: `.github/workflows/p9-review.yml` jobs `security-review` + `grumpy-review`; required checks on `main` pending owner setup after the first green run (see [[SO11]] [[SO13]])
-gate: ANY finding of ANY severity, or a missing/unparseable verdict, fails the job (which blocks merge once the checks are required); only the owner can waive
+gate: any CRITICAL/HIGH/MEDIUM finding (`BLOCKING_SEVERITIES` in `.github/p9/check_verdict.py`), or a missing/unparseable verdict, fails the job (which blocks merge once the checks are required); only the owner can waive
 xref: [[LIB-PRINCIPLES#P9]] [[SO11]] [[SO13]] [[automations/p9-pre-push.md]]
 
 ## plans-and-analysis
