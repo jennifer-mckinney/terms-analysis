@@ -23,8 +23,9 @@ Workflow: `.github/workflows/p9-review.yml`.
      reviewer can touch the tree;
   3. writes `git diff origin/<base>...HEAD` to `$RUNNER_TEMP/p9/pr.diff`,
      the changed-file list to `$RUNNER_TEMP/p9/changed-files.txt` and
-     `git log --oneline origin/<base>..HEAD` to `$RUNNER_TEMP/p9/commits.txt`
-     (the base branch passes through `env`, not inline);
+     `git log --oneline origin/<base>..<PR head SHA>` to
+     `$RUNNER_TEMP/p9/commits.txt`, so the synthetic PR merge commit is not
+     listed (the base branch and head SHA pass through `env`, not inline);
   4. runs `anthropics/claude-code-action` (pinned by commit SHA) with a prompt
      that has it read the changed-file list and the diff first, then its brief,
      `.github/p9/security-engineer.md` or `.github/p9/grumpy-developer.md`;

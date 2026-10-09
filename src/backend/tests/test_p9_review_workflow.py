@@ -72,6 +72,7 @@ RUNNER_TEMP_EXPR = "${{ runner.temp }}"
 READ_PATH_PREFIXES = ("//", "~/", "./")
 AUTOMATION_DOC = REPO_ROOT / "automations" / "p9-pre-push.md"
 BASE_REF_EXPR = "${{ github.base_ref }}"
+HEAD_SHA_EXPR = "${{ github.event.pull_request.head.sha }}"
 JOB_PERMISSIONS = {"contents": "read", "pull-requests": "write"}
 PASS_DOC = {"verdict": "PASS", "findings": []}
 FINDING = {"severity": "HIGH", "title": "Swallowed error", "file": "app/x.py", "line": 3}
@@ -349,11 +350,8 @@ def _gate_severities() -> frozenset[str]:
 def test_severity_table_matches_gate_briefs_and_contract() -> None:
     # Contract test (QUALITY-BAR 9, F3): the gate accepts exactly the tags the
     # briefs tell reviewers to emit, and both match the fixed P9 scale.
-    gate = _gate_severities()
-    assert gate == EXPECTED_SEVERITIES
+    assert _gate_severities() == EXPECTED_SEVERITIES
     assert frozenset(SEVERITIES) == EXPECTED_SEVERITIES
-    assert gate == frozenset(SEVERITIES)
-    assert all(s.isupper() and s.lower() not in gate for s in gate)
 
 
 @pytest.mark.parametrize("args", [(), ("a.json", "b.json")], ids=["no-args", "two-args"])
@@ -509,8 +507,8 @@ def test_diff_prep_step_runs_before_the_reviewer() -> None:
         prep = [s for s in steps if s.get("name") == "Prepare PR diff"]
         assert len(prep) == 1, name
         assert steps.index(prep[0]) < steps.index(_action_step(job)), name
-        # The base branch arrives through env, never inline in the script.
-        assert prep[0]["env"] == {"BASE_REF": BASE_REF_EXPR}, name
+        # The base branch and PR head SHA arrive through env, never inline.
+        assert prep[0]["env"] == {"BASE_REF": BASE_REF_EXPR, "HEAD_SHA": HEAD_SHA_EXPR}, name
         assert "${{" not in prep[0]["run"], name
 
 
@@ -562,32 +560,40 @@ _needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is requ
 GIT_TIMEOUT = 30
 
 
-def _git(repo: Path, *args: str) -> None:
+def _git(repo: Path, *args: str) -> str:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
-    subprocess.run(
+    proc = subprocess.run(
         ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
         cwd=repo,
         env=env,
         check=True,
         capture_output=True,
+        text=True,
         timeout=GIT_TIMEOUT,
     )
+    return proc.stdout.strip()
 
 
-def _step_env(step: dict[str, Any]) -> dict[str, str]:
-    """The step's env, with the base-branch expression resolved to main."""
+def _step_env(step: dict[str, Any], head_sha: str) -> dict[str, str]:
+    """The step's env, with the base branch resolved to main and the head SHA to the PR head."""
+    values = {BASE_REF_EXPR: "main", HEAD_SHA_EXPR: head_sha}
     resolved: dict[str, str] = {}
     for key, value in step.get("env", {}).items():
-        assert value == BASE_REF_EXPR, f"unexpected env expression {key}={value!r}"
-        resolved[key] = "main"
+        assert value in values, f"unexpected env expression {key}={value!r}"
+        resolved[key] = values[value]
     return resolved
 
 
 def _run_job(
     tmp_path: Path, job: dict[str, Any], reviewer: Reviewer, committed: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
-    """Run the job's shell steps in a git workspace: origin/main, then the PR."""
+    """Run the job's shell steps on a checkout shaped like refs/pull/N/merge.
+
+    A base commit, the PR's own commit on top of it, a later commit on main,
+    then HEAD as a detached merge of the PR head into main: the synthetic
+    merge commit actions/checkout gives a pull_request run.
+    """
     workspace = tmp_path / "ws"
     runner_temp = tmp_path / "runner-temp"
     (workspace / ".github" / "p9").mkdir(parents=True)
@@ -596,17 +602,31 @@ def _run_job(
     _git(workspace, "init", "-q")
     _git(workspace, "add", "-A")
     _git(workspace, "commit", "-q", "-m", "base")
-    _git(workspace, "update-ref", "refs/remotes/origin/main", "HEAD")
+    base_sha = _git(workspace, "rev-parse", "HEAD")
     for rel, content in {"app/changed.py": "x = 1\n", **(committed or {})}.items():
         (workspace / rel).parent.mkdir(parents=True, exist_ok=True)
         (workspace / rel).write_text(content, encoding="utf-8")
     _git(workspace, "add", "-A")
     _git(workspace, "commit", "-q", "-m", "pr")
+    head_sha = _git(workspace, "rev-parse", "HEAD")
+    _git(workspace, "checkout", "-q", "--detach", base_sha)
+    (workspace / "app").mkdir(exist_ok=True)
+    (workspace / "app" / "main_side.py").write_text("y = 2\n", encoding="utf-8")
+    _git(workspace, "add", "-A")
+    _git(workspace, "commit", "-q", "-m", "main moved")
+    _git(workspace, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(workspace, "merge", "-q", "--no-ff", "-m", "synthetic pr merge", head_sha)
+    # A real two-parent merge whose second parent is the PR head.
+    assert _git(workspace, "rev-parse", "HEAD^2") == head_sha
     env = {"PATH": os.environ["PATH"], "RUNNER_TEMP": str(runner_temp), "HOME": str(tmp_path)}
     before, after = _shell_steps(job)
     for step in before:
         subprocess.run(
-            ["bash", "-e", "-c", step["run"]], cwd=workspace, env={**env, **_step_env(step)}, check=True, timeout=30
+            ["bash", "-e", "-c", step["run"]],
+            cwd=workspace,
+            env={**env, **_step_env(step, head_sha)},
+            check=True,
+            timeout=30,
         )
     reviewer(workspace)  # stands in for anthropics/claude-code-action
     result = None
@@ -614,7 +634,7 @@ def _run_job(
         result = subprocess.run(
             ["bash", "-e", "-c", step["run"]],
             cwd=workspace,
-            env={**env, **_step_env(step)},
+            env={**env, **_step_env(step, head_sha)},
             text=True,
             capture_output=True,
             timeout=30,
@@ -664,8 +684,11 @@ def test_prepare_step_writes_the_pr_diff_for_the_reviewer(tmp_path: Path, name: 
     diff, changed, commits = seen
     assert "+++ b/app/changed.py" in diff
     assert ".github/p9/check_verdict.py" not in diff, "the base commit must not be in the diff"
+    assert "main_side.py" not in diff, "main-side commits must not be in the diff"
     assert changed == "app/changed.py\n"
-    # Only the PR's own commit, one --oneline row: "<sha> pr".
+    # Only the PR's own commit, one --oneline row: "<sha> pr". The synthetic
+    # merge commit that HEAD points at is not a PR commit (#214).
+    assert "synthetic pr merge" not in commits, commits
     assert re.fullmatch(r"[0-9a-f]{7,40} pr\n", commits), commits
 
 
