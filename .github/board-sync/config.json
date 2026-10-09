@@ -1,0 +1,16 @@
+{
+  "project_url": "https://github.com/users/jennifer-mckinney/projects/7",
+  "status_field": "Status",
+  "statuses": {
+    "issue_opened": "Backlog",
+    "issue_reopened": "In progress",
+    "issue_closed_not_planned": "Done",
+    "pr_ready": "In review",
+    "pr_withdrawn": "In progress",
+    "pr_merged": "Done"
+  },
+  "gh_timeout_seconds": 60,
+  "gh_output_max_bytes": 1048576,
+  "max_linked_issues": 50,
+  "message_max_chars": 500
+}

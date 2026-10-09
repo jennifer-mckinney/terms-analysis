@@ -1,0 +1,78 @@
+name: Board sync
+
+# Keeps the owner's Projects v2 board in step with issues and pull requests,
+# replacing per-event project-manager agent dispatches (agent-setup audit
+# item 5). What moves where is in .github/board-sync/config.json; routing and
+# the GitHub calls are in .github/board-sync/board_sync.py. Setup and the
+# status table: automations/board-sync.md.
+#
+# Token: a user-owned board needs a token with the project scope, which the
+# job token lacks. It comes from the PROJECT_TOKEN repository secret. A
+# missing secret fails the run with an error annotation; it never skips.
+#
+# pull_request_target, not pull_request: the token must never reach code a
+# PR can change. This job checks out the base branch only (no ref input) and
+# reads nothing from the PR but its number, draft and merged flags, through
+# the event file, never inline in a script. Fork PRs are excluded by the job
+# condition, so outsiders cannot move cards.
+
+on:
+  issues:
+    types: [opened, reopened, closed]
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, converted_to_draft, closed]
+
+# Nothing by default; the job grants only what it uses.
+permissions: {}
+
+# One run at a time per issue or PR, so two runs never interleave their
+# writes. GitHub keeps at most one pending run per group (a newer event
+# replaces it) and does not guarantee order, so correctness does not rest on
+# this: every run reads the PR's or the issue's current state and moves the
+# cards to the status that state means (board_sync.py apply). A dropped or
+# late run therefore still leaves the board on the latest state.
+concurrency:
+  group: board-sync-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  board-sync:
+    name: board-sync
+    if: github.event_name == 'issues' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Require the board token
+        env:
+          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+        run: |
+          if [ -z "${PROJECT_TOKEN//[[:space:]]/}" ]; then
+            echo "::error title=board-sync::The PROJECT_TOKEN repository secret is not set, so the board cannot be updated. Add a token with the project scope as PROJECT_TOKEN (see automations/board-sync.md)."
+            exit 1
+          fi
+          echo "board-sync: PROJECT_TOKEN is set"
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Plan
+        id: plan
+        run: python3 -I .github/board-sync/board_sync.py plan
+
+      - name: Add the new issue to the board
+        id: add
+        if: steps.plan.outputs.event == 'issue_opened'
+        uses: actions/add-to-project@5afcf98fcd03f1c2f92c3c83f58ae24323cc57fd # v2.0.0
+        with:
+          project-url: ${{ steps.plan.outputs.project_url }}
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+
+      - name: Set the card status
+        if: steps.plan.outputs.event != ''
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          ITEM_ID: ${{ steps.add.outputs.itemId }}
+        run: python3 -I .github/board-sync/board_sync.py apply
