@@ -8,31 +8,44 @@ Silent drift of governance files. The role principles in
 load-bearing. If they change without review, downstream agent behavior
 changes without a paper trail.
 
-This directory holds a small hash manifest and two shell scripts. The
-manifest records SHA256 of each tracked file. The verify script detects
-any drift. The regen script rebuilds the manifest after a legitimate
-change.
+This directory holds two shell scripts that maintain two hash manifests.
+Each manifest records SHA256 of its files. The verify script detects any
+drift. The regen script rebuilds both manifests after a legitimate change.
+
+## Two manifests (#200)
+
+- `.claude/_governance-manifest.json` is tracked and holds repo-relative
+  files only. It is always verified; a missing or malformed one exits 2.
+- `.claude/_governance-manifest.local.json` is untracked (gitignored, and
+  listed in `.claude/governance/required-gitignore.txt`). It holds the
+  per-developer `$HOME/` files, so the public repo never publishes hashes
+  of private files. Verify checks it when present and prints
+  `LOCAL MANIFEST SKIPPED` when absent (CI runners, fresh clones).
 
 ## Files
 
-- `../../.claude/_governance-manifest.json`: the manifest itself.
-- `verify-hashes.sh`: recompute hashes and compare to the manifest.
-- `regen-manifest.sh`: overwrite the manifest with current hashes.
-- `tests/`: optional shell tests for regen and verify.
+- `../../.claude/_governance-manifest.json`: the tracked manifest.
+- `../../.claude/_governance-manifest.local.json`: the local manifest
+  (written by regen, never committed).
+- `verify-hashes.sh`: recompute hashes and compare to both manifests.
+- `regen-manifest.sh`: overwrite both manifests with current hashes.
 
 ## Tracked governance files
 
-| Manifest path | Meaning |
-| --- | --- |
-| `.claude/CLAUDE.md` | Project governance charter |
-| `.claude/library/LIB-PRINCIPLES.md` | Role principles (P1 through Pn) |
-| `$HOME/.claude/CLAUDE.md` | Global user CLAUDE.md |
-| `$HOME/.claude/library/PEAS.md` | PEAS agent design framework |
+| Manifest path | Manifest | Meaning |
+| --- | --- | --- |
+| `.claude/CLAUDE.md` | tracked | Project governance charter |
+| `.claude/library/LIB-PRINCIPLES.md` | tracked | Role principles (P1 through Pn) |
+| `.claude/governance/required-gitignore.txt` | tracked | Required `.gitignore` patterns (SSoT) |
+| `$HOME/.claude/CLAUDE.md` | local | Global user CLAUDE.md |
+| `$HOME/.claude/library/PEAS.md` | local | PEAS agent design framework |
+
+The list lives in `regen-manifest.sh` (`REPO_ENTRIES`, `LOCAL_ENTRIES`).
 
 ### Canonical path form for global files
 
-Global files are recorded with the literal string `$HOME/` prefix inside
-the JSON. The verify script expands `$HOME` at runtime using the calling
+Global files are recorded, in the local manifest only, with the literal
+string `$HOME/` prefix inside the JSON. The verify script expands `$HOME` at runtime using the calling
 shell's environment. Rationale:
 
 1. Portable across machines and users. No hardcoded `/Users/<name>/`
@@ -54,13 +67,21 @@ scripts/governance/verify-hashes.sh
 
 Exit codes:
 
-- `0`: `HASHES OK: N files verified`
+- `0`: `HASHES OK: N files verified` (N counts tracked repo files),
+  then `LOCAL MANIFEST OK: M files verified (...)` or
+  `LOCAL MANIFEST SKIPPED: ...` when the local manifest is absent.
 - `1`: `HASH DRIFT:` followed by one line per drifted file. Each line
   shows the first 12 hex chars of expected and actual hash plus a byte
   delta note. Full file contents are never dumped.
-- `2`: `MANIFEST MISSING:` the JSON manifest was not found.
+- `2`: `MANIFEST MISSING:` the tracked manifest was not found, or
+  `MANIFEST INVALID:` a manifest is unreadable, not UTF-8, not JSON, has
+  zero entries, or has an entry whose path is outside the allowlist
+  (ASCII letters, digits, `.`, `_`, `-` per segment; no `..`; `$HOME/`
+  only in the local manifest, never in the tracked one).
 - `3`: `TRACKED FILE MISSING:` a manifested file no longer exists on
-  disk.
+  disk (or cannot be read).
+
+Messages name manifest paths only, never the resolved absolute path.
 
 ### Regenerate (only after an intentional change)
 
@@ -98,16 +119,15 @@ Not wired up yet, but the pattern would be:
 4. Optionally add a pre-commit hook that runs verify locally so drift
    is caught before push.
 
-Global files under `$HOME/` are per-developer. CI cannot verify them
-unless a copy is checked into the repo or the CI environment mirrors
-the developer environment. In practice CI should verify the two
-project files strictly, and treat the two global files as advisory,
-skipping them when `$HOME/.claude/` does not exist on the runner.
+Global files under `$HOME/` are per-developer and live only in the
+untracked local manifest, so CI verifies the tracked repo files strictly
+and reports `LOCAL MANIFEST SKIPPED` for the rest.
 
 ## Notes
 
-- Both scripts detect `sha256sum` first and fall back to
-  `shasum -a 256`. This keeps them portable across Linux and macOS.
-- No `jq` dependency. Manifest parsing uses `python3`.
+- Hashing, parsing and validation use `python3` (stdlib `hashlib` and
+  `json`, run with `-I`). No `jq`, `sha256sum` or `shasum` dependency.
+- Regen writes each manifest through a temp file and rename, writes the
+  local one with mode 0600, then runs verify as a round trip.
 - The manifest is valid JSON. Validate with
   `python3 -m json.tool .claude/_governance-manifest.json`.
