@@ -96,7 +96,7 @@ These identifiers mean different things in the ingester repo. Never cite a bare 
 ## governance-monitoring
 
 - G1 injection: `~/.claude/scripts/verify-injection.sh`, which reads `~/.claude/session-start.log`.
-- G2 content: `.claude/_governance-manifest.json` tracks this file, LIB-PRINCIPLES, `required-gitignore.txt` and (until #200 lands) the global CLAUDE.md and PEAS. Run `verify-hashes.sh`. Regenerate only with owner intent, as part of a reviewed PR.
+- G2 content: `.claude/_governance-manifest.json` tracks this file, LIB-PRINCIPLES and `required-gitignore.txt`; the owner's global CLAUDE.md and PEAS live in the untracked `.claude/_governance-manifest.local.json` (#200). Run `verify-hashes.sh`. Regenerate only with owner intent, as part of a reviewed PR.
 - G3 periodic "is it wired" pass. Reviews catch diffs, not absences, so grep for callers of every public entry point and watch for success paths that can't tell "nothing to do" from "not wired". Automating this is #224.
 
 ## reference-library
