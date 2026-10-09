@@ -20,22 +20,27 @@ xref: [[LIB-RULES#IRP]] [[LIB-CONTEXT]]
 
 ### HR1: open-source-only
 rule: all dependencies MUST be open source (Apache 2.0, MIT, BSD preferred)
+scope: product runtime/data path; dev-time CI review tooling exempt per docs/adr/0001-dependency-rules-scope-ci-review-tooling.md
 
 ### HR2: no-investor-lawsuit-vendors
 rule: no tools/services from companies facing investor lawsuits (excludes Meta-origin, e.g. FAISS)
 because: legal-KB vector index uses numpy exhaustive search instead
+scope: product runtime/data path; dev-time CI review tooling exempt per docs/adr/0001-dependency-rules-scope-ci-review-tooling.md
 
 ### HR3: IRP-grade-A-or-higher
 rule: all dependencies MUST score IRP Grade A or higher
+scope: product runtime/data path; dev-time CI review tooling exempt per docs/adr/0001-dependency-rules-scope-ci-review-tooling.md
 
 ### HR4: local-only-data
 rule: all data stays local; no external API calls
+scope: product runtime/data path (user documents, results, legal-KB data); CI review of repo source diffs exempt per docs/adr/0001-dependency-rules-scope-ci-review-tooling.md
 
 ### HR5: LLM-fallback-to-rules
 rule: LLM failures MUST fall back to rule-only findings with reduced confidence
 
 ### HR6: no-openai-local-LLM-only
 rule: no OpenAI dependency; LLM inference is local-only via LocalAI (EuroLLM-22B for EU/legal, Apertus-8B for multilingual/world)
+scope: product runtime/data path; dev-time CI review tooling exempt per docs/adr/0001-dependency-rules-scope-ci-review-tooling.md
 
 ### HR7: HITL-threshold
 rule: confidence < 0.80 triggers human-in-the-loop review
@@ -150,7 +155,6 @@ xref: [[automations/p9-pre-push.md]] [[SO11]]
 ### SO13: p9-gate-in-ci
 rule: P9 is enforced in CI (2026-10-09, #191, superseding the 2026-07-04 local hook). `.github/workflows/p9-review.yml` runs `security-review` + `grumpy-review` on `pull_request` to `main`; each job runs `anthropics/claude-code-action` (SHA-pinned) with its brief from `.github/p9/` and an exact tool allowlist (Read/Grep/Glob, Write scoped to `p9-verdict.json`, the inline PR-comment MCP tool; no Bash), reads a pre-written diff, comments inline on findings, writes `p9-verdict.json`, and fails unless `.github/p9/check_verdict.py` sees verdict PASS with `findings: []`. Branch protection pending: the owner makes both jobs required checks on `main` after the first green run
 retired: `.githooks/pre-push` + its `.sha256` pin, `.git/reviews/<sha>.signoff.json` signoffs, `.github/workflows/enforce-p9-review.yml`, `scripts/ci/p9-sibling-parity.sh` and the #175 hook-only test suites
-companion: the ingester retires its parity check in jennifer-mckinney/legal-corpus-ingester#20; merge #214 first, then ingester#20 back-to-back; until ingester#20 merges, the ingester's main-branch parity step fails
 existing: `.githooks/pre-commit` unchanged (project-specific gitignore-SSoT + graveyard + case-insensitive .env guards); `scripts/install-hooks.sh` still sets `core.hooksPath=.githooks` for it
 owner_steps: add the `ANTHROPIC_API_KEY` repo secret; after the first green run, require `security-review` + `grumpy-review` in branch protection
 docs: `automations/p9-pre-push.md` + `docs/P9_ENFORCEMENT_GUIDE.md` + `docs/DEV_SETUP.md` (updated 2026-10-09)

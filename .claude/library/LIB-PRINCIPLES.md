@@ -59,6 +59,7 @@ rule: hard requirements restated from `.claude/CLAUDE.md`
   - all data local; no external API calls
   - LLM failures fall back to rule-only findings
   - no OpenAI; LLM inference local-only via LocalAI (Apertus-8B, EuroLLM-22B)
+scope: product runtime/data path; dev-time CI review tooling exempt per docs/adr/0001-dependency-rules-scope-ci-review-tooling.md
   - confidence < 0.80 triggers human-in-the-loop review
 violations: drift under P3 — surface and ask
 xref: [[.claude/CLAUDE.md#hard-requirements]] [[LIB-STACK]] [[LIB-LEGAL]]
@@ -117,7 +118,6 @@ security_findings_zero_tolerance: user directive 2026-07-03 — every security-e
 because: local pytest + orchestrator spot-check is not sufficient for merged code; two independent adversarial reviewers catch what dispatch Coders and orchestrator miss; especially load-bearing after multi-agent sessions where domain boundaries were crossed
 enforcement: CI (terms-analysis#191, replan 2026-10-09). `.github/workflows/p9-review.yml` runs jobs `security-review` and `grumpy-review` on `pull_request` to `main`; each runs `anthropics/claude-code-action` with the vendored brief in `.github/p9/` and an exact tool allowlist (no Bash; Write scoped to `p9-verdict.json`), comments inline on findings and writes `p9-verdict.json`; `.github/p9/check_verdict.py` fails the job unless the verdict is PASS with an empty findings list. Branch protection pending: the owner makes both jobs required checks on `main` after the first green run. See `automations/p9-pre-push.md`
 retired: the local `.githooks/pre-push` signoff gate, `.git/reviews/<sha>.signoff.json` and `enforce-p9-review.yml` (2026-10-09, owner: "follow standard cicd practices")
-companion: the ingester's shared copies retire in jennifer-mckinney/legal-corpus-ingester#20; merge #214 first, then ingester#20 back-to-back; until then the ingester's main-branch parity step fails
 loop_pattern: (amendment 2026-07-04, moved to CI 2026-10-09) every PR runs this fixed-point loop until convergence
   1. Coder(s) implement the change and push the feature branch; the PR to `main` triggers both review jobs
   2. If EITHER job fails (FAIL verdict, any finding, or no verdict) → dispatch fix-Coder scoped to the PR comments → push → the jobs run again
