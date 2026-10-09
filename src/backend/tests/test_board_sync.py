@@ -981,22 +981,27 @@ def test_apply_refuses_more_linked_issues_than_the_cap(tmp_path: Path) -> None:
     assert env.edits() == []
 
 
+# Each case carries a valid PR state, so it gets past pr_event and reaches the
+# linked-issue guard it names; the pinned message proves which guard refused it.
 @pytest.mark.parametrize(
-    "refs",
+    ("refs", "message"),
     [
-        None,
-        {"totalCount": 2, "nodes": [{"id": "I_kwA"}]},
-        {"totalCount": 1, "nodes": [None]},
-        {"totalCount": 1, "nodes": [{"id": "I_kw A\n"}]},
-        {"totalCount": True, "nodes": []},
+        (None, f"PR #12 was not found in {TEST_REPO}"),
+        ({"totalCount": 2, "nodes": [{"id": "I_kwA"}]}, "GitHub listed 1 of 2 linked issues for PR #12"),
+        ({"totalCount": 1, "nodes": [None]}, "GitHub returned a malformed linked issue id"),
+        ({"totalCount": 1, "nodes": [{"id": "I_kw A\n"}]}, "GitHub returned a malformed linked issue id"),
+        ({"totalCount": True, "nodes": []}, "GitHub returned malformed linked issues for PR #12"),
     ],
     ids=["pr-not-found", "count-mismatch", "null-node", "hostile-id", "bool-count"],
 )
-def test_apply_rejects_malformed_linked_issue_data(tmp_path: Path, refs: object) -> None:
+def test_apply_rejects_malformed_linked_issue_data(tmp_path: Path, refs: object, message: str) -> None:
     env = Env(tmp_path)
-    env.state["BoardSyncLinkedIssues"] = _ok({"data": {"repository": {"pullRequest": None if refs is None else {"closingIssuesReferences": refs}}}})
+    pull = None if refs is None else {"state": "OPEN", "isDraft": False, "closingIssuesReferences": refs}
+    env.state["BoardSyncLinkedIssues"] = _ok({"data": {"repository": {"pullRequest": pull}}})
     proc = _apply(env, "pull_request_target", _pr_event("opened"), Board())
-    assert proc.returncode == EXIT_FAILED
+    assert proc.returncode == EXIT_FAILED, proc.stderr
+    assert proc.stderr.strip() == f"board-sync: error: {message}"
+    assert env.graphql_calls("BoardSyncAddItem") == []
     assert env.edits() == []
 
 
