@@ -201,6 +201,18 @@ def _validate_url_fetch_settings(s: Settings) -> None:
         or timeout <= 0
     ):
         raise ValueError("url_fetch_timeout_s must be a finite number > 0")
+    # INVARIANT url_fetch_timeout_s <= request_timeout_s. Written as "not <="
+    # so a NaN (or non-numeric) LLM budget fails closed instead of passing.
+    llm_budget = s.request_timeout_s
+    if (
+        not isinstance(llm_budget, (int, float))
+        or isinstance(llm_budget, bool)
+        or not timeout <= llm_budget
+    ):
+        raise ValueError(
+            "url_fetch_timeout_s must not exceed request_timeout_s "
+            "(LM_URL_FETCH_TIMEOUT_S <= LM_REQUEST_TIMEOUT_S)"
+        )
     # Store immutable copies so a caller's list cannot change the live config.
     object.__setattr__(s, "url_fetch_allowed_schemes", tuple(schemes))
     object.__setattr__(s, "url_fetch_blocked_networks", tuple(networks))

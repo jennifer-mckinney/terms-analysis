@@ -6,7 +6,7 @@ import ipaddress
 import re
 import socket
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
@@ -236,6 +236,13 @@ class _Target:
     path_query: str
     ip: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
     is_literal: bool
+    # The other resolved addresses, in answer order. Every one passed the
+    # blocklist with ``ip``; tried in turn only when connecting to ``ip`` fails.
+    fallbacks: tuple = ()
+
+    @property
+    def candidates(self) -> tuple:
+        return (self.ip, *self.fallbacks)
 
     @property
     def host_header(self) -> str:
@@ -348,9 +355,10 @@ def _validate_url(
     ``base``. Order: raw characters (before any parsing, because urlsplit
     silently drops CR/LF/TAB), scheme, userinfo, host grammar, port, then the
     resolved (or literal) addresses against the configured blocklist. A host
-    already in ``pins`` (same fetch, earlier hop) reuses its checked IP and is
-    never re-resolved. Raises UnsafeUrlError / UrlFetchError; never returns a
-    target it did not check.
+    already in ``pins`` (same fetch, earlier hop) reuses the checked IP that
+    connected and is never re-resolved. Every resolved address is checked;
+    the rest of the answer set becomes ``fallbacks``. Raises UnsafeUrlError /
+    UrlFetchError; never returns a target it did not check.
     """
     cfg = cfg or settings
     _check_raw(url)
@@ -395,6 +403,7 @@ def _validate_url(
                 raise UnsafeUrlError("host", _MSG_HOST) from None
 
     networks = _blocked_networks(cfg)
+    fallbacks: tuple = ()
     if literal is not None:
         ip = literal
         if _is_blocked(ip, networks):
@@ -405,9 +414,8 @@ def _validate_url(
         addresses = _resolve(host, port)
         if any(_is_blocked(a, networks) for a in addresses):
             raise UnsafeUrlError("address", _MSG_ADDRESS)
-        ip = addresses[0]
-        if pins is not None:
-            pins[host] = ip
+        ip, *rest = addresses
+        fallbacks = tuple(rest)
 
     return _Target(
         url=url,
@@ -418,6 +426,7 @@ def _validate_url(
         path_query=(parts.path or "/") + (f"?{parts.query}" if parts.query else ""),
         ip=ip,
         is_literal=literal is not None,
+        fallbacks=fallbacks,
     )
 
 
@@ -445,8 +454,11 @@ async def _read_capped(response: httpx.Response, max_bytes: int) -> bytes:
         declared = declared.strip()
         if not _DIGITS.fullmatch(declared):
             raise UrlFetchError("size", _MSG_BAD_LENGTH)
-        # Compare by length first so a huge digit string is never int()-ed.
-        if len(declared) > len(str(max_bytes)) or int(declared) > max_bytes:
+        # Compare by value: leading zeros do not change it (RFC 9110 1*DIGIT).
+        # Strip them, then compare by length first so a huge digit string is
+        # never int()-ed (int() is only ever given <= len(str(max_bytes)) digits).
+        significant = declared.lstrip("0") or "0"
+        if len(significant) > len(str(max_bytes)) or int(significant) > max_bytes:
             raise UrlFetchError("size", _MSG_TOO_LARGE.format(limit=max_bytes))
     chunks = []
     total = 0
@@ -456,6 +468,47 @@ async def _read_capped(response: httpx.Response, max_bytes: int) -> bytes:
             raise UrlFetchError("size", _MSG_TOO_LARGE.format(limit=max_bytes))
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+async def _send_to(
+    client: httpx.AsyncClient,
+    target: _Target,
+    ip: Union[ipaddress.IPv4Address, ipaddress.IPv6Address],
+    extensions: dict,
+) -> httpx.Response:
+    pinned = replace(target, ip=ip, fallbacks=())
+    try:
+        request = client.build_request(
+            "GET",
+            pinned.request_url,
+            headers={"Host": pinned.host_header},
+            extensions=extensions,
+        )
+    except httpx.InvalidURL:
+        # httpx refuses what it cannot encode (e.g. a URL over 65536
+        # characters); refuse it cleanly instead of escaping as a 500.
+        raise UnsafeUrlError("malformed", _MSG_MALFORMED) from None
+    return await client.send(request, stream=True)
+
+
+async def _connect(
+    client: httpx.AsyncClient, target: _Target, extensions: dict
+) -> tuple[httpx.Response, Union[ipaddress.IPv4Address, ipaddress.IPv6Address]]:
+    """Send this hop to each checked address in answer order.
+
+    Only a connect failure moves on to the next address; the last address's
+    failure (or any other error) propagates, so the caller maps it once. The
+    candidates all passed the blocklist in _validate_url and are never
+    re-resolved; the total deadline in fetch_url_text bounds the loop.
+    Returns the response and the address that connected.
+    """
+    *earlier, last = target.candidates
+    for ip in earlier:
+        try:
+            return await _send_to(client, target, ip, extensions), ip
+        except httpx.ConnectError:
+            continue
+    return await _send_to(client, target, last, extensions), last
 
 
 async def _fetch_bytes(url: str, cfg: Settings) -> tuple[bytes, str]:
@@ -480,20 +533,12 @@ async def _fetch_bytes(url: str, cfg: Settings) -> tuple[bytes, str]:
                 if target.scheme == "https" and not target.is_literal
                 else {}
             )
-            try:
-                request = client.build_request(
-                    "GET",
-                    target.request_url,
-                    headers={"Host": target.host_header},
-                    extensions=extensions,
-                )
-            except httpx.InvalidURL:
-                # httpx refuses what it cannot encode (e.g. a URL over 65536
-                # characters); refuse it cleanly instead of escaping as a 500.
-                raise UnsafeUrlError("malformed", _MSG_MALFORMED) from None
             response = None
             try:
-                response = await client.send(request, stream=True)
+                response, connected = await _connect(client, target, extensions)
+                if not target.is_literal:
+                    # Later hops to this host reuse the address that connected.
+                    pins[target.host] = connected
                 client.cookies.clear()  # never carry cookies to another hop
                 if response.status_code in _REDIRECT_STATUSES:
                     location = response.headers.get("location")
