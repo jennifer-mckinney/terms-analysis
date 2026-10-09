@@ -8,9 +8,11 @@ Projects v2 board in step with issues and pull requests:
 - issue reopened                       -> In progress
 - issue closed as not planned          -> Done
 - PR opened / reopened / ready for review (not draft) -> linked issues In review
-- PR converted to draft, or closed without merge -> linked issues In progress,
-  except cards already Done
+- PR converted to draft, or closed without merge -> linked issues In progress
 - PR merged                            -> linked issues Done
+
+The Done-guard: a closed issue, or a card already in a Done status, is never
+moved backwards (only a merge, a not-planned close or a reopen moves it).
 
 ``apply`` reconciles: it reads the PR's or issue's current state from GitHub
 and moves cards to the status that state means, not the status of the event
@@ -199,8 +201,19 @@ class Board:
         return self.options[_real_config()["statuses"][event_key]]
 
 
-def _linked(ids: list[str], total: int | None = None, *, state: str = "OPEN", draft: bool = False) -> dict[str, Any]:
-    """The linked-issues answer, with the PR's current state (open, not draft by default)."""
+def _linked(
+    ids: list[str],
+    total: int | None = None,
+    *,
+    state: str = "OPEN",
+    draft: bool = False,
+    issue_states: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """The linked-issues answer, with the PR's current state (open, not draft by default).
+
+    Each linked issue carries its own state: OPEN unless issue_states says otherwise.
+    """
+    states = issue_states or {}
     return {
         "data": {
             "repository": {
@@ -209,7 +222,9 @@ def _linked(ids: list[str], total: int | None = None, *, state: str = "OPEN", dr
                     "isDraft": draft,
                     "closingIssuesReferences": {
                         "totalCount": len(ids) if total is None else total,
-                        "nodes": [{"id": i, "number": n + 1} for n, i in enumerate(ids)],
+                        "nodes": [
+                            {"id": i, "number": n + 1, "state": states.get(i, "OPEN")} for n, i in enumerate(ids)
+                        ],
                     }
                 }
             }
@@ -618,13 +633,32 @@ def test_apply_issue_closed_not_planned_adds_then_sets_done(tmp_path: Path) -> N
     assert "moved 1 issue(s)" in proc.stdout
 
 
+# The fake gh's add answers ITEM_<content id>, the item actions/add-to-project made.
+ADDED_ITEM = "ITEM_I_kwTestIssue1"
+
+
 def test_apply_issue_opened_sets_backlog_on_the_added_item(tmp_path: Path) -> None:
     env = Env(tmp_path)
     board = Board()
-    proc = _apply(env, "issues", _issue_event("opened"), board, ITEM_ID="PVTI_lAddedByAction")
+    proc = _apply(env, "issues", _issue_event("opened"), board, ITEM_ID=ADDED_ITEM)
     assert proc.returncode == EXIT_OK, proc.stderr
-    assert env.graphql_calls("BoardSyncAddItem") == []  # actions/add-to-project already added it
-    assert env.edits() == [_edit_args("PVTI_lAddedByAction", board, "issue_opened")]
+    # The idempotent add reads the card's current status for the Done-guard.
+    assert env.graphql_calls("BoardSyncAddItem") == [
+        {"project": board.project_id, "content": "I_kwTestIssue1", "field": _real_config()["status_field"]}
+    ]
+    assert env.edits() == [_edit_args(ADDED_ITEM, board, "issue_opened")]
+
+
+def test_apply_issue_opened_refuses_an_item_id_that_is_not_the_issue_card(tmp_path: Path) -> None:
+    # ITEM_ID must name the card the issue is on; acting on another card fails closed.
+    env = Env(tmp_path)
+    proc = _apply(env, "issues", _issue_event("opened"), Board(), ITEM_ID="PVTI_lSomeOtherCard")
+    assert proc.returncode == EXIT_FAILED, proc.stderr
+    assert proc.stderr.strip() == (
+        "board-sync: error: the board item for the issue is not ITEM_ID from actions/add-to-project "
+        "(moved 0 of 1 before the failure)"
+    )
+    assert env.edits() == []
 
 
 @pytest.mark.parametrize("item", ["", "  ", "PVTI_x\n--clear", "PVTI x", "a" * 129])
@@ -840,15 +874,112 @@ def test_withdrawn_pr_never_pulls_a_done_card_back(tmp_path: Path, done_key: str
     assert f'left 1 already "{cfg["statuses"][done_key]}"' in proc.stdout
 
 
-def test_other_pr_moves_do_not_skip_done_cards(tmp_path: Path) -> None:
-    # Only a withdrawn PR keeps Done cards; a merge (or ready) moves every link.
+# The Done-guard, per route x {open issue, closed issue, Done card}: a closed
+# issue, or a card in a Done status (the pr_merged or issue_closed_not_planned
+# status), is never moved backwards. Only the Done moves themselves and an
+# explicit reopen move it. Each row: (event key apply moves by, the issue's
+# current state, the card's current status as an event key or None for no
+# status, what is printed: "" when the card moves, else the held reason).
+# An issue route's own state fixes the issue state, so it has no other rows.
+DONE = 'already "Done"'
+DONE_GUARD = [
+    ("issue_opened", "OPEN", None, ""),
+    ("issue_opened", "OPEN", "pr_ready", ""),
+    ("issue_opened", "OPEN", "pr_merged", DONE),
+    ("issue_opened", "OPEN", "issue_closed_not_planned", DONE),
+    ("issue_reopened", "OPEN", None, ""),
+    ("issue_reopened", "OPEN", "pr_merged", ""),  # an explicit reopen
+    ("issue_reopened", "OPEN", "issue_closed_not_planned", ""),
+    ("issue_closed_not_planned", "CLOSED", None, ""),
+    ("issue_closed_not_planned", "CLOSED", "pr_ready", ""),
+    ("issue_closed_not_planned", "CLOSED", "pr_merged", ""),
+    ("pr_ready", "OPEN", None, ""),
+    ("pr_ready", "OPEN", "issue_opened", ""),
+    ("pr_ready", "OPEN", "pr_merged", DONE),
+    ("pr_ready", "OPEN", "issue_closed_not_planned", DONE),
+    ("pr_ready", "CLOSED", None, "closed"),
+    ("pr_ready", "CLOSED", "issue_opened", "closed"),
+    ("pr_ready", "CLOSED", "pr_merged", DONE),
+    ("pr_withdrawn", "OPEN", None, ""),
+    ("pr_withdrawn", "OPEN", "pr_ready", ""),
+    ("pr_withdrawn", "OPEN", "pr_merged", DONE),
+    ("pr_withdrawn", "CLOSED", None, "closed"),
+    ("pr_withdrawn", "CLOSED", "pr_ready", "closed"),
+    ("pr_withdrawn", "CLOSED", "issue_closed_not_planned", DONE),
+    ("pr_merged", "OPEN", None, ""),
+    ("pr_merged", "OPEN", "pr_ready", ""),
+    ("pr_merged", "CLOSED", "pr_ready", ""),
+    ("pr_merged", "CLOSED", "pr_merged", ""),
+]
+# Current PR state behind each PR event key; current issue stateReason and the
+# routed issue event behind each issue event key.
+GUARD_PR_STATE = {"pr_ready": "OPEN", "pr_withdrawn": "CLOSED", "pr_merged": "MERGED"}
+GUARD_ISSUE = {
+    "issue_opened": (None, _issue_event("opened", node_id="I_kwGuard")),
+    "issue_reopened": ("REOPENED", _issue_event("reopened", node_id="I_kwGuard")),
+    "issue_closed_not_planned": ("NOT_PLANNED", _issue_event("closed", "not_planned", node_id="I_kwGuard")),
+}
+
+
+def test_done_guard_table_covers_every_route_with_each_issue_state_and_a_done_card() -> None:
+    assert {row[0] for row in DONE_GUARD} == EVENT_KEYS
+    for key in EVENT_KEYS:
+        rows = [row for row in DONE_GUARD if row[0] == key]
+        states = {"OPEN", "CLOSED"} if key.startswith("pr_") else {"OPEN" if key != "issue_closed_not_planned" else "CLOSED"}
+        assert {row[1] for row in rows} == states, key
+        assert any(row[2] in ("pr_merged", "issue_closed_not_planned") for row in rows), key
+        assert any(row[2] is None for row in rows), key
+
+
+@pytest.mark.parametrize(("key", "issue_state", "card", "held"), DONE_GUARD)
+def test_done_guard_by_route_issue_state_and_card(
+    tmp_path: Path, key: str, issue_state: str, card: str | None, held: str
+) -> None:
     env = Env(tmp_path)
     board = Board()
-    env.state["BoardSyncLinkedIssues"] = _ok(_linked(["I_kwA"], state="OPEN"))
-    env.state["board_status"] = {"I_kwA": _real_config()["statuses"]["pr_merged"]}
-    proc = _apply(env, "pull_request_target", _pr_event("reopened"), board)
+    cfg = _real_config()
+    if card is not None:
+        env.state["board_status"] = {"I_kwGuard": cfg["statuses"][card]}
+    if key.startswith("pr_"):
+        links = _linked(["I_kwGuard"], state=GUARD_PR_STATE[key], issue_states={"I_kwGuard": issue_state})
+        env.state["BoardSyncLinkedIssues"] = _ok(links)
+        proc = _apply(env, "pull_request_target", _pr_event("opened"), board)
+    else:
+        reason, routed = GUARD_ISSUE[key]
+        env.state["BoardSyncIssueState"] = _issue_state(issue_state, reason)
+        proc = _apply(env, "issues", routed, board, ITEM_ID="ITEM_I_kwGuard")
     assert proc.returncode == EXIT_OK, proc.stderr
-    assert env.edits() == [_edit_args("ITEM_I_kwA", board, "pr_ready")]
+    last = proc.stdout.strip().splitlines()[-1]
+    if held:
+        assert env.edits() == []
+        assert last.startswith(f'board-sync: moved 0 issue(s) to "{cfg["statuses"][key]}"'), last
+        assert last.endswith(f"; left 1 {held}"), last
+    else:
+        assert env.edits() == [_edit_args("ITEM_I_kwGuard", board, key)]
+        assert last.startswith(f'board-sync: moved 1 issue(s) to "{cfg["statuses"][key]}"'), last
+        assert "left" not in last
+
+
+def test_ready_pr_leaves_closed_and_done_issues_and_moves_the_rest(tmp_path: Path) -> None:
+    # The reported case: a follow-up PR with "Fixes #5" after #5 merged and closed.
+    env = Env(tmp_path)
+    board = Board()
+    cfg = _real_config()
+    ids = ["I_kwOpen", "I_kwClosedDone", "I_kwClosedReview", "I_kwOpenDone"]
+    states = {"I_kwClosedDone": "CLOSED", "I_kwClosedReview": "CLOSED"}
+    env.state["BoardSyncLinkedIssues"] = _ok(_linked(ids, issue_states=states))
+    env.state["board_status"] = {
+        "I_kwClosedDone": cfg["statuses"]["pr_merged"],
+        "I_kwClosedReview": cfg["statuses"]["pr_ready"],
+        "I_kwOpenDone": cfg["statuses"]["issue_closed_not_planned"],
+    }
+    proc = _apply(env, "pull_request_target", _pr_event("opened"), board)
+    assert proc.returncode == EXIT_OK, proc.stderr
+    assert env.edits() == [_edit_args("ITEM_I_kwOpen", board, "pr_ready")]
+    assert proc.stdout.strip().splitlines()[-1] == (
+        f'board-sync: moved 1 issue(s) to "{cfg["statuses"]["pr_ready"]}" (PR #12 opened); '
+        'left 2 already "Done", 1 closed'
+    )
 
 
 @pytest.mark.parametrize(
@@ -928,9 +1059,9 @@ def test_apply_issue_opened_follows_a_later_close(tmp_path: Path) -> None:
     env = Env(tmp_path)
     board = Board()
     env.state["BoardSyncIssueState"] = _issue_state("CLOSED", "NOT_PLANNED")
-    proc = _apply(env, "issues", _issue_event("opened"), board, ITEM_ID="PVTI_lAdded")
+    proc = _apply(env, "issues", _issue_event("opened"), board, ITEM_ID=ADDED_ITEM)
     assert proc.returncode == EXIT_OK, proc.stderr
-    assert env.edits() == [_edit_args("PVTI_lAdded", board, "issue_closed_not_planned")]
+    assert env.edits() == [_edit_args(ADDED_ITEM, board, "issue_closed_not_planned")]
 
 
 def test_apply_issue_reopened_adds_then_sets_in_progress(tmp_path: Path) -> None:
@@ -991,8 +1122,31 @@ def test_apply_refuses_more_linked_issues_than_the_cap(tmp_path: Path) -> None:
         ({"totalCount": 1, "nodes": [None]}, "GitHub returned a malformed linked issue id"),
         ({"totalCount": 1, "nodes": [{"id": "I_kw A\n"}]}, "GitHub returned a malformed linked issue id"),
         ({"totalCount": True, "nodes": []}, "GitHub returned malformed linked issues for PR #12"),
+        ({"totalCount": 1, "nodes": [{"id": "I_kwA"}]}, "GitHub returned a malformed linked issue state for PR #12"),
+        (
+            {"totalCount": 1, "nodes": [{"id": "I_kwA", "state": "open"}]},
+            "GitHub returned a malformed linked issue state for PR #12",
+        ),
+        (
+            {"totalCount": 1, "nodes": [{"id": "I_kwA", "state": "MERGED"}]},
+            "GitHub returned a malformed linked issue state for PR #12",
+        ),
+        (
+            {"totalCount": 1, "nodes": [{"id": "I_kwA", "state": None}]},
+            "GitHub returned a malformed linked issue state for PR #12",
+        ),
     ],
-    ids=["pr-not-found", "count-mismatch", "null-node", "hostile-id", "bool-count"],
+    ids=[
+        "pr-not-found",
+        "count-mismatch",
+        "null-node",
+        "hostile-id",
+        "bool-count",
+        "missing-issue-state",
+        "lowercase-issue-state",
+        "unknown-issue-state",
+        "null-issue-state",
+    ],
 )
 def test_apply_rejects_malformed_linked_issue_data(tmp_path: Path, refs: object, message: str) -> None:
     env = Env(tmp_path)
