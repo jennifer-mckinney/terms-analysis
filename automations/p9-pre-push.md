@@ -129,13 +129,3 @@ the owner can waive a finding, at merge time.
 `scripts/install-hooks.sh` sets `core.hooksPath=.githooks` so the tracked
 `.githooks/pre-commit` (gitignore and leak guards) runs on `git commit`.
 There is no local pre-push gate any more and no `.git/reviews/` directory.
-
-## Companion change
-
-The retired `.githooks/pre-push`, its `.sha256` pin and
-`scripts/ci/p9-sibling-parity.sh` were byte-identical copies shared with
-`jennifer-mckinney/legal-corpus-ingester`, whose CI checks parity against this
-repo. The ingester retires its parity check in
-jennifer-mckinney/legal-corpus-ingester#20. The two PRs merge back-to-back:
-this one (#214) first, then ingester#20. Until ingester#20 merges, the
-ingester's main-branch parity step fails.
