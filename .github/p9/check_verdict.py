@@ -22,8 +22,9 @@ Exit codes:
        PASS with only non-blocking findings (prints "P9 verdict: PASS, <n>
        finding(s), 0 blocking" and one line per finding, to stdout)
     1  FAIL with at least one blocking finding (to stderr)
-    2  the file is missing, unreadable, not JSON, or off the contract,
-       including a verdict that contradicts its findings
+    2  the file is missing, unreadable, not JSON (including nesting deeper
+       than MAX_JSON_DEPTH), or off the contract, including a verdict that
+       contradicts its findings; also when MAX_JSON_DEPTH itself is invalid
 
 Standard library only, so the step needs nothing installed.
 """
@@ -52,10 +53,67 @@ BLOCKING_SEVERITIES = frozenset({"CRITICAL", "HIGH", "MEDIUM"})
 # Finding text comes from a model that read untrusted PR content; it is shown
 # in the Actions log one finding per line, so each field is cut to this size.
 MAX_FIELD_CHARS = 200
+# Deepest container nesting the gate will parse ("[]" is depth 1; the
+# contract itself is depth 3). The gate owns this bound so a deep file is
+# refused the same way on every Python: 3.11's json scanner raised
+# RecursionError on deep input, 3.14 parses it (#265). It must stay below the
+# interpreter's default recursion limit (1000) so input at the bound parses.
+MAX_JSON_DEPTH = 32
 
 
 class InvalidVerdict(Exception):
     """The verdict file cannot be trusted as a reviewer decision."""
+
+
+def _json_depth_exceeds(text: str, bound: int) -> bool:
+    """True once `text` opens more than `bound` containers at one point.
+
+    A single linear pass, no recursion: brackets and braces count only
+    outside JSON strings, and a backslash inside a string escapes the next
+    character, so string content can never forge or hide nesting. Validity
+    (balance, syntax) is left to json.loads.
+    """
+    depth = 0
+    in_string = escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "[{":
+            depth += 1
+            if depth > bound:
+                return True
+        elif ch in "]}":
+            depth -= 1
+    return False
+
+
+def _contract_depth() -> int:
+    """Nesting depth of the verdict contract, derived from its field tuples."""
+    shape = json.dumps({key: [dict.fromkeys(FINDING_FIELDS)] for key in DOC_FIELDS})
+    depth = 0
+    while _json_depth_exceeds(shape, depth):
+        depth += 1
+    return depth
+
+
+def _depth_bound_problem() -> str | None:
+    """Why MAX_JSON_DEPTH is unusable, or None when it is a valid bound."""
+    bound = MAX_JSON_DEPTH
+    minimum = _contract_depth()
+    # bool is a subclass of int, so it is refused explicitly.
+    if not isinstance(bound, int) or isinstance(bound, bool) or bound < minimum:
+        return (
+            f"MAX_JSON_DEPTH must be an int of at least {minimum} (the verdict "
+            f"contract's own depth), got {_clean(repr(bound))}"
+        )
+    return None
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -99,9 +157,15 @@ def load(path: Path) -> dict[str, object]:
     if not path.is_file():
         raise InvalidVerdict(f"{path.name} was not written by the reviewer")
     try:
-        doc = json.loads(
-            path.read_text(encoding="utf-8"), object_pairs_hook=_reject_duplicate_keys
-        )
+        text = path.read_text(encoding="utf-8")
+        # Depth is checked on the raw text before parsing, so the refusal
+        # never depends on how (or whether) the parser handles deep input.
+        if _json_depth_exceeds(text, MAX_JSON_DEPTH):
+            raise InvalidVerdict(
+                f"{path.name} is not valid JSON (nested deeper than "
+                f"MAX_JSON_DEPTH={MAX_JSON_DEPTH})"
+            )
+        doc = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
     except (OSError, UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise InvalidVerdict(f"{path.name} is not valid JSON ({type(exc).__name__})") from None
     # Exact key sets: the document and every finding carry the contract keys
@@ -140,6 +204,11 @@ def _count_blocking(findings: list[dict[str, object]]) -> int:
 
 
 def main(argv: list[str]) -> int:
+    # Startup check: a misconfigured bound fails closed before any file is read.
+    problem = _depth_bound_problem()
+    if problem is not None:
+        print(f"P9 verdict: invalid: {problem}", file=sys.stderr)
+        return EXIT_INVALID
     if len(argv) != 2:
         print("usage: check_verdict.py <p9-verdict.json>", file=sys.stderr)
         return EXIT_INVALID
