@@ -15,15 +15,28 @@ project-manager agent dispatched after every event (agent-setup audit item 5,
 | Event key | When | Status |
 |---|---|---|
 | `issue_opened` | An issue is opened. `actions/add-to-project` adds it to the board. | Backlog |
+| `issue_reopened` | An issue is reopened. | In progress |
 | `issue_closed_not_planned` | An issue is closed as not planned. | Done |
 | `pr_ready` | A PR is opened, reopened or marked ready for review, and is not a draft. Every issue it links with a closing keyword (`Fixes #12`) moves. | In review |
+| `pr_withdrawn` | A PR is converted to a draft, or closed without merging. Every linked issue moves, except cards already in the `pr_merged` or `issue_closed_not_planned` status. | In progress |
 | `pr_merged` | A PR is merged. Every issue it links with a closing keyword moves. | Done |
 
 Everything else is a deliberate skip, logged as `board-sync: plan: skip
-(<reason>)`: a draft PR, a PR closed without merging, and an issue closed as
+(<reason>)`: a PR opened or reopened as a draft, and an issue closed as
 completed or duplicate. Issues closed as completed are normally closed by a
 merged PR, which already moved them to Done. Linked issues not yet on the
 board are added first.
+
+### Order of runs
+
+The event only starts a run. The move itself follows the current state:
+`apply` reads the PR's state (merged, closed, draft or open) or the issue's
+state and close reason from GitHub, and uses the row that state means. So if
+a PR is converted to draft and then marked ready in quick succession, every
+run moves the cards to In review, whatever order the runs execute in. Runs
+for one issue or PR are serialised by a concurrency group, but GitHub can
+drop a pending run when a newer event arrives and does not guarantee order;
+reading the current state is what makes that safe.
 
 The project ID, the field ID and the option IDs are looked up by name on
 every run. Renaming a status on the board without updating `config.json`

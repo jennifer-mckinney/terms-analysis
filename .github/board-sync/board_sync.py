@@ -7,9 +7,14 @@ project-manager agent dispatches (agent-setup audit item 5, 2026-10-09).
 Subcommands:
     plan   Route the current event. Writes project_url and event to
            $GITHUB_OUTPUT; event is empty when the event is a deliberate skip
-           (a draft PR, a PR closed without merge, an issue closed as anything
+           (a PR opened or reopened as a draft, an issue closed as anything
            but not planned). Makes no GitHub call.
-    apply  Move the card(s) for the routed event to the configured status.
+    apply  Move the card(s) for the event to the configured status.
+           Reconciles: it reads the PR's or the issue's CURRENT state from
+           GitHub and moves the cards to the status that state means, not the
+           status of the event that started the run. Runs can therefore be
+           cancelled while pending or run out of order (GitHub guarantees
+           neither) and the board still converges on the latest state.
            Resolves the project, the status field and the option by name on
            every run, so no board ID is stored anywhere.
 
@@ -29,11 +34,14 @@ Standard library and the gh CLI only (both on GitHub-hosted runners).
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
+import selectors
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,17 +53,39 @@ DEFAULT_CONFIG = Path(__file__).resolve().with_name("config.json")
 SETUP_DOC = "automations/board-sync.md"
 
 # Event keys: the config's "statuses" object maps each one to a board status.
-EVENT_KEYS = ("issue_opened", "issue_closed_not_planned", "pr_ready", "pr_merged")
+EVENT_KEYS = (
+    "issue_opened",
+    "issue_reopened",
+    "issue_closed_not_planned",
+    "pr_ready",
+    "pr_withdrawn",
+    "pr_merged",
+)
 # The workflow triggers on exactly these event names and actions; the test
 # suite checks the workflow's `on:` block against this table.
 ROUTED_ACTIONS = {
-    "issues": ("opened", "closed"),
-    "pull_request_target": ("opened", "reopened", "ready_for_review", "closed"),
+    "issues": ("opened", "reopened", "closed"),
+    "pull_request_target": ("opened", "reopened", "ready_for_review", "converted_to_draft", "closed"),
 }
 PR_READY_ACTIONS = ("opened", "reopened", "ready_for_review")
 # Issue close reasons GitHub sends. Only not_planned moves a card; an unknown
 # reason fails closed so a new GitHub value is noticed, not ignored.
 SKIPPED_CLOSE_REASONS = ("completed", "duplicate", None)
+# A withdrawn PR (closed unmerged, or back to draft) never pulls a linked card
+# out of the status these events set: that work is finished.
+DONE_EVENT_KEYS = ("pr_merged", "issue_closed_not_planned")
+# Current-state tables used by apply. GraphQL enum values; anything else fails
+# closed. A PR: MERGED -> merged; CLOSED or a draft -> withdrawn; else ready.
+PR_STATES = ("OPEN", "CLOSED", "MERGED")
+# An issue: (state, stateReason) -> event key, or None for a deliberate skip.
+ISSUE_STATE_EVENTS: dict[tuple[str, str | None], str | None] = {
+    ("OPEN", None): "issue_opened",
+    ("OPEN", "REOPENED"): "issue_reopened",
+    ("CLOSED", "NOT_PLANNED"): "issue_closed_not_planned",
+    ("CLOSED", "COMPLETED"): None,
+    ("CLOSED", "DUPLICATE"): None,
+    ("CLOSED", None): None,
+}
 
 CONFIG_FIELDS = (
     "project_url",
@@ -100,15 +130,25 @@ LINKED_ISSUES_QUERY = """
 query BoardSyncLinkedIssues($owner: String!, $repo: String!, $number: Int!, $first: Int!) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
+      state
+      isDraft
       closingIssuesReferences(first: $first) { totalCount nodes { id number } }
     }
   }
 }
 """
-# Idempotent: for an issue already on the board GitHub returns its item.
+ISSUE_STATE_QUERY = """
+query BoardSyncIssueState($id: ID!) {
+  node(id: $id) { __typename ... on Issue { state stateReason } }
+}
+"""
+# Idempotent: for an issue already on the board GitHub returns its item, with
+# the card's current status.
 ADD_ITEM_MUTATION = """
-mutation BoardSyncAddItem($project: ID!, $content: ID!) {
-  addProjectV2ItemById(input: {projectId: $project, contentId: $content}) { item { id } }
+mutation BoardSyncAddItem($project: ID!, $content: ID!, $field: String!) {
+  addProjectV2ItemById(input: {projectId: $project, contentId: $content}) {
+    item { id fieldValueByName(name: $field) { ... on ProjectV2ItemFieldSingleSelectValue { name } } }
+  }
 }
 """
 
@@ -266,6 +306,8 @@ def route(event_name: str, payload: object) -> Route:
         node_id = _payload_node_id(issue.get("node_id"))
         if action == "opened":
             return Route("issue_opened", "issue opened", issue_node_id=node_id)
+        if action == "reopened":
+            return Route("issue_reopened", "issue reopened", issue_node_id=node_id)
         reason = issue.get("state_reason")
         if reason == "not_planned":
             return Route("issue_closed_not_planned", "issue closed as not planned", issue_node_id=node_id)
@@ -283,9 +325,11 @@ def route(event_name: str, payload: object) -> Route:
         if draft:
             return Route(None, f"PR #{number} is a draft")
         return Route("pr_ready", f"PR #{number} {action}", pr_number=number)
+    if action == "converted_to_draft":
+        return Route("pr_withdrawn", f"PR #{number} converted to draft", pr_number=number)
     if merged:
         return Route("pr_merged", f"PR #{number} merged", pr_number=number)
-    return Route(None, f"PR #{number} closed without merge")
+    return Route("pr_withdrawn", f"PR #{number} closed without merge", pr_number=number)
 
 
 def _event() -> tuple[str, object]:
@@ -310,30 +354,87 @@ def plan(cfg: Config) -> int:
     return EXIT_OK
 
 
+def _drain(proc: subprocess.Popen[bytes], data: bytes | None, cfg: Config, what: str) -> tuple[bytes, bytes]:
+    """Feed stdin and read stdout and stderr as the child writes them.
+
+    One byte budget (gh_output_max_bytes) covers both output streams, and one
+    deadline (gh_timeout_seconds) covers the whole call. Either one tripping
+    raises GitHubError at once; the caller kills the child.
+    """
+    assert proc.stdout is not None and proc.stderr is not None
+    deadline = time.monotonic() + cfg.gh_timeout_seconds
+    timed_out = f"{what} timed out after {cfg.gh_timeout_seconds}s"
+    received: dict[int, list[bytes]] = {proc.stdout.fileno(): [], proc.stderr.fileno(): []}
+    total = 0
+    pending = memoryview(data or b"")
+    with selectors.DefaultSelector() as sel:
+        for fd in received:
+            sel.register(fd, selectors.EVENT_READ)
+        if proc.stdin is not None:
+            os.set_blocking(proc.stdin.fileno(), False)
+            sel.register(proc.stdin.fileno(), selectors.EVENT_WRITE)
+        while sel.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GitHubError(timed_out)
+            for key, _ in sel.select(remaining):
+                fd = key.fd
+                if fd not in received:  # stdin is writable
+                    try:
+                        pending = pending[os.write(fd, pending[: io.DEFAULT_BUFFER_SIZE]) :]
+                    except BlockingIOError:
+                        continue
+                    except BrokenPipeError:
+                        pending = pending[:0]  # gh stopped reading; its exit status says why
+                    if not pending:
+                        sel.unregister(fd)
+                        assert proc.stdin is not None
+                        proc.stdin.close()
+                    continue
+                chunk = os.read(fd, io.DEFAULT_BUFFER_SIZE)
+                if not chunk:
+                    sel.unregister(fd)
+                    continue
+                total += len(chunk)
+                if total > cfg.gh_output_max_bytes:
+                    raise GitHubError(f"{what} returned more than {cfg.gh_output_max_bytes} bytes")
+                received[fd].append(chunk)
+    try:
+        proc.wait(timeout=max(deadline - time.monotonic(), 0))
+    except subprocess.TimeoutExpired:
+        raise GitHubError(timed_out) from None
+    return b"".join(received[proc.stdout.fileno()]), b"".join(received[proc.stderr.fileno()])
+
+
 def _gh(cfg: Config, args: list[str], stdin: str | None = None) -> str:
     """Run gh with a timeout and an output cap; any failure raises GitHubError."""
+    what = f"gh {args[0]} {args[1]}"
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             ["gh", *args],
-            input=None if stdin is None else stdin.encode("utf-8"),
-            capture_output=True,
-            timeout=cfg.gh_timeout_seconds,
-            check=False,
+            stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
     except FileNotFoundError:
         raise GitHubError("the gh CLI was not found on PATH") from None
-    except subprocess.TimeoutExpired:
-        # subprocess.run kills the child before re-raising.
-        raise GitHubError(f"gh {args[0]} {args[1]} timed out after {cfg.gh_timeout_seconds}s") from None
-    if len(proc.stdout) > cfg.gh_output_max_bytes:
-        raise GitHubError(f"gh {args[0]} {args[1]} returned more than {cfg.gh_output_max_bytes} bytes")
-    if proc.returncode != 0:
-        detail = proc.stderr.decode("utf-8", errors="replace").strip()
-        raise GitHubError(f"gh {args[0]} {args[1]} failed (exit {proc.returncode}): {detail}")
     try:
-        return proc.stdout.decode("utf-8")
+        out, err = _drain(proc, None if stdin is None else stdin.encode("utf-8"), cfg, what)
+    finally:
+        # Every exit path (cap, deadline, any exception) leaves no child behind.
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
+    if proc.returncode != 0:
+        detail = err.decode("utf-8", errors="replace").strip()
+        raise GitHubError(f"{what} failed (exit {proc.returncode}): {detail}")
+    try:
+        return out.decode("utf-8")
     except UnicodeDecodeError:
-        raise GitHubError(f"gh {args[0]} {args[1]} returned non-UTF-8 output") from None
+        raise GitHubError(f"{what} returned non-UTF-8 output") from None
 
 
 def _graphql(cfg: Config, query: str, variables: dict[str, object]) -> dict[str, object]:
@@ -406,17 +507,30 @@ def resolve_board(cfg: Config, status: str) -> BoardTarget:
     return BoardTarget(project_id, field_id, option_id, status)
 
 
-def linked_issues(cfg: Config, repository: str, number: int) -> list[str]:
-    """Node IDs of the issues the PR closes (GitHub's closing-keyword links)."""
+def pr_event(state: object, draft: object, number: int) -> str:
+    """The event key a PR's current state means (see PR_STATES)."""
+    if state not in PR_STATES or not isinstance(draft, bool):
+        raise GitHubError(f"GitHub returned a malformed state for PR #{number}")
+    if state == "MERGED":
+        return "pr_merged"
+    if state == "CLOSED" or draft:
+        return "pr_withdrawn"
+    return "pr_ready"
+
+
+def linked_issues(cfg: Config, repository: str, number: int) -> tuple[str, list[str]]:
+    """The PR's current event key and the node IDs of the issues it closes."""
     owner, repo = repository.split("/", 1)
     data = _graphql(
         cfg,
         LINKED_ISSUES_QUERY,
         {"owner": owner, "repo": repo, "number": number, "first": cfg.max_linked_issues},
     )
-    refs = _dig(data, "repository", "pullRequest", "closingIssuesReferences")
-    if not isinstance(refs, dict):
+    pr = _dig(data, "repository", "pullRequest")
+    refs = _dig(pr, "closingIssuesReferences")
+    if not isinstance(pr, dict) or not isinstance(refs, dict):
         raise GitHubError(f"PR #{number} was not found in {repository}")
+    event = pr_event(pr.get("state"), pr.get("isDraft"), number)
     total = refs.get("totalCount")
     nodes = refs.get("nodes")
     if not _is_int(total) or total < 0 or not isinstance(nodes, list):
@@ -427,12 +541,34 @@ def linked_issues(cfg: Config, repository: str, number: int) -> list[str]:
         )
     if len(nodes) != total:
         raise GitHubError(f"GitHub listed {len(nodes)} of {total} linked issues for PR #{number}")
-    return [_api_id(_dig(node, "id"), "linked issue id") for node in nodes]
+    return event, [_api_id(_dig(node, "id"), "linked issue id") for node in nodes]
 
 
-def add_item(cfg: Config, board: BoardTarget, content_id: str) -> str:
-    data = _graphql(cfg, ADD_ITEM_MUTATION, {"project": board.project_id, "content": content_id})
-    return _api_id(_dig(data, "addProjectV2ItemById", "item", "id"), "project item id")
+def issue_event(cfg: Config, node_id: str) -> str | None:
+    """The event key the issue's current state means, or None for a skip."""
+    node = _dig(_graphql(cfg, ISSUE_STATE_QUERY, {"id": node_id}), "node")
+    if not isinstance(node, dict) or node.get("__typename") != "Issue":
+        raise GitHubError("the issue was not found, or the node is not an issue")
+    key = (node.get("state"), node.get("stateReason"))
+    if key not in ISSUE_STATE_EVENTS:
+        raise GitHubError("GitHub returned a malformed or unknown issue state")
+    return ISSUE_STATE_EVENTS[key]  # type: ignore[index]
+
+
+def add_item(cfg: Config, board: BoardTarget, content_id: str) -> tuple[str, str | None]:
+    """Add the issue to the board (idempotent); its item id and current status."""
+    data = _graphql(
+        cfg,
+        ADD_ITEM_MUTATION,
+        {"project": board.project_id, "content": content_id, "field": cfg.status_field},
+    )
+    item = _dig(data, "addProjectV2ItemById", "item")
+    item_id = _api_id(_dig(item, "id"), "project item id")
+    value = _dig(item, "fieldValueByName")
+    status = _dig(value, "name") if isinstance(value, dict) else value
+    if status is not None and not isinstance(status, str):
+        raise GitHubError("GitHub returned a malformed card status")
+    return item_id, status
 
 
 def set_status(cfg: Config, board: BoardTarget, item_id: str) -> None:
@@ -474,28 +610,46 @@ def apply(cfg: Config) -> int:
         if REPOSITORY.fullmatch(repository) is None:
             raise InvalidInput("GITHUB_REPOSITORY is missing or malformed")
 
-    board = resolve_board(cfg, cfg.statuses[decision.event])
+    # Reconcile: the current PR or issue state picks the event key.
+    if decision.pr_number is not None:
+        event, content_ids = linked_issues(cfg, repository, decision.pr_number)
+        print(f"board-sync: PR #{decision.pr_number} links {len(content_ids)} issue(s)")
+    elif decision.issue_node_id is not None:
+        current = issue_event(cfg, decision.issue_node_id)
+        if current is None:
+            print(f"board-sync: skip (the issue is closed as completed or duplicate now; {decision.reason})")
+            return EXIT_OK
+        event, content_ids = current, [decision.issue_node_id]
+    else:
+        raise InvalidInput(f"route {decision.event} carries no issue or PR")
+    if event != decision.event:
+        print(f"board-sync: current state means {event}, not {decision.event} ({decision.reason})")
+
+    board = resolve_board(cfg, cfg.statuses[event])
     if decision.event == "issue_opened":
+        # actions/add-to-project already added the issue and gave its item id.
         set_status(cfg, board, item_id)
         print(f'board-sync: moved 1 issue(s) to "{board.status}" ({decision.reason})')
         return EXIT_OK
 
-    if decision.pr_number is not None:
-        content_ids = linked_issues(cfg, repository, decision.pr_number)
-        print(f"board-sync: PR #{decision.pr_number} links {len(content_ids)} issue(s)")
-    elif decision.issue_node_id is not None:
-        content_ids = [decision.issue_node_id]
-    else:
-        raise InvalidInput(f"route {decision.event} carries no issue or PR")
-
+    done = {cfg.statuses[key] for key in DONE_EVENT_KEYS} if event == "pr_withdrawn" else set()
     moved = 0
+    left: list[str] = []
     for content_id in content_ids:
         try:
-            set_status(cfg, board, add_item(cfg, board, content_id))
+            item, status = add_item(cfg, board, content_id)
+            if status in done:
+                left.append(status)
+                continue
+            set_status(cfg, board, item)
         except GitHubError as exc:
             raise GitHubError(f"{exc} (moved {moved} of {len(content_ids)} before the failure)") from None
         moved += 1
-    print(f'board-sync: moved {moved} issue(s) to "{board.status}" ({decision.reason})')
+    kept = ""
+    if left:
+        names = " or ".join(f'"{name}"' for name in sorted(set(left)))
+        kept = f"; left {len(left)} already {names}"
+    print(f'board-sync: moved {moved} issue(s) to "{board.status}" ({decision.reason}){kept}')
     return EXIT_OK
 
 

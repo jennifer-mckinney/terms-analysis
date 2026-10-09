@@ -3,8 +3,10 @@
   "status_field": "Status",
   "statuses": {
     "issue_opened": "Backlog",
+    "issue_reopened": "In progress",
     "issue_closed_not_planned": "Done",
     "pr_ready": "In review",
+    "pr_withdrawn": "In progress",
     "pr_merged": "Done"
   },
   "gh_timeout_seconds": 60,

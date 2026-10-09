@@ -5,9 +5,16 @@ Per-event project-manager agent dispatches are replaced by
 Projects v2 board in step with issues and pull requests:
 
 - issue opened                         -> added to the board, Backlog
+- issue reopened                       -> In progress
 - issue closed as not planned          -> Done
 - PR opened / reopened / ready for review (not draft) -> linked issues In review
+- PR converted to draft, or closed without merge -> linked issues In progress,
+  except cards already Done
 - PR merged                            -> linked issues Done
+
+``apply`` reconciles: it reads the PR's or issue's current state from GitHub
+and moves cards to the status that state means, not the status of the event
+that started the run, so out-of-order or cancelled runs still converge.
 
 Routing, config validation and the GitHub calls live in
 ``.github/board-sync/board_sync.py`` (stdlib only). The board, the field and
@@ -18,7 +25,8 @@ Covered here:
 - the helper's config loader (exact schema, fail closed);
 - the routing table, run as ``plan`` over real-shaped event payloads;
 - ``apply`` against a fake ``gh`` on PATH: the exact GraphQL variables and
-  ``gh project item-edit`` arguments, every error path, hostile API output;
+  ``gh project item-edit`` arguments, reconciliation from current state, the
+  combined stdout and stderr cap, every error path, hostile API output;
 - the workflow's shape: triggers (parity with the helper), SHA pins,
   permissions, fork guard, the loud missing-secret step (run under bash),
   no hard-coded board IDs, and the plan and apply steps run end to end;
@@ -27,6 +35,7 @@ Covered here:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -52,7 +61,7 @@ EXIT_OK = 0
 EXIT_FAILED = 1  # GitHub call failed, or the board does not match the config
 EXIT_INVALID = 2  # bad config, environment, event payload or usage
 
-EVENT_KEYS = {"issue_opened", "issue_closed_not_planned", "pr_ready", "pr_merged"}
+EVENT_KEYS = {"issue_opened", "issue_reopened", "issue_closed_not_planned", "pr_ready", "pr_withdrawn", "pr_merged"}
 CONFIG_KEYS = {
     "project_url",
     "status_field",
@@ -82,9 +91,13 @@ HOSTILE_TEXT = {
 
 # Fake gh: logs every call, answers by GraphQL operation name or subcommand.
 # FAKE_GH_STATE maps a kind (operation name, or "item-edit") to a response:
-# {"stdout": str, "stderr": str, "rc": int, "sleep": float, "big": int}.
-# BoardSyncAddItem with no stdout echoes an item id built from the content id;
-# adds and item-edits succeed by default.
+# {"stdout": str, "stderr": str, "rc": int, "sleep": float, "big": int,
+#  "big_stderr": int, "endless": "stdout" | "stderr"}.
+# BoardSyncAddItem with no stdout echoes an item id built from the content id,
+# and the card's current status from the state's "board_status" map (content
+# id -> status name; absent means no status). BoardSyncIssueState, unless
+# scripted, answers with the state the event payload implies. Adds and
+# item-edits succeed by default.
 FAKE_GH = r'''
 import json, os, re, sys, time
 state = json.loads(open(os.environ["FAKE_GH_STATE"], encoding="utf-8").read())
@@ -101,18 +114,34 @@ if args[:2] == ["api", "graphql"]:
     kind = match.group(2) if match else "anonymous"
 elif args[:2] == ["project", "item-edit"]:
     kind = "item-edit"
-# Adds and edits succeed unless a test scripts them; anything else must be scripted.
-defaults = {"BoardSyncAddItem": {}, "item-edit": {}}
+# Adds, edits and issue-state reads succeed unless a test scripts them;
+# anything else must be scripted.
+defaults = {"BoardSyncAddItem": {}, "item-edit": {}, "BoardSyncIssueState": {}}
 resp = state.get(kind, defaults.get(kind, {"rc": 97, "stderr": "fake gh: unexpected call " + kind}))
 if resp.get("sleep"):
     time.sleep(resp["sleep"])
 out = resp.get("stdout")
 if out is None and kind == "BoardSyncAddItem":
-    out = json.dumps({"data": {"addProjectV2ItemById": {"item": {"id": "ITEM_" + variables["content"]}}}})
+    status = state.get("board_status", {}).get(variables["content"])
+    item = {"id": "ITEM_" + variables["content"], "fieldValueByName": None if status is None else {"name": status}}
+    out = json.dumps({"data": {"addProjectV2ItemById": {"item": item}}})
+if out is None and kind == "BoardSyncIssueState":
+    event = json.loads(open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8").read())
+    action = event["action"]
+    reason = {"reopened": "REOPENED", "closed": (event["issue"].get("state_reason") or "").upper() or None}.get(action)
+    node = {"__typename": "Issue", "state": "CLOSED" if action == "closed" else "OPEN", "stateReason": reason}
+    out = json.dumps({"data": {"node": node}})
 if resp.get("big"):
     out = "x" * resp["big"]
 sys.stdout.write(out or "")
 sys.stderr.write(resp.get("stderr", ""))
+if resp.get("big_stderr"):
+    sys.stderr.write("e" * resp["big_stderr"])
+if resp.get("endless"):
+    stream = sys.stdout if resp["endless"] == "stdout" else sys.stderr
+    while True:
+        stream.write("z" * 65536)
+        stream.flush()
 sys.exit(resp.get("rc", 0))
 '''
 
@@ -170,11 +199,14 @@ class Board:
         return self.options[_real_config()["statuses"][event_key]]
 
 
-def _linked(ids: list[str], total: int | None = None) -> dict[str, Any]:
+def _linked(ids: list[str], total: int | None = None, *, state: str = "OPEN", draft: bool = False) -> dict[str, Any]:
+    """The linked-issues answer, with the PR's current state (open, not draft by default)."""
     return {
         "data": {
             "repository": {
                 "pullRequest": {
+                    "state": state,
+                    "isDraft": draft,
                     "closingIssuesReferences": {
                         "totalCount": len(ids) if total is None else total,
                         "nodes": [{"id": i, "number": n + 1} for n, i in enumerate(ids)],
@@ -434,6 +466,7 @@ def test_config_bounds_are_inclusive(tmp_path: Path, key: str, value: int) -> No
 
 ROUTES = [
     ("issues", _issue_event("opened"), "issue_opened"),
+    ("issues", _issue_event("reopened"), "issue_reopened"),
     ("issues", _issue_event("closed", "not_planned"), "issue_closed_not_planned"),
     ("issues", _issue_event("closed", "completed"), ""),
     ("issues", _issue_event("closed", "duplicate"), ""),
@@ -444,7 +477,8 @@ ROUTES = [
     ("pull_request_target", _pr_event("opened", draft=True), ""),
     ("pull_request_target", _pr_event("reopened", draft=True), ""),
     ("pull_request_target", _pr_event("closed", merged=True), "pr_merged"),
-    ("pull_request_target", _pr_event("closed", merged=False), ""),
+    ("pull_request_target", _pr_event("closed", merged=False), "pr_withdrawn"),
+    ("pull_request_target", _pr_event("converted_to_draft", draft=True), "pr_withdrawn"),
 ]
 
 
@@ -536,18 +570,23 @@ def test_usage_errors_exit_invalid(tmp_path: Path) -> None:
 # --- apply against a fake gh -------------------------------------------------
 
 
-def _apply(env: Env, event_name: str, payload: object, board: Board | None = None, **extra: str):
+def _apply(
+    env: Env, event_name: str, payload: object, board: Board | None = None, **extra: str
+) -> subprocess.CompletedProcess[str]:
     if board is not None:
         env.state.setdefault("BoardSyncProject", _ok(board.response()))
     return _run("apply", env.env(event_name, payload, **extra))
 
 
-@pytest.mark.parametrize(("action", "merged", "key"), [("opened", False, "pr_ready"), ("closed", True, "pr_merged")])
-def test_apply_moves_every_linked_issue(tmp_path: Path, action: str, merged: bool, key: str) -> None:
+@pytest.mark.parametrize(
+    ("action", "merged", "state", "key"),
+    [("opened", False, "OPEN", "pr_ready"), ("closed", True, "MERGED", "pr_merged"), ("closed", False, "CLOSED", "pr_withdrawn")],
+)
+def test_apply_moves_every_linked_issue(tmp_path: Path, action: str, merged: bool, state: str, key: str) -> None:
     env = Env(tmp_path)
     board = Board()
     issues = ["I_kwIssueA", "I_kwIssueB"]
-    env.state["BoardSyncLinkedIssues"] = _ok(_linked(issues))
+    env.state["BoardSyncLinkedIssues"] = _ok(_linked(issues, state=state))
     proc = _apply(env, "pull_request_target", _pr_event(action, merged=merged, number=42), board)
     assert proc.returncode == EXIT_OK, proc.stderr
 
@@ -560,7 +599,7 @@ def test_apply_moves_every_linked_issue(tmp_path: Path, action: str, merged: boo
         {"owner": "example-owner", "repo": "example-repo", "number": 42, "first": cfg["max_linked_issues"]}
     ]
     assert env.graphql_calls("BoardSyncAddItem") == [
-        {"project": board.project_id, "content": i} for i in issues
+        {"project": board.project_id, "content": i, "field": cfg["status_field"]} for i in issues
     ]
     assert env.edits() == [_edit_args(f"ITEM_{i}", board, key) for i in issues]
     assert f'moved 2 issue(s) to "{cfg["statuses"][key]}"' in proc.stdout
@@ -571,7 +610,10 @@ def test_apply_issue_closed_not_planned_adds_then_sets_done(tmp_path: Path) -> N
     board = Board()
     proc = _apply(env, "issues", _issue_event("closed", "not_planned", node_id="I_kwClosed"), board)
     assert proc.returncode == EXIT_OK, proc.stderr
-    assert env.graphql_calls("BoardSyncAddItem") == [{"project": board.project_id, "content": "I_kwClosed"}]
+    assert env.graphql_calls("BoardSyncAddItem") == [
+        {"project": board.project_id, "content": "I_kwClosed", "field": _real_config()["status_field"]}
+    ]
+    assert env.graphql_calls("BoardSyncIssueState") == [{"id": "I_kwClosed"}]
     assert env.edits() == [_edit_args("ITEM_I_kwClosed", board, "issue_closed_not_planned")]
     assert "moved 1 issue(s)" in proc.stdout
 
@@ -663,6 +705,7 @@ def test_apply_fails_when_the_board_does_not_match_the_config(tmp_path: Path, ca
 def test_missing_option_message_names_the_status_and_the_board_options(tmp_path: Path) -> None:
     env = Env(tmp_path)
     board = Board(option_names=["Todo", "Doing"])
+    env.state["BoardSyncLinkedIssues"] = _ok(_linked(["I_kwA"]))
     proc = _apply(env, "pull_request_target", _pr_event("opened"), board)
     assert proc.returncode == EXIT_FAILED
     wanted = _real_config()["statuses"]["pr_ready"]
@@ -722,6 +765,201 @@ def test_apply_caps_gh_output(tmp_path: Path) -> None:
     proc = _run("apply", env.env("issues", _issue_event("closed", "not_planned")), cfg)
     assert proc.returncode == EXIT_FAILED
     assert "4096 bytes" in proc.stderr
+
+
+@pytest.mark.parametrize(
+    "resp",
+    [{"rc": 1, "big_stderr": 5000}, {"rc": 0, "big_stderr": 5000}, {"endless": "stderr"}, {"endless": "stdout"}],
+    ids=["failing-big-stderr", "ok-big-stderr", "endless-stderr", "endless-stdout"],
+)
+def test_apply_caps_stdout_and_stderr_together_and_stops_the_child(tmp_path: Path, resp: dict[str, Any]) -> None:
+    # The cap trips while the child is still writing, well inside the timeout.
+    env = Env(tmp_path)
+    env.state["BoardSyncProject"] = resp
+    cfg = _write_config(tmp_path, gh_output_max_bytes=4096, gh_timeout_seconds=30)
+    proc = _run("apply", env.env("issues", _issue_event("closed", "not_planned")), cfg)
+    assert proc.returncode == EXIT_FAILED
+    assert "more than 4096 bytes" in proc.stderr, proc.stderr
+    assert "timed out" not in proc.stderr
+    _single_line(proc.stderr.rstrip("\n"))
+
+
+def test_apply_output_cap_is_inclusive(tmp_path: Path) -> None:
+    env = Env(tmp_path)
+    board = Board()
+    body = json.dumps(board.response())
+    env.state["BoardSyncProject"] = {"stdout": body}
+    cfg = _write_config(tmp_path, gh_output_max_bytes=len(body.encode("utf-8")))
+    proc = _run("apply", env.env("issues", _issue_event("closed", "not_planned")), cfg)
+    assert proc.returncode == EXIT_OK, proc.stderr
+
+
+# (PR state, isDraft) now -> the event key apply moves the linked issues by,
+# whatever event started the run.
+PR_STATE_TARGETS = [
+    ("OPEN", False, "pr_ready"),
+    ("OPEN", True, "pr_withdrawn"),
+    ("CLOSED", False, "pr_withdrawn"),
+    ("CLOSED", True, "pr_withdrawn"),
+    ("MERGED", False, "pr_merged"),
+]
+
+
+@pytest.mark.parametrize("routed", [_pr_event("opened"), _pr_event("closed", merged=True), _pr_event("converted_to_draft", draft=True)], ids=["opened", "merged", "to-draft"])
+@pytest.mark.parametrize(("state", "draft", "key"), PR_STATE_TARGETS)
+def test_apply_moves_pr_links_by_the_current_pr_state(
+    tmp_path: Path, routed: dict[str, Any], state: str, draft: bool, key: str
+) -> None:
+    env = Env(tmp_path)
+    board = Board()
+    env.state["BoardSyncLinkedIssues"] = _ok(_linked(["I_kwA"], state=state, draft=draft))
+    proc = _apply(env, "pull_request_target", routed, board)
+    assert proc.returncode == EXIT_OK, proc.stderr
+    assert env.edits() == [_edit_args("ITEM_I_kwA", board, key)]
+    assert f'to "{_real_config()["statuses"][key]}"' in proc.stdout
+
+
+def test_pr_state_table_covers_every_pr_event_key() -> None:
+    assert {key for _, _, key in PR_STATE_TARGETS} == {k for k in EVENT_KEYS if k.startswith("pr_")}
+
+
+@pytest.mark.parametrize("done_key", ["pr_merged", "issue_closed_not_planned"])
+def test_withdrawn_pr_never_pulls_a_done_card_back(tmp_path: Path, done_key: str) -> None:
+    env = Env(tmp_path)
+    board = Board()
+    cfg = _real_config()
+    env.state["BoardSyncLinkedIssues"] = _ok(_linked(["I_kwDone", "I_kwReview", "I_kwNone"], state="CLOSED"))
+    env.state["board_status"] = {"I_kwDone": cfg["statuses"][done_key], "I_kwReview": cfg["statuses"]["pr_ready"]}
+    proc = _apply(env, "pull_request_target", _pr_event("closed"), board)
+    assert proc.returncode == EXIT_OK, proc.stderr
+    assert env.edits() == [
+        _edit_args("ITEM_I_kwReview", board, "pr_withdrawn"),
+        _edit_args("ITEM_I_kwNone", board, "pr_withdrawn"),
+    ]
+    assert f'moved 2 issue(s) to "{cfg["statuses"]["pr_withdrawn"]}"' in proc.stdout
+    assert f'left 1 already "{cfg["statuses"][done_key]}"' in proc.stdout
+
+
+def test_other_pr_moves_do_not_skip_done_cards(tmp_path: Path) -> None:
+    # Only a withdrawn PR keeps Done cards; a merge (or ready) moves every link.
+    env = Env(tmp_path)
+    board = Board()
+    env.state["BoardSyncLinkedIssues"] = _ok(_linked(["I_kwA"], state="OPEN"))
+    env.state["board_status"] = {"I_kwA": _real_config()["statuses"]["pr_merged"]}
+    proc = _apply(env, "pull_request_target", _pr_event("reopened"), board)
+    assert proc.returncode == EXIT_OK, proc.stderr
+    assert env.edits() == [_edit_args("ITEM_I_kwA", board, "pr_ready")]
+
+
+@pytest.mark.parametrize(
+    "pr",
+    [
+        {"state": "WEIRD", "isDraft": False},
+        {"state": None, "isDraft": False},
+        {"isDraft": False},
+        {"state": "OPEN", "isDraft": "no"},
+        {"state": "OPEN"},
+        {"state": "open", "isDraft": False},
+    ],
+    ids=["unknown-state", "null-state", "missing-state", "draft-not-bool", "missing-draft", "lowercase-state"],
+)
+def test_apply_rejects_a_malformed_pr_state(tmp_path: Path, pr: dict[str, Any]) -> None:
+    env = Env(tmp_path)
+    doc = _linked(["I_kwA"])
+    pull = doc["data"]["repository"]["pullRequest"]
+    del pull["state"], pull["isDraft"]
+    pull.update(pr)
+    env.state["BoardSyncLinkedIssues"] = _ok(doc)
+    proc = _apply(env, "pull_request_target", _pr_event("opened"), Board())
+    assert proc.returncode == EXIT_FAILED, proc.stderr
+    assert "state" in proc.stderr
+    assert env.edits() == []
+
+
+@pytest.mark.parametrize("status", [7, ["Done"]], ids=["number", "list"])
+def test_apply_rejects_a_malformed_card_status(tmp_path: Path, status: object) -> None:
+    env = Env(tmp_path)
+    env.state["BoardSyncLinkedIssues"] = _ok(_linked(["I_kwA"], state="CLOSED"))
+    item = {"id": "ITEM_I_kwA", "fieldValueByName": {"name": status}}
+    env.state["BoardSyncAddItem"] = _ok({"data": {"addProjectV2ItemById": {"item": item}}})
+    proc = _apply(env, "pull_request_target", _pr_event("closed"), Board())
+    assert proc.returncode == EXIT_FAILED
+    assert env.edits() == []
+
+
+def _issue_state(state: str, reason: str | None) -> dict[str, Any]:
+    return _ok({"data": {"node": {"__typename": "Issue", "state": state, "stateReason": reason}}})
+
+
+# (issue state, stateReason) now -> the event key apply moves the card by, or
+# "" for a deliberate skip.
+ISSUE_STATE_TARGETS = [
+    ("OPEN", None, "issue_opened"),
+    ("OPEN", "REOPENED", "issue_reopened"),
+    ("CLOSED", "NOT_PLANNED", "issue_closed_not_planned"),
+    ("CLOSED", "COMPLETED", ""),
+    ("CLOSED", "DUPLICATE", ""),
+    ("CLOSED", None, ""),
+]
+
+
+@pytest.mark.parametrize(
+    "routed", [_issue_event("reopened"), _issue_event("closed", "not_planned")], ids=["reopened", "closed-not-planned"]
+)
+@pytest.mark.parametrize(("state", "reason", "key"), ISSUE_STATE_TARGETS)
+def test_apply_moves_an_issue_by_its_current_state(
+    tmp_path: Path, routed: dict[str, Any], state: str, reason: str | None, key: str
+) -> None:
+    env = Env(tmp_path)
+    board = Board()
+    env.state["BoardSyncIssueState"] = _issue_state(state, reason)
+    proc = _apply(env, "issues", routed, board)
+    assert proc.returncode == EXIT_OK, proc.stderr
+    if key:
+        assert env.edits() == [_edit_args("ITEM_I_kwTestIssue1", board, key)]
+        assert f'moved 1 issue(s) to "{_real_config()["statuses"][key]}"' in proc.stdout
+    else:
+        assert env.edits() == []
+        assert "skip" in proc.stdout
+
+
+def test_apply_issue_opened_follows_a_later_close(tmp_path: Path) -> None:
+    # The opened run executes after the close: the card goes to the close status.
+    env = Env(tmp_path)
+    board = Board()
+    env.state["BoardSyncIssueState"] = _issue_state("CLOSED", "NOT_PLANNED")
+    proc = _apply(env, "issues", _issue_event("opened"), board, ITEM_ID="PVTI_lAdded")
+    assert proc.returncode == EXIT_OK, proc.stderr
+    assert env.edits() == [_edit_args("PVTI_lAdded", board, "issue_closed_not_planned")]
+
+
+def test_apply_issue_reopened_adds_then_sets_in_progress(tmp_path: Path) -> None:
+    env = Env(tmp_path)
+    board = Board()
+    proc = _apply(env, "issues", _issue_event("reopened", node_id="I_kwBack"), board)
+    assert proc.returncode == EXIT_OK, proc.stderr
+    assert env.graphql_calls("BoardSyncIssueState") == [{"id": "I_kwBack"}]
+    assert env.edits() == [_edit_args("ITEM_I_kwBack", board, "issue_reopened")]
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        None,
+        {"__typename": "PullRequest", "state": "OPEN", "stateReason": None},
+        {"__typename": "Issue", "state": "LOCKED", "stateReason": None},
+        {"__typename": "Issue", "state": "CLOSED", "stateReason": "WONTFIX"},
+        {"__typename": "Issue", "stateReason": None},
+    ],
+    ids=["not-found", "not-an-issue", "unknown-state", "unknown-reason", "missing-state"],
+)
+def test_apply_rejects_a_malformed_issue_state(tmp_path: Path, node: object) -> None:
+    env = Env(tmp_path)
+    env.state["BoardSyncIssueState"] = _ok({"data": {"node": node}})
+    proc = _apply(env, "issues", _issue_event("reopened"), Board())
+    assert proc.returncode == EXIT_FAILED, proc.stderr
+    assert env.edits() == []
+    _single_line(proc.stderr.strip())
 
 
 def test_apply_fails_when_gh_is_not_installed(tmp_path: Path) -> None:
@@ -809,15 +1047,34 @@ def test_github_error_text_is_truncated(tmp_path: Path) -> None:
 # --- workflow shape ----------------------------------------------------------
 
 
-def test_triggers_match_the_helper_routes() -> None:
+def _helper_module() -> Any:
+    spec = importlib.util.spec_from_file_location("board_sync_under_test", HELPER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses resolve annotations through sys.modules while the module runs.
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        del sys.modules[spec.name]
+    return module
+
+
+def test_triggers_match_the_helper_routed_actions() -> None:
+    # The source table is the helper's ROUTED_ACTIONS, not a copy in this file.
     triggers = _triggers(_workflow())
-    assert set(triggers) == {"issues", "pull_request_target"}
+    for spec in triggers.values():
+        assert set(spec) == {"types"}
+    helper = {name: set(actions) for name, actions in _helper_module().ROUTED_ACTIONS.items()}
+    assert {name: set(spec["types"]) for name, spec in triggers.items()} == helper
+
+
+def test_route_table_exercises_every_routed_action() -> None:
     routed: dict[str, set[str]] = {}
     for event_name, payload, _ in ROUTES:
         routed.setdefault(event_name, set()).add(payload["action"])
-    for event_name, spec in triggers.items():
-        assert set(spec) == {"types"}
-        assert set(spec["types"]) == routed[event_name]
+    helper = {name: set(actions) for name, actions in _helper_module().ROUTED_ACTIONS.items()}
+    assert routed == helper
 
 
 def test_every_action_is_pinned_to_a_full_sha_with_its_tag() -> None:
@@ -853,6 +1110,11 @@ def test_job_is_bounded_and_runs_do_not_cancel_each_other() -> None:
     doc = _workflow()
     assert 0 < _job()["timeout-minutes"] <= 10
     assert doc["concurrency"]["cancel-in-progress"] is False
+    # Issue and PR numbers share one sequence per repository; the event name
+    # keeps the group explicit anyway.
+    assert doc["concurrency"]["group"] == (
+        "board-sync-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number }}"
+    )
 
 
 def test_token_check_is_the_first_step() -> None:
@@ -945,7 +1207,7 @@ def test_workflow_steps_run_end_to_end_for_a_merged_pr(tmp_path: Path) -> None:
     env = Env(tmp_path)
     board = Board()
     env.state["BoardSyncProject"] = _ok(board.response())
-    env.state["BoardSyncLinkedIssues"] = _ok(_linked(["I_kwMerged"]))
+    env.state["BoardSyncLinkedIssues"] = _ok(_linked(["I_kwMerged"], state="MERGED"))
     run_env = env.env("pull_request_target", _pr_event("closed", merged=True))
     plan = _run_step("Plan", run_env)
     assert plan.returncode == 0, plan.stderr
@@ -953,6 +1215,20 @@ def test_workflow_steps_run_end_to_end_for_a_merged_pr(tmp_path: Path) -> None:
     apply = _run_step("Set the card status", run_env)
     assert apply.returncode == 0, apply.stderr
     assert env.edits() == [_edit_args("ITEM_I_kwMerged", board, "pr_merged")]
+
+
+def test_workflow_steps_run_end_to_end_for_a_pr_converted_to_draft(tmp_path: Path) -> None:
+    env = Env(tmp_path)
+    board = Board()
+    env.state["BoardSyncProject"] = _ok(board.response())
+    env.state["BoardSyncLinkedIssues"] = _ok(_linked(["I_kwDraft"], draft=True))
+    run_env = env.env("pull_request_target", _pr_event("converted_to_draft", draft=True))
+    plan = _run_step("Plan", run_env)
+    assert plan.returncode == 0, plan.stderr
+    assert env.outputs()["event"] == "pr_withdrawn"
+    apply = _run_step("Set the card status", run_env)
+    assert apply.returncode == 0, apply.stderr
+    assert env.edits() == [_edit_args("ITEM_I_kwDraft", board, "pr_withdrawn")]
 
 
 def test_workflow_plan_step_skips_a_draft_pr(tmp_path: Path) -> None:

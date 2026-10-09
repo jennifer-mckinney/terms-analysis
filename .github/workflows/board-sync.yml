@@ -18,17 +18,21 @@ name: Board sync
 
 on:
   issues:
-    types: [opened, closed]
+    types: [opened, reopened, closed]
   pull_request_target:
-    types: [opened, reopened, ready_for_review, closed]
+    types: [opened, reopened, ready_for_review, converted_to_draft, closed]
 
 # Nothing by default; the job grants only what it uses.
 permissions: {}
 
-# One run at a time per issue or PR, in order; a later event never cancels
-# an earlier move.
+# One run at a time per issue or PR, so two runs never interleave their
+# writes. GitHub keeps at most one pending run per group (a newer event
+# replaces it) and does not guarantee order, so correctness does not rest on
+# this: every run reads the PR's or the issue's current state and moves the
+# cards to the status that state means (board_sync.py apply). A dropped or
+# late run therefore still leaves the board on the latest state.
 concurrency:
-  group: board-sync-${{ github.event.issue.number || github.event.pull_request.number }}
+  group: board-sync-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number }}
   cancel-in-progress: false
 
 jobs:
