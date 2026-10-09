@@ -151,6 +151,29 @@ def _validate_chunks(chunks: Any, source: Path) -> List[Dict[str, Any]]:
     return validated
 
 
+def _check_matrix(matrix: np.ndarray, name: str) -> None:
+    """Raise LegalKBIndexCorruptError unless ``matrix`` is finite floating point.
+
+    Round 4 (card #278): the ONE matrix check, run by _load() and
+    load_from_bundle() on every matrix read from disk. A non-floating dtype
+    (int, bool, complex, str) is not an embedding index, and a NaN / inf entry
+    makes its dense scores NaN / inf, which a score floor drops silently and
+    rrf_fuse ranks arbitrarily. ``name`` is the file name only, so the message
+    never carries the local absolute path (F8).
+    """
+    if not np.issubdtype(matrix.dtype, np.floating):
+        raise LegalKBIndexCorruptError(
+            f"Legal KB index {name} holds non-numeric or non-finite values: "
+            f"dtype {matrix.dtype}, expected floating point"
+        )
+    if not np.isfinite(matrix).all():
+        bad = int(matrix.size - np.count_nonzero(np.isfinite(matrix)))
+        raise LegalKBIndexCorruptError(
+            f"Legal KB index {name} holds non-numeric or non-finite values: "
+            f"{bad} NaN / inf entries"
+        )
+
+
 class RetrievalStatus(str, Enum):
     """Outcome of one legal-KB retrieval (issue #91).
 
@@ -461,7 +484,10 @@ class LegalKnowledgeBase:
         except (OSError, ValueError) as exc:
             # ValueError covers numpy format errors and json.JSONDecodeError.
             raise LegalKBIndexCorruptError(
-                f"Failed to load legal KB index {index_path}: {exc}"
+                # File name and exception type only: OSError / numpy messages
+                # can embed the absolute path (F8). The chained exception
+                # keeps the detail for the traceback.
+                f"Failed to load legal KB index {index_path.name}: {type(exc).__name__}"
             ) from exc
         chunks = _validate_chunks(chunks, metadata_path)
         if matrix.ndim != 2 or matrix.shape[0] != len(chunks):
@@ -470,6 +496,7 @@ class LegalKnowledgeBase:
                 f"(matrix shape {matrix.shape}, "
                 f"{len(chunks)} chunks)"
             )
+        _check_matrix(matrix, index_path.name)
         self._matrix = matrix
         self._chunks = chunks
         self._loaded_from = current_source
@@ -495,7 +522,8 @@ class LegalKnowledgeBase:
                 row count of the loaded matrix does not match the metadata
                 chunk count.
             LegalKBIndexCorruptError: if the metadata is not a list of
-                well-typed chunks (see ``_validate_chunks``).
+                well-typed chunks (see ``_validate_chunks``) or the matrix
+                holds NaN / inf values (see ``_check_matrix``).
         """
         manifest_path = bundle_dir / "MANIFEST.yaml"
         if not manifest_path.exists():
@@ -577,6 +605,9 @@ class LegalKnowledgeBase:
                 expected="float32",
                 actual=str(matrix.dtype),
             )
+        # Round 4 (card #278): float32 is not enough; NaN / inf rows are a
+        # corrupt index, as in _load().
+        _check_matrix(matrix, index_path.name)
 
         self._matrix = matrix
         self._chunks = chunks
