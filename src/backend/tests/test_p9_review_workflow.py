@@ -222,13 +222,150 @@ def test_gate_fails_closed_when_the_file_is_missing(tmp_path: Path) -> None:
         pytest.param("{not json", id="malformed-json"),
         pytest.param('{"verdict": "PASS", "findings": []', id="truncated"),
         pytest.param(b"\xff\xfe\x00garbage", id="invalid-utf8"),
+        # Kept as is (#265): 100k levels is far past MAX_JSON_DEPTH, so after
+        # the fix it is refused by the gate's own bound on every Python. Today
+        # it passes on 3.11 only because the json C scanner raises
+        # RecursionError; 3.14 parses it and reports a contract mismatch.
         pytest.param("[" * 100_000 + "]" * 100_000, id="deeply-nested"),
+        # 2 MB of openers with no closers: a depth check must stay linear and
+        # still answer "not valid JSON", not hang or crash.
+        pytest.param("[" * 2_000_000, id="deeply-nested-unterminated"),
     ],
 )
 def test_gate_fails_closed_on_unparseable_file(tmp_path: Path, content: str | bytes) -> None:
     proc = _run_gate(_write(tmp_path, content))
     assert proc.returncode == EXIT_INVALID
     assert "is not valid JSON" in proc.stderr
+
+
+# --- gate script: explicit JSON nesting bound (#265) ------------------------
+# Python 3.14's json parser no longer raises RecursionError on deep input, so
+# "is not valid JSON" for deep nesting cannot rest on interpreter behaviour.
+# The gate enforces its own bound, MAX_JSON_DEPTH, read here from the gate
+# (F13: never restated). Depth counts open containers: "[]" is depth 1 and the
+# verdict contract {"findings": [{...}]} is depth 3. Brackets inside strings
+# are text, not structure.
+
+NOT_VALID_JSON = "P9 verdict: invalid: p9-verdict.json is not valid JSON"
+NESTING_KINDS = ("list", "object", "mixed")
+
+
+def _nested(depth: int, kind: str) -> str:
+    """JSON text whose deepest point has exactly `depth` open containers."""
+    is_list = [kind == "list" or (kind == "mixed" and level % 2 == 0) for level in range(depth)]
+    openers = "".join("[" if lst else '{"k":' for lst in is_list[:-1])
+    innermost = "[]" if is_list[-1] else "{}"
+    closers = "".join("]" if lst else "}" for lst in reversed(is_list[:-1]))
+    return openers + innermost + closers
+
+
+def _deep_list(depth: int) -> list[object]:
+    """A Python list nested `depth` levels, built without recursion."""
+    deep: list[object] = []
+    for _ in range(depth - 1):
+        deep = [deep]
+    return deep
+
+
+@pytest.mark.parametrize("kind", NESTING_KINDS)
+def test_gate_refuses_json_nested_past_its_depth_bound(tmp_path: Path, kind: str) -> None:
+    # Red on 3.11 and 3.14 today: this depth parses on both, so the gate says
+    # "does not match the verdict contract" instead of "not valid JSON".
+    depth = _gate_constant("MAX_JSON_DEPTH", int) + 1
+    proc = _run_gate(_write(tmp_path, _nested(depth, kind)))
+    assert proc.returncode == EXIT_INVALID, proc.stdout
+    assert proc.stderr.splitlines()[0].startswith(NOT_VALID_JSON), proc.stderr
+    assert proc.stdout == ""
+    assert "RecursionError" not in proc.stderr
+    assert str(tmp_path) not in proc.stderr  # F8: no absolute paths
+
+
+@pytest.mark.parametrize("kind", NESTING_KINDS)
+def test_gate_parses_json_at_exactly_its_depth_bound(tmp_path: Path, kind: str) -> None:
+    # Boundary positive control: the bound itself is allowed, so the file is
+    # parsed and refused for its shape, not as unparseable. A bound at or past
+    # the 3.11 C scanner's recursion limit turns this red there (F13 + #265).
+    depth = _gate_constant("MAX_JSON_DEPTH", int)
+    proc = _run_gate(_write(tmp_path, _nested(depth, kind)))
+    assert proc.returncode == EXIT_INVALID, proc.stdout
+    assert "does not match the verdict contract" in proc.stderr
+    assert "is not valid JSON" not in proc.stderr
+
+
+@pytest.mark.parametrize(
+    ("title", "file"),
+    [
+        pytest.param("[" * 100_000, "app/x.py", id="brackets-in-a-string"),
+        pytest.param("{" * 100_000, "app/x.py", id="braces-in-a-string"),
+        pytest.param('"' + "[" * 100_000, "app/x.py", id="escaped-quote-then-brackets"),
+        pytest.param("x\\", "[" * 100_000, id="escaped-backslash-before-closing-quote"),
+    ],
+)
+def test_gate_depth_bound_ignores_brackets_inside_strings(
+    tmp_path: Path, title: str, file: str
+) -> None:
+    # Structure forgery against a text-level depth scan: string content is not
+    # nesting, so a valid non-blocking verdict still passes. Green today; the
+    # 100k run is past any sane bound and the 3.11 recursion limit alike.
+    finding = {"severity": "LOW", "title": title, "file": file, "line": 1}
+    proc = _run_gate(_write(tmp_path, json.dumps({"verdict": "PASS", "findings": [finding]})))
+    assert proc.returncode == EXIT_PASS, proc.stderr
+    assert proc.stdout.splitlines()[0] == "P9 verdict: PASS, 1 finding(s), 0 blocking"
+
+
+@pytest.mark.parametrize("past", [1, 100_000], ids=["just-past-the-bound", "far-past-the-bound"])
+def test_gate_depth_refusal_does_not_rely_on_recursion_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    past: int,
+) -> None:
+    # Seam: json.JSONDecoder.raw_decode, which json.loads, json.load and
+    # JSONDecoder.decode all route through. It is patched to parse the deep
+    # file without raising, as Python 3.14 does, on whatever interpreter runs
+    # the suite. The gate must still refuse it, and the refusal must not come
+    # from a RecursionError anywhere, including the gate's own depth check.
+    depth = _gate_constant("MAX_JSON_DEPTH", int) + past
+    deep = _deep_list(depth)
+    monkeypatch.setattr(
+        json.JSONDecoder, "raw_decode", lambda self, s, idx=0: (deep, len(s))
+    )
+    gate = _gate_module()
+    path = _write(tmp_path, _nested(depth, "list"))
+    assert gate.main(["check_verdict.py", str(path)]) == EXIT_INVALID
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err.splitlines()[0].startswith(NOT_VALID_JSON), err
+    assert "RecursionError" not in err
+
+
+@pytest.mark.parametrize(
+    "value",
+    # "2" is below the contract's own depth (3), so no finding could ever be
+    # read under it.
+    ["0", "-1", "2", "True", "2.5", "float('inf')", "None", "'64'"],
+    ids=["zero", "negative", "below-contract-depth", "bool", "float", "infinite", "none", "string"],
+)
+def test_gate_fails_closed_when_its_depth_bound_is_misconfigured(
+    tmp_path: Path, value: str
+) -> None:
+    # F13: a bad bound is refused, never silently widened or crashed past. The
+    # override is applied to a scratch copy of the gate (exactly one
+    # assignment), and even a valid PASS file must not pass under it.
+    source = GATE.read_text(encoding="utf-8")
+    assignment = re.compile(r"^MAX_JSON_DEPTH(\s*:\s*int)?\s*=.*$", re.MULTILINE)
+    assert len(assignment.findall(source)) == 1, "MAX_JSON_DEPTH must be assigned once"
+    copy = tmp_path / "check_verdict.py"
+    copy.write_text(assignment.sub(f"MAX_JSON_DEPTH = {value}", source), encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-I", str(copy), str(_write(tmp_path, json.dumps(PASS_DOC)))],
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    assert proc.returncode == EXIT_INVALID, (proc.stdout, proc.stderr)
+    assert proc.stdout == ""
+    assert "Traceback" not in proc.stderr
 
 
 @pytest.mark.parametrize(
@@ -446,14 +583,22 @@ def test_gate_accepts_non_negative_int_lines(tmp_path: Path, line: int) -> None:
 EXPECTED_SEVERITIES = frozenset({"CRITICAL", "HIGH", "MEDIUM", "LOW", "NIT"})
 
 
-def _gate_constant(name: str) -> frozenset[str]:
-    """One of the gate's severity sets, loaded from check_verdict.py."""
+def _gate_module() -> Any:
+    """A fresh import of check_verdict.py, for in-process seams."""
     spec = importlib.util.spec_from_file_location("p9_check_verdict", GATE)
     assert spec is not None and spec.loader is not None, f"cannot load {GATE}"
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    value = getattr(module, name)
-    assert isinstance(value, frozenset), f"{name} must be a frozenset, got {type(value).__name__}"
+    return module
+
+
+def _gate_constant(name: str, kind: type = frozenset) -> Any:
+    """One of the gate's constants (severity sets, MAX_JSON_DEPTH)."""
+    value = getattr(_gate_module(), name)
+    # bool is a subclass of int, so it is refused explicitly.
+    assert isinstance(value, kind) and not isinstance(value, bool), (
+        f"{name} must be a {kind.__name__}, got {type(value).__name__}"
+    )
     return value
 
 
