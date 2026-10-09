@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 from datetime import datetime, timezone
 from io import StringIO
@@ -21,7 +22,7 @@ from app.schemas import (
 from app.services import localai
 from app.services.analyzer import AnalysisResult
 from app.services.embedding import chunk_text, rrf_fuse
-from app.services.ingest import _validate_url
+from app.services.ingest import _validate_url, fetch_url_text
 from app.services.rules import detect_findings
 
 
@@ -85,7 +86,11 @@ def test_analyze_url_private_ip_returns_400(app_client):
         json={"url": "http://127.0.0.1/evil", "jurisdictions": ["US-CA", "GDPR"]},
     )
     assert response.status_code == 400
-    assert response.json()["detail"] == "URL is not allowed"
+    # The endpoint surfaces the fetcher's own refusal message unchanged.
+    with pytest.raises(ValueError) as info:
+        asyncio.run(fetch_url_text("http://127.0.0.1/evil"))
+    assert getattr(info.value, "reason", None) == "address"
+    assert response.json()["detail"] == str(info.value)
 
 
 def test_analyze_file_rejects_oversized_upload(app_client):
