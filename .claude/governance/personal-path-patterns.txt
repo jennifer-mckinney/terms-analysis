@@ -5,9 +5,8 @@
 # In Part A only the pytest tree test (src/backend/tests/test_precommit_guards.py)
 # reads this file. Hook and workflow wiring is Part B (#192). Do not restate
 # these patterns anywhere else.
-# Known residuals for Part B (#192): bare `//Users/` and `/Users//`; the 4
-# `file:` bypasses from security r2 F2; `.gitattributes eol=lf` (security r1
-# F3); a home root below a segment that follows a colon and a slash RUN
+# Known residuals for Part B (#192): the 4 `file:` bypasses from security
+# r2 F2; `.gitattributes eol=lf` (security r1 F3); a home root below a segment that follows a colon and a slash RUN
 # (`word://<dir>/<home>/x`) is not matched, because a URL path after a host
 # (`https://<host>/` + `users/<login>`) has that shape.
 # None is matched or enforced by the rows below.
@@ -32,9 +31,12 @@
 # Rows (one per line below, in order):
 #   1. POSIX absolute home: a home root (Users or home) that starts an
 #      absolute path, at any depth (so the deep macOS forms under
-#      /System/Volumes/Data and /Volumes/<disk> are leaks). The path must
-#      begin at the start of the text or after a character that cannot be
-#      part of a path. Any `:` (a list separator) is row 5.
+#      /System/Volumes/Data and /Volumes/<disk> are leaks). Separators are
+#      slash runs (`//Users/`, `/Users//` and `/a//Users/` are leaks). The
+#      path must begin at the start of the text or after a character that
+#      cannot be part of a path. Any `:` (a list separator) is row 5.
+#      Owner over-block policy: a protocol-relative URL into a home root
+#      (`//<host>/` + `users/<login>`) blocks too.
 #      A relative path such as `src/` + `home/x` or `api/` + `users/42`, and
 #      a URL path after a host name (`https://<host>/` + `users/<login>`),
 #      are not anchored and stay allowed.
@@ -44,7 +46,7 @@
 #   3. Standard home folders (Documents, Desktop, Downloads) under `~` or
 #      `$HOME`: they publish the private folder layout (#145 owner ruling O3).
 #   4. `file:` URLs (must start at a boundary, so `profile:` is not one): any
-#      slash count after `file:`; Users or home at any depth (owner ruling
+#      slash count after `file:` and after the home root; Users or home at any depth (owner ruling
 #      2026-10-08, so a `file` URL into /tmp then home is a leak). Path segments are separated by slash runs, so the
 #      repetition is unambiguous and cannot backtrack catastrophically.
 #   5. Colon-joined lists (PATH, LD_LIBRARY_PATH and similar), with any
@@ -52,13 +54,14 @@
 #      Owner over-block ruling 2026-10-08: home paths block in every list
 #      form, so `profile:` and `word:` home paths now block. After the `:`,
 #      either a slash run then the home root, or ONE slash, then segments
-#      separated by slash runs, then the home root at any depth. A slash
+#      separated by slash runs, then the home root at any depth; a slash
+#      run may follow the home root. A slash
 #      run before a segment (`https://<host>/` + `users/<login>`) is a URL
 #      and stays allowed. Row 4 stays: it matches a `file:` URL with a
 #      slash run before deeper segments, which this row does not.
 
-(^|[^A-Za-z0-9._~/:-])(/[A-Za-z0-9._-]+)*/(Users|home)/[A-Za-z0-9._-]
+(^|[^A-Za-z0-9._~/:-])(/+[A-Za-z0-9._-]+)*/+(Users|home)/+[A-Za-z0-9._-]
 (^|[^A-Za-z0-9])[A-Za-z]:[\\/]+Users[\\/]+[A-Za-z0-9._-]
 (~|\$HOME|\$\{HOME\})/(Documents|Desktop|Downloads)([^A-Za-z0-9._-]|$)
-(^|[^A-Za-z0-9])file:/+([A-Za-z0-9._-]+/+)*(Users|home)/[A-Za-z0-9._-]
-:(/+|/([A-Za-z0-9._-]+/+)+)(Users|home)/[A-Za-z0-9._-]
+(^|[^A-Za-z0-9])file:/+([A-Za-z0-9._-]+/+)*(Users|home)/+[A-Za-z0-9._-]
+:(/+|/([A-Za-z0-9._-]+/+)+)(Users|home)/+[A-Za-z0-9._-]
