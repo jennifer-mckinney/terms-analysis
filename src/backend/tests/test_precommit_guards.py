@@ -227,6 +227,14 @@ BLOCK_ROWS = [
     ],
     ("slash-run", "file:///" + "Users" + "//alice/x"),  # run after the root in a file: URL
     ("slash-run", "file:///" + "home" + "//bob/x"),
+    # Row 4 only: a file: URL with a host, then a slash run AFTER the home
+    # root. Rows 1 and 5 cannot anchor here, so these go red if row 4 loses
+    # the `/+` after (Users|home).
+    ("slash-run", "file://srv/" + "Users" + "//bob"),
+    ("slash-run", "file://host/" + "Users" + "//x"),
+    ("slash-run", "file://srv/" + "home" + "//x"),
+    ("slash-run", "see file://nas/" + "USERS" + "///bob/x"),  # case + longer run
+    ("slash-run", "file://srv/" + "Users" + "/​/bob"),  # Cf hides the run
     ("slash-run", "PATH=/usr/bin:/" + "Users" + "//bob/bin"),  # list item with a run
     ("slash-run", "PATH=bin:/" + "home" + "//bob"),
 ]
