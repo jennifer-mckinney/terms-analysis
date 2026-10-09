@@ -15,11 +15,14 @@ the vectors in .claude/governance/leak-vectors.tsv pin each pattern:
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import unicodedata
+import urllib.parse
 from pathlib import Path
 from types import ModuleType
 from typing import Dict, List, NamedTuple
@@ -989,6 +992,171 @@ def test_matcher_is_linear_on_long_lines(line: str) -> None:
     start = time.perf_counter()
     leak_scan.match_line(line, PATTERNS)
     assert time.perf_counter() - start < 2.0
+
+
+# ---------------------------------------------------------------------------
+# #192 Copilot thread (leak_scan.py normalise): Unicode Cf characters must not
+# hide a home path. The Cf-stripping contract (test_precommit_guards _strip_cf)
+# applies to the evidence scanner too: ZWSP, ZWNJ, ZWJ, word joiner, BOM, soft
+# hyphen, the bidi embeddings/overrides/isolates, tag characters and every
+# other Cf code point. QUALITY-BAR R2: the hostile set is GENERATED from the
+# Unicode database, not listed; every value is built at runtime with chr(), so
+# this file holds no raw Cf character and no literal home path.
+# ---------------------------------------------------------------------------
+
+CF_CHARS = [chr(c) for c in range(sys.maxunicode + 1) if unicodedata.category(chr(c)) == "Cf"]
+
+# The code points the review thread names: each must be in the generated set.
+_CF_NAMED = [0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD, *range(0x202A, 0x202F), *range(0x2066, 0x206A)]
+
+# Home-root forms: label -> (root word, separator, prefix before the root).
+# "<prefix><root><sep><user><sep>x" is a plain home path.
+_HOME_FORMS = {
+    "posix-users": ("Users", "/", "/"),
+    "posix-home": ("home", "/", "/"),
+    "windows-backslash": ("Users", "\\", "C:\\"),
+    "windows-slash": ("Users", "/", "C:/"),
+}
+
+# Where the Cf character goes. Brief: inside the root word, after the slash,
+# inside the user name; plus the end of the root word (before its separator).
+_CF_POSITIONS = ("root-inner", "root-end", "after-separator", "user-inner")
+
+
+def _home_with_cf(form: str, position: str, cf: str, user: str = "alice") -> str:
+    root, sep, prefix = _HOME_FORMS[form]
+    if position == "root-inner":
+        root = root[:2] + cf + root[2:]
+    elif position == "root-end":
+        root = root + cf
+    elif position == "after-separator":
+        user = cf + user
+    else:
+        user = user[:2] + cf + user[2:]
+    return "cd " + prefix + root + sep + user + sep + "x"
+
+
+def _json_escape(text: str) -> str:
+    """The text as it sits inside a JSON string (ASCII-only, astral as pairs)."""
+    return json.dumps(text, ensure_ascii=True)[1:-1]
+
+
+def _percent_escape(text: str) -> str:
+    """Every byte of the UTF-8 text percent-encoded (separators too)."""
+    return urllib.parse.quote(text.encode("utf-8"), safe="")
+
+
+# How the line reaches the scanner: raw UTF-8, JSON-escaped, percent-encoded.
+_CF_TRANSPORTS = {"raw": lambda s: s, "json": _json_escape, "percent": _percent_escape}
+
+
+def _scan_text(text: str) -> list:
+    """Scan one line exactly as every real caller does (UTF-8 file bytes)."""
+    return leak_scan.scan_bytes(text.encode("utf-8"), PATTERNS)
+
+
+def test_cf_hostile_set_is_generated_and_covers_the_named_controls() -> None:
+    print(f"generated Cf code points: {len(CF_CHARS)}")
+    missing = [f"U+{c:04X}" for c in _CF_NAMED if chr(c) not in CF_CHARS]
+    assert not missing, missing
+    # Not vacuous: the set reaches beyond the BMP (tag characters) too.
+    assert any(ord(c) > 0xFFFF for c in CF_CHARS)
+
+
+@pytest.mark.parametrize("transport", sorted(_CF_TRANSPORTS))
+@pytest.mark.parametrize("position", _CF_POSITIONS)
+@pytest.mark.parametrize("form", sorted(_HOME_FORMS))
+def test_cf_inside_home_path_is_still_reported(form: str, position: str, transport: str) -> None:
+    encode = _CF_TRANSPORTS[transport]
+    # Precondition: without the Cf character this form and transport is a
+    # leak today, so any miss below is caused by the Cf character alone.
+    plain = encode(_home_with_cf(form, position, ""))
+    assert _scan_text(plain) == [(1, "home-root")], ascii(plain)
+    missed = [
+        f"U+{ord(cf):04X}"
+        for cf in CF_CHARS
+        if _scan_text(encode(_home_with_cf(form, position, cf))) != [(1, "home-root")]
+    ]
+    print(f"{form}/{position}/{transport}: {len(CF_CHARS)} generated, {len(missed)} missed")
+    assert not missed, f"{len(missed)}/{len(CF_CHARS)} Cf code points hide the path: {missed[:12]}"
+
+
+def test_cf_inside_home_path_is_reported_by_the_cli(tmp_path: Path) -> None:
+    # End to end through the real CLI: one line per (form, position, Cf).
+    lines = [
+        _home_with_cf(form, position, cf)
+        for form in sorted(_HOME_FORMS)
+        for position in _CF_POSITIONS
+        for cf in CF_CHARS
+    ]
+    sample = tmp_path / "cf.txt"
+    sample.write_bytes("\n".join(lines).encode("utf-8"))
+    result = _cli(str(_PATTERNS), str(sample))
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    reported = result.stdout.decode().splitlines()
+    expected = [f"{n}:home-root" for n in range(1, len(lines) + 1)]
+    missed = sorted(set(expected) - set(reported), key=lambda s: int(s.split(":")[0]))
+    assert reported == expected, f"{len(missed)}/{len(lines)} lines scanned clean, first: {missed[:5]}"
+
+
+def _benign_with_cf(cf: str) -> List[str]:
+    """Legitimate text carrying the same Cf characters (positive controls)."""
+    users, home = "Us" + cf + "ers", "ho" + cf + "me"
+    return [
+        "see api/" + users + "/alice and src/" + home + "/page",  # relative paths
+        "the " + users.lower() + " of the " + home + " page",  # prose
+        "https://github.com/" + users.lower() + "/alice/projects/7",  # public URL exemption
+        "word" + cf + "joiner" + cf + " text " + cf * 8,  # Cf with no path at all
+        cf + "<repo>/docs/" + cf + "evidence/x.md",  # scrubbed placeholder path
+    ]
+
+
+@pytest.mark.parametrize("transport", sorted(_CF_TRANSPORTS))
+def test_cf_in_benign_text_stays_clean(transport: str) -> None:
+    encode = _CF_TRANSPORTS[transport]
+    flagged = [
+        (f"U+{ord(cf):04X}", n)
+        for cf in CF_CHARS
+        for n, text in enumerate(_benign_with_cf(cf))
+        if _scan_text(encode(text)) != []
+    ]
+    print(f"benign/{transport}: {len(CF_CHARS) * 5} generated, {len(flagged)} flagged")
+    assert not flagged, flagged[:12]
+
+
+# (label, unit repeated to fill the line, tail, expected scan_bytes result).
+# Tails are built at runtime; "cf-laced-path" puts a word joiner between every
+# character of the home path.
+_CF_FLOOD = [
+    ("zwsp", chr(0x200B), "", []),
+    ("rlo", chr(0x202E), "", []),
+    ("tag", chr(0xE0041), "", []),
+    ("json-zwsp", "\\u200b", "", []),
+    ("percent-zwsp", "%E2%80%8B", "", []),
+    ("zwsp-then-path", chr(0x200B), " cd " + _U + "/alice/x", [(1, "home-root")]),
+    ("cf-laced-path", chr(0x200B), " cd " + chr(0x2060).join(_U + "/alice/x"), [(1, "home-root")]),
+]
+
+
+@pytest.mark.parametrize("label, unit, tail, expected", _CF_FLOOD, ids=[r[0] for r in _CF_FLOOD])
+def test_matcher_is_linear_on_2mb_cf_line(label: str, unit: str, tail: str, expected: list) -> None:
+    import time
+
+    unit_bytes = len(unit.encode("utf-8"))
+
+    def run(size: int) -> float:
+        data = (unit * (size // unit_bytes) + tail).encode("utf-8")
+        best = float("inf")
+        for _ in range(3):
+            start = time.perf_counter()
+            hits = leak_scan.scan_bytes(data, PATTERNS)
+            best = min(best, time.perf_counter() - start)
+            assert hits == expected, (label, hits)
+        return best
+
+    small, big = run(_TWO_MB // 8), run(_TWO_MB)
+    # 8x the input: linear is ~8x the time, quadratic is ~64x. Allow noise.
+    assert big < 24 * small + 0.05, f"8x input took {big / max(small, 1e-9):.1f}x time"
 
 
 # ---------------------------------------------------------------------------
