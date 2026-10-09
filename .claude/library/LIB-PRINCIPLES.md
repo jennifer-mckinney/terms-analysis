@@ -59,8 +59,8 @@ rule: hard requirements restated from `.claude/CLAUDE.md`
   - all data local; no external API calls
   - LLM failures fall back to rule-only findings
   - no OpenAI; LLM inference local-only via LocalAI (Apertus-8B, EuroLLM-22B)
-scope: product runtime/data path; dev-time CI review tooling exempt per docs/adr/0001-dependency-rules-scope-ci-review-tooling.md
   - confidence < 0.80 triggers human-in-the-loop review
+scope: product runtime/data path; dev-time CI review tooling exempt per docs/adr/0001-dependency-rules-scope-ci-review-tooling.md
 violations: drift under P3 — surface and ask
 xref: [[.claude/CLAUDE.md#hard-requirements]] [[LIB-STACK]] [[LIB-LEGAL]]
 
