@@ -207,29 +207,63 @@ class TestGetAnalysis:
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestAnalyzeUrlErrors:
-    def test_main_analyze_url_value_error_returns_400(self, app_client, monkeypatch):
+    # CodeQL py/stack-trace-exposure (alert #6): exception text must never
+    # reach the client. The client gets a fixed message plus a correlation
+    # id; the full exception text is logged server-side under that id.
+    # The marker carries a newline and a path so the test also proves the
+    # log line escapes it (CWE-117) and the body never echoes it (CWE-209).
+    _SECRET = "internal-detail\nInjected: /srv/secret/path"
+
+    @pytest.mark.parametrize(
+        "exc_type,status,detail",
+        [
+            (ValueError, 400, "Could not fetch this URL. Try pasting the policy text instead."),
+            (ConnectionError, 500, "Failed to fetch URL"),
+        ],
+    )
+    def test_main_analyze_url_fetch_error_hides_exception_text(
+        self, app_client, monkeypatch, caplog, exc_type, status, detail
+    ):
+        secret = self._SECRET
+
+        async def fake_fetch(url):
+            raise exc_type(secret)
+
+        monkeypatch.setattr("app.main.fetch_url_text", fake_fetch)
+        with caplog.at_level("WARNING", logger="uvicorn.error"):
+            response = app_client.post(
+                "/analyze/url",
+                json={"url": "https://example.com/policy", "jurisdictions": ["GDPR"]},
+            )
+        assert response.status_code == status
+        body = response.json()
+        assert set(body) == {"detail", "error_id"}
+        assert body["detail"] == detail
+        assert "internal-detail" not in response.text
+        assert "/srv/secret" not in response.text
+        error_id = body["error_id"]
+        assert len(error_id) == 32 and all(c in "0123456789abcdef" for c in error_id)
+        # The same id and the full exception text are in exactly one log
+        # record, with the newline escaped so it cannot forge a log line.
+        matching = [r for r in caplog.records if error_id in r.getMessage()]
+        assert len(matching) == 1
+        message = matching[0].getMessage()
+        assert "internal-detail\\nInjected: /srv/secret/path" in message
+        assert "\n" not in message
+
+    def test_main_analyze_url_error_ids_are_unique_per_request(self, app_client, monkeypatch):
         async def fake_fetch(url):
             raise ValueError("URL is not allowed")
 
         monkeypatch.setattr("app.main.fetch_url_text", fake_fetch)
-        response = app_client.post(
-            "/analyze/url",
-            json={"url": "http://127.0.0.1/admin", "jurisdictions": ["GDPR"]},
-        )
-        assert response.status_code == 400
-        assert "not allowed" in response.json()["detail"]
-
-    def test_main_analyze_url_generic_exception_returns_500(self, app_client, monkeypatch):
-        async def fake_fetch(url):
-            raise ConnectionError("network error")
-
-        monkeypatch.setattr("app.main.fetch_url_text", fake_fetch)
-        response = app_client.post(
-            "/analyze/url",
-            json={"url": "https://example.com/policy", "jurisdictions": ["GDPR"]},
-        )
-        assert response.status_code == 500
-        assert "Failed to fetch" in response.json()["detail"]
+        ids = {
+            app_client.post(
+                "/analyze/url",
+                json={"url": "https://example.com/policy", "jurisdictions": ["GDPR"]},
+            ).json()["error_id"]
+            for _ in range(2)
+        }
+        assert len(ids) == 2
 
     def test_main_analyze_url_empty_content_returns_400(self, app_client, monkeypatch):
         async def fake_fetch(url):
