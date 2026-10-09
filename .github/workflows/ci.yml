@@ -24,6 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -43,6 +44,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # The suite takes ~3 min; a hang must not hold a runner for the 6 h default.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -131,6 +134,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
