@@ -637,10 +637,14 @@ class TestValidateUrl:
             _validate_url("http:///no-host/path")
 
     def test_ingest_validate_url_dns_failure_blocked(self):
-        from app.services.ingest import _validate_url
+        """DNS failure is refused with an honest "dns" error, not a crash and
+        not mislabelled as a blocked address (CodeQL py/full-ssrf contract)."""
+        from app.services import ingest
         with patch("socket.getaddrinfo", side_effect=socket.gaierror("DNS failure")):
-            with pytest.raises(ValueError, match="not allowed"):
-                _validate_url("http://nonexistent.invalid/page")
+            with pytest.raises(ValueError) as info:
+                asyncio.run(ingest.fetch_url_text("http://nonexistent.invalid/page"))
+        assert isinstance(info.value, getattr(ingest, "UrlFetchError", ())), info.value
+        assert info.value.reason == "dns"
 
     def test_ingest_validate_url_10_net_blocked(self):
         from app.services.ingest import _validate_url
@@ -654,22 +658,46 @@ class TestValidateUrl:
 
 
 class TestFetchUrlText:
-    def test_ingest_fetch_url_text_success(self):
+    """Fakes sit at the resolver (socket.getaddrinfo) and transport
+    (httpx.MockTransport) boundaries, so these exercise the real fetch path
+    (CodeQL py/full-ssrf contract; see tests/test_ingest.py)."""
+
+    @staticmethod
+    def _serve(monkeypatch, handler, answers=("93.184.216.34",)):
+        import httpx
+
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            lambda host, port=None, *a, **k: [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port or 0)) for ip in answers
+            ],
+        )
+        original_init = httpx.AsyncClient.__init__
+
+        def patched_init(self, *args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            original_init(self, *args, **kwargs)
+
+        monkeypatch.setattr(httpx.AsyncClient, "__init__", patched_init)
+
+    @staticmethod
+    def _fetch_error(url):
+        from app.services import ingest
+        with pytest.raises(ValueError) as info:
+            asyncio.run(ingest.fetch_url_text(url))
+        assert isinstance(info.value, getattr(ingest, "UrlFetchError", ())), info.value
+        return info.value
+
+    def test_ingest_fetch_url_text_success(self, monkeypatch):
+        import httpx
         from app.services.ingest import fetch_url_text
         html = b"<html><body>Policy content</body></html>"
-        with patch("app.services.ingest._validate_url"):
-            with patch("httpx.AsyncClient") as mock_client_cls:
-                mock_response = MagicMock()
-                mock_response.raise_for_status.return_value = None
-                mock_response.headers = {"content-type": "text/html"}
-                mock_response.content = html
-                mock_client = AsyncMock()
-                mock_client.__aenter__.return_value = mock_client
-                mock_client.get.return_value = mock_response
-                mock_client_cls.return_value = mock_client
-
-                text = asyncio.run(fetch_url_text("https://example.com/policy"))
-
+        self._serve(
+            monkeypatch,
+            lambda request: httpx.Response(200, headers={"content-type": "text/html"}, content=html),
+        )
+        text = asyncio.run(fetch_url_text("https://example.com/policy"))
         assert "Policy content" in text
 
     def test_ingest_fetch_url_text_blocked_url_raises(self):
@@ -677,117 +705,85 @@ class TestFetchUrlText:
         with pytest.raises(ValueError, match="not allowed"):
             asyncio.run(fetch_url_text("http://127.0.0.1/admin"))
 
-    def test_ingest_fetch_url_text_content_length_too_large_raises(self):
-        """ingest.py lines 206-210: Content-Length header exceeds max_upload_bytes."""
-        from app.services.ingest import fetch_url_text
-        from app.config import settings
-        oversized = str(settings.max_upload_bytes + 1)
-        with patch("app.services.ingest._validate_url"):
-            with patch("httpx.AsyncClient") as mock_cls:
-                mock_response = MagicMock()
-                mock_response.raise_for_status.return_value = None
-                mock_response.headers = {"content-length": oversized, "content-type": "text/plain"}
-                mock_client = AsyncMock()
-                mock_client.__aenter__.return_value = mock_client
-                mock_client.get.return_value = mock_response
-                mock_cls.return_value = mock_client
-                with pytest.raises(ValueError, match="exceeds"):
-                    asyncio.run(fetch_url_text("https://example.com/policy"))
+    def test_ingest_fetch_url_text_content_length_too_large_raises(self, monkeypatch):
+        """A declared Content-Length over settings.url_fetch_max_bytes is refused."""
+        import httpx
+        from app.services import ingest
+        oversized = str(getattr(ingest.settings, "url_fetch_max_bytes", 0) + 1)
+        self._serve(
+            monkeypatch,
+            lambda request: httpx.Response(
+                200, headers={"content-length": oversized, "content-type": "text/plain"}, content=b"x"
+            ),
+        )
+        assert self._fetch_error("https://example.com/policy").reason == "size"
 
-    def test_ingest_fetch_url_text_body_too_large_raises(self):
-        """ingest.py lines 212-216: response body exceeds max_upload_bytes."""
-        from app.services.ingest import fetch_url_text
-        from app.config import settings
-        with patch("app.services.ingest._validate_url"):
-            with patch("httpx.AsyncClient") as mock_cls:
-                mock_response = MagicMock()
-                mock_response.raise_for_status.return_value = None
-                # No content-length header so the body check runs
-                mock_response.headers = {"content-type": "text/plain"}
-                mock_response.content = b"x" * (settings.max_upload_bytes + 1)
-                mock_client = AsyncMock()
-                mock_client.__aenter__.return_value = mock_client
-                mock_client.get.return_value = mock_response
-                mock_cls.return_value = mock_client
-                with pytest.raises(ValueError, match="exceeds"):
-                    asyncio.run(fetch_url_text("https://example.com/policy"))
+    def test_ingest_fetch_url_text_body_too_large_raises(self, monkeypatch):
+        """An undeclared body over the configured cap is refused."""
+        import dataclasses
+        import httpx
+        from app.services import ingest
+        assert hasattr(ingest.settings, "url_fetch_max_bytes"), "config key missing"
+        monkeypatch.setattr(ingest, "settings", dataclasses.replace(ingest.settings, url_fetch_max_bytes=32))
 
-    def test_ingest_fetch_url_text_blocked_status_raises_helpful_message(self):
-        """403/429/503 responses raise ValueError with a plain-English hint."""
-        from app.services.ingest import fetch_url_text
+        async def body():
+            yield b"x" * 33
+
+        self._serve(monkeypatch, lambda request: httpx.Response(200, content=body()))
+        assert self._fetch_error("https://example.com/policy").reason == "size"
+
+    def test_ingest_fetch_url_text_blocked_status_raises_helpful_message(self, monkeypatch):
+        """401/403/407/429/503 responses raise a plain-English hint."""
+        import httpx
         for status in (401, 403, 407, 429, 503):
-            with patch("app.services.ingest._validate_url"):
-                with patch("httpx.AsyncClient") as mock_cls:
-                    mock_response = MagicMock()
-                    mock_response.status_code = status
-                    mock_response.headers = {}
-                    mock_client = AsyncMock()
-                    mock_client.__aenter__.return_value = mock_client
-                    mock_client.get.return_value = mock_response
-                    mock_cls.return_value = mock_client
-                    with pytest.raises(ValueError, match="blocks automated access"):
-                        asyncio.run(fetch_url_text("https://example.com/policy"))
+            self._serve(monkeypatch, lambda request, s=status: httpx.Response(s))
+            exc = self._fetch_error("https://example.com/policy")
+            assert "blocks automated access" in str(exc)
 
-    def test_ingest_fetch_url_text_request_error_raises_helpful_message(self):
-        """Network errors (RequestError) raise ValueError instead of propagating."""
-        from app.services.ingest import fetch_url_text
+    def test_ingest_fetch_url_text_request_error_raises_helpful_message(self, monkeypatch):
+        """Network errors raise a clean connect error instead of propagating."""
         import httpx
-        with patch("app.services.ingest._validate_url"):
-            with patch("httpx.AsyncClient") as mock_cls:
-                mock_client = AsyncMock()
-                mock_client.__aenter__.return_value = mock_client
-                mock_client.get.side_effect = httpx.ConnectError("connection refused")
-                mock_cls.return_value = mock_client
-                with pytest.raises(ValueError, match="Could not connect"):
-                    asyncio.run(fetch_url_text("https://example.com/policy"))
 
-    def test_ingest_fetch_url_text_http_status_error_raises_helpful_message(self):
-        """Non-blocked HTTP errors (e.g. 404) raise ValueError with status code."""
-        from app.services.ingest import fetch_url_text
+        def refuse(request):
+            raise httpx.ConnectError("connection refused", request=request)
+
+        self._serve(monkeypatch, refuse)
+        exc = self._fetch_error("https://example.com/policy")
+        assert exc.reason == "connect" and "Could not connect" in str(exc)
+
+    def test_ingest_fetch_url_text_http_status_error_raises_helpful_message(self, monkeypatch):
+        """Non-blocked HTTP errors (e.g. 404) name the status code."""
         import httpx
-        with patch("app.services.ingest._validate_url"):
-            with patch("httpx.AsyncClient") as mock_cls:
-                mock_response = MagicMock()
-                mock_response.status_code = 404
-                mock_response.headers = {}
-                mock_client = AsyncMock()
-                mock_client.__aenter__.return_value = mock_client
-                mock_client.get.return_value = mock_response
-                exc = httpx.HTTPStatusError("404", request=MagicMock(), response=MagicMock())
-                exc.response.status_code = 404
-                mock_response.raise_for_status.side_effect = exc
-                mock_cls.return_value = mock_client
-                with pytest.raises(ValueError, match="404"):
-                    asyncio.run(fetch_url_text("https://example.com/policy"))
+        self._serve(monkeypatch, lambda request: httpx.Response(404))
+        assert "404" in str(self._fetch_error("https://example.com/policy"))
 
-    def test_ingest_fetch_url_text_request_hook_validates_per_request_url(self):
-        """ingest.py line 194: _on_request hook fires _validate_url for every request."""
-        from app.services.ingest import fetch_url_text
-        captured: dict = {}
-        with patch("app.services.ingest._validate_url"):
-            with patch("httpx.AsyncClient") as mock_cls:
-                mock_response = MagicMock()
-                mock_response.raise_for_status.return_value = None
-                mock_response.headers = {"content-type": "text/plain"}
-                mock_response.content = b"text content"
-                mock_client = AsyncMock()
-                mock_client.__aenter__.return_value = mock_client
-                mock_client.get.return_value = mock_response
+    def test_ingest_fetch_url_text_request_hook_validates_per_request_url(self, monkeypatch):
+        """Every hop is validated: a redirect to a host that resolves to a
+        private address is refused and never requested."""
+        import httpx
+        seen = []
 
-                def capture_kwargs(**kwargs):
-                    captured.update(kwargs.get("event_hooks", {}))
-                    return mock_client
+        def handler(request):
+            seen.append(request.url.host)
+            return httpx.Response(302, headers={"location": "http://intranet.example/"})
 
-                mock_cls.side_effect = capture_kwargs
-                asyncio.run(fetch_url_text("https://example.com/policy"))
-
-        assert "request" in captured, "event_hooks must register a 'request' hook"
-        hook = captured["request"][0]
-        fake_req = MagicMock()
-        fake_req.url = "https://example.com/redirected"
-        with patch("app.services.ingest._validate_url") as mock_val:
-            asyncio.run(hook(fake_req))  # hook is async — must be awaited
-            mock_val.assert_called_once_with("https://example.com/redirected")
+        self._serve(monkeypatch, handler)
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            lambda host, port=None, *a, **k: [
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    6,
+                    "",
+                    ("10.0.0.7" if "intranet" in str(host) else "93.184.216.34", port or 0),
+                )
+            ],
+        )
+        exc = self._fetch_error("https://example.com/policy")
+        assert exc.reason == "address"
+        assert seen == ["93.184.216.34"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1201,15 +1197,17 @@ class TestValidateUrlUnparseableAddr:
     """ingest.py lines 152-153, 158: getaddrinfo returns non-IP sockaddr."""
 
     def test_ingest_validate_url_unparseable_getaddrinfo_addr_raises(self):
-        from app.services.ingest import _validate_url
+        """A resolver answer with no usable IP is refused as a DNS failure
+        (fail closed), never fetched."""
+        from app.services import ingest
         with patch("socket.getaddrinfo") as mock_dns:
-            # sockaddr[0] is "not-an-ip" → ipaddress.ip_address raises ValueError
-            # → continue (lines 152-153) → addresses empty → raise (line 158)
             mock_dns.return_value = [
-                (None, None, None, None, ("not-an-ip-addr", 0)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("not-an-ip-addr", 0)),
             ]
-            with pytest.raises(ValueError, match="not allowed"):
-                _validate_url("http://example.com/policy")
+            with pytest.raises(ValueError) as info:
+                asyncio.run(ingest.fetch_url_text("http://example.com/policy"))
+        assert isinstance(info.value, getattr(ingest, "UrlFetchError", ())), info.value
+        assert info.value.reason == "dns"
 
 
 class TestSelectChunksBudgetFits:
