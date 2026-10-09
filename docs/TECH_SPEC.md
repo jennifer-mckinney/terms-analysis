@@ -187,8 +187,8 @@ Acceptance criteria [PRD §F1.1]:
 
 Shipped [`src/backend/app/main.py:298` `POST /analyze/url`; `src/backend/app/services/ingest.py:197` `fetch_url_text`]:
 - URL scheme validated at schema layer [`schemas.py:204` `AnalyzeUrlRequest._validate_url_scheme`] — rejects anything not `http` / `https`, requires a hostname.
-- SSRF guard [`ingest.py:155` `_validate_url`]: blocks loopback (127.0.0.0/8, ::1), RFC 1918 private (10/8, 172.16/12, 192.168/16), link-local (169.254/16, fe80::/10), unique-local (fc00::/7). Applied both on initial request and on redirect [`ingest.py:206`].
-- Redirect handling: `httpx.Response` follow_redirects up to a capped depth; `_BLOCKED_STATUSES = {401, 403, 407, 429, 503}` short-circuits fetch [`ingest.py:208`].
+- SSRF guard (`ingest._validate_url`, see §15.4): every hop is checked against the configured `url_fetch_blocked_networks` and the request is pinned to the checked IP.
+- Redirect handling: followed by hand, each hop re-validated, capped at `url_fetch_max_redirects`; `_BLOCKED_STATUSES = {401, 403, 407, 429, 503}` short-circuits fetch.
 - Timeout: `LM_REQUEST_TIMEOUT_S` env var default 60s [`config.py:82`]. **OPEN QUESTION:** PRD specifies 30s timeout for URL fetch [PRD §F1.1 Technical Notes]; shipped default is 60s. Which is authoritative?
 
 **OPEN QUESTION:** PRD requires "handles JavaScript-rendered content"; shipped ingestion is pure httpx + BeautifulSoup with no headless browser. JS-rendered SPAs will return their skeleton HTML, not their post-hydration text. Reconcile as either (a) update PRD to remove JS rendering, or (b) accept as future work.
@@ -1217,13 +1217,16 @@ Chunks marked `# Status: PLACEHOLDER` in the corpus file metadata carry `status=
 
 ### 15.4 SSRF guards
 
-`_validate_url` [`ingest.py:155`]:
+`ingest.fetch_url_text` / `ingest._validate_url` (CodeQL alert #5, py/full-ssrf). There is no host allowlist (users submit arbitrary URLs); instead:
 
-- Rejects non-`http`/`https` schemes.
-- Resolves hostname to IP; rejects if in `_BLOCKED_NETWORKS`:
-  - IPv4: 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16.
-  - IPv6: ::1/128, fc00::/7, fe80::/10.
-- Applied on initial fetch and on **every redirect** [`ingest.py:206`].
+- Raw URL refused if it holds any control, format, surrogate or line/paragraph separator character (`malformed`).
+- Scheme must be in `url_fetch_allowed_schemes` (`scheme`); userinfo (`@`) refused (`userinfo`).
+- Host grammar is an allowlist: LDH labels, real IDNs only (a label that folds to ASCII, e.g. fullwidth digits, is refused), plain IPv6 in brackets, and only canonical dotted-quad IPv4 (octal, hex, integer and short forms refused) (`host`).
+- The name is resolved once (`socket.getaddrinfo`, off the event loop); if any answer, or any IPv4 embedded in an IPv6 answer (mapped, compatible, 6to4, Teredo, NAT64), is in `url_fetch_blocked_networks`, the fetch is refused (`address`). The request then goes to the checked IP literal with the original Host header and TLS SNI, so DNS rebinding cannot swap the target.
+- Redirects are followed by hand: every hop runs the same checks; at most `url_fetch_max_redirects`.
+- One total deadline `url_fetch_timeout_s` covers DNS, connect, every hop and the body (`timeout`); the body is capped at `url_fetch_max_bytes` while streaming, and a bad `Content-Length` is refused (`size`).
+- Errors are `UnsafeUrlError` (policy) or `UrlFetchError` (fetch) with a `.reason` and a fixed message; no untrusted text is echoed.
+- All limits are config (`app.config.Settings`, documented in `.env.example`) and are validated at load; bad values fail startup.
 
 ### 15.5 File upload limits
 

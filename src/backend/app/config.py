@@ -1,11 +1,50 @@
 from __future__ import annotations
 
+import ipaddress
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+# URL schemes the fetcher implements. ``url_fetch_allowed_schemes`` may narrow
+# this set but never widen it (CodeQL py/full-ssrf).
+URL_FETCH_SUPPORTED_SCHEMES = frozenset({"http", "https"})
+
+# Default SSRF blocklist for the user-URL fetcher (ingest.fetch_url_text).
+# Every resolved address, and any IPv4 address embedded in an IPv6 one
+# (IPv4-mapped, IPv4-compatible, 6to4, Teredo, NAT64 64:ff9b::/96), is
+# checked against this list. Override with URL_FETCH_BLOCKED_NETWORKS.
+_DEFAULT_URL_FETCH_BLOCKED_NETWORKS = ",".join(
+    (
+        "0.0.0.0/8",  # "this network"; 0.0.0.0 reaches localhost on Linux
+        "10.0.0.0/8",  # RFC 1918
+        "100.64.0.0/10",  # CGNAT, RFC 6598
+        "127.0.0.0/8",  # loopback
+        "169.254.0.0/16",  # link-local, cloud metadata (169.254.169.254)
+        "172.16.0.0/12",  # RFC 1918
+        "192.0.0.0/24",  # IETF protocol assignments
+        "192.0.2.0/24",  # TEST-NET-1
+        "192.88.99.0/24",  # 6to4 relay anycast
+        "192.168.0.0/16",  # RFC 1918
+        "198.18.0.0/15",  # benchmarking
+        "198.51.100.0/24",  # TEST-NET-2
+        "203.0.113.0/24",  # TEST-NET-3
+        "224.0.0.0/4",  # multicast
+        "240.0.0.0/4",  # reserved, includes 255.255.255.255
+        "::/96",  # unspecified (::), IPv4-compatible (deprecated)
+        "::1/128",  # loopback
+        "64:ff9b:1::/48",  # local-use NAT64
+        "100::/64",  # discard-only
+        "2001:db8::/32",  # documentation
+        "fc00::/7",  # unique local (ULA)
+        "fe80::/10",  # link-local
+        "fec0::/10",  # site-local (deprecated)
+        "ff00::/8",  # multicast
+    )
+)
 
 
 def _split_env_list(name: str, default: str) -> List[str]:
@@ -86,7 +125,25 @@ class Settings:
     # tracked via PRD §5 open question resolved in Phase 2 remediation.
     # INVARIANT: url_fetch_timeout_s <= request_timeout_s. URL fetch is the leading step of any URL-analyze flow;
     # the LLM budget consumes the remainder. Reviewer P9 grumpy-F4.
+    # One total deadline for the whole fetch: DNS, connect, every redirect hop
+    # and the body. Must be finite and > 0.
     url_fetch_timeout_s: float = float(os.getenv("LM_URL_FETCH_TIMEOUT_S", "30"))
+    # ── User-URL fetch limits (CodeQL py/full-ssrf, ingest.fetch_url_text) ──
+    # Schemes a submitted URL (and every redirect hop) may use: a non-empty
+    # subset of URL_FETCH_SUPPORTED_SCHEMES, lowercase.
+    url_fetch_allowed_schemes: Tuple[str, ...] = field(
+        default_factory=lambda: tuple(_split_env_list("URL_FETCH_ALLOWED_SCHEMES", "http,https"))
+    )
+    # CIDRs no fetch may reach. Non-empty; every entry a valid network.
+    url_fetch_blocked_networks: Tuple[str, ...] = field(
+        default_factory=lambda: tuple(
+            _split_env_list("URL_FETCH_BLOCKED_NETWORKS", _DEFAULT_URL_FETCH_BLOCKED_NETWORKS)
+        )
+    )
+    # Redirect hops followed (each re-validated). 0 refuses every redirect.
+    url_fetch_max_redirects: int = int(os.getenv("URL_FETCH_MAX_REDIRECTS", "5"))
+    # Response body cap in bytes, enforced while streaming. >= 1.
+    url_fetch_max_bytes: int = int(os.getenv("URL_FETCH_MAX_BYTES", str(10 * 1024 * 1024)))
     max_input_chars: int = int(os.getenv("MAX_INPUT_CHARS", "50000"))
     # 10 MB default upload limit (H5)
     max_upload_bytes: int = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
@@ -102,6 +159,51 @@ class Settings:
     api_key: str = os.getenv("API_KEY", "")
     # Maximum pages to process per PDF when OCR is involved.
     max_pdf_pages: int = int(os.getenv("MAX_PDF_PAGES", "100"))
+
+    def __post_init__(self) -> None:
+        # Fail closed at load (and on dataclasses.replace) on bad URL-fetch
+        # limits: a broken SSRF config must stop startup, not weaken the guard.
+        _validate_url_fetch_settings(self)
+
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _validate_url_fetch_settings(s: Settings) -> None:
+    schemes = s.url_fetch_allowed_schemes
+    if (
+        not isinstance(schemes, (list, tuple))
+        or not schemes
+        or not all(isinstance(x, str) and x in URL_FETCH_SUPPORTED_SCHEMES for x in schemes)
+    ):
+        raise ValueError(
+            "url_fetch_allowed_schemes must be a non-empty list drawn from "
+            f"{sorted(URL_FETCH_SUPPORTED_SCHEMES)}"
+        )
+    networks = s.url_fetch_blocked_networks
+    if not isinstance(networks, (list, tuple)) or not networks:
+        raise ValueError("url_fetch_blocked_networks must be a non-empty list of CIDRs")
+    for net in networks:
+        # Raises ValueError on a malformed CIDR or an out-of-range prefix.
+        # Non-strings are parsed as "" so they fail too (ip_network accepts a
+        # bare int, which would silently mean a /32).
+        ipaddress.ip_network(net if isinstance(net, str) else "")
+    if not _is_int(s.url_fetch_max_redirects) or s.url_fetch_max_redirects < 0:
+        raise ValueError("url_fetch_max_redirects must be an integer >= 0")
+    if not _is_int(s.url_fetch_max_bytes) or s.url_fetch_max_bytes < 1:
+        raise ValueError("url_fetch_max_bytes must be an integer >= 1")
+    timeout = s.url_fetch_timeout_s
+    if (
+        not isinstance(timeout, (int, float))
+        or isinstance(timeout, bool)
+        or not math.isfinite(timeout)
+        or timeout <= 0
+    ):
+        raise ValueError("url_fetch_timeout_s must be a finite number > 0")
+    # Store immutable copies so a caller's list cannot change the live config.
+    object.__setattr__(s, "url_fetch_allowed_schemes", tuple(schemes))
+    object.__setattr__(s, "url_fetch_blocked_networks", tuple(networks))
 
 
 settings = Settings()

@@ -786,6 +786,91 @@ class TestFetchUrlText:
         assert seen == ["93.184.216.34"]
 
 
+class TestFetchUrlTextErrorPaths:
+    """Coder unit cases for fetch error paths the acceptance suite does not
+    reach (CodeQL py/full-ssrf). Same fakes as TestFetchUrlText: resolver and
+    transport boundaries only, no real network."""
+
+    _serve = staticmethod(TestFetchUrlText._serve)
+    _fetch_error = staticmethod(TestFetchUrlText._fetch_error)
+
+    @staticmethod
+    def _refused(url):
+        import httpx
+
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(200, content=b"should not be fetched")
+
+        return handler, requests
+
+    @pytest.mark.parametrize("url", ["http://[::1/x", "http://[::1]x/"])
+    def test_unparseable_authority_is_malformed(self, monkeypatch, url):
+        handler, requests = self._refused(url)
+        self._serve(monkeypatch, handler)
+        assert self._fetch_error(url).reason == "malformed"
+        assert requests == []
+
+    @pytest.mark.parametrize("port", ["0", "65536", "99999", "8a", "123456"])
+    def test_invalid_port_is_malformed(self, monkeypatch, port):
+        handler, requests = self._refused(port)
+        self._serve(monkeypatch, handler)
+        assert self._fetch_error(f"http://example.com:{port}/").reason == "malformed"
+        assert requests == []
+
+    @pytest.mark.parametrize("host", ["[v1.fe]", "[fe80::1%25en0]"])
+    def test_bracketed_host_that_is_not_plain_ipv6_is_refused(self, monkeypatch, host):
+        handler, requests = self._refused(host)
+        self._serve(monkeypatch, handler)
+        assert self._fetch_error(f"http://{host}/").reason == "host"
+        assert requests == []
+
+    def test_idn_label_too_long_after_encoding_is_refused(self, monkeypatch):
+        handler, requests = self._refused("idn")
+        self._serve(monkeypatch, handler)
+        exc = self._fetch_error("http://" + "\u00fc" * 70 + ".example/")
+        assert exc.reason == "host"
+        assert requests == []
+
+    def test_idn_name_over_253_octets_after_encoding_is_refused(self, monkeypatch):
+        handler, requests = self._refused("idn")
+        self._serve(monkeypatch, handler)
+        raw = ".".join(["\u00fc" * 5] * 30) + ".example"
+        assert len(raw) <= 253  # only the encoded form is over the limit
+        assert self._fetch_error(f"http://{raw}/").reason == "host"
+        assert requests == []
+
+    def test_redirect_to_unparseable_location_is_refused(self, monkeypatch):
+        """httpx itself may reject the Location first (connect); either way
+        the hop is refused cleanly and never requested."""
+        import httpx
+
+        seen = []
+
+        def handler(request):
+            seen.append(request.url.path)
+            return httpx.Response(302, headers={"location": "http://[::1/x"})
+
+        self._serve(monkeypatch, handler)
+        assert self._fetch_error("http://example.com/start").reason in {"malformed", "connect"}
+        assert seen == ["/start"]
+
+    def test_transport_error_mid_body_is_a_connect_error(self, monkeypatch):
+        import httpx
+
+        class _Body(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"partial"
+                raise httpx.ReadError("connection reset by 10.9.8.7")
+
+        self._serve(monkeypatch, lambda request: httpx.Response(200, stream=_Body()))
+        exc = self._fetch_error("http://example.com/policy")
+        assert exc.reason == "connect"
+        assert "10.9.8.7" not in str(exc)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # embedding.py
 # ═══════════════════════════════════════════════════════════════════════════
