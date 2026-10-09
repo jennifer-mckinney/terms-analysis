@@ -68,15 +68,23 @@ class Vector(NamedTuple):
     note: str
 
 
-def _vectors() -> List[Vector]:
-    rows: List[Vector] = []
+def _raw_rows() -> List[List[str]]:
+    """Every data row of leak-vectors.tsv, columns still token-encoded."""
+    rows: List[List[str]] = []
     for number, line in enumerate(_VECTORS.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip() or line.startswith("#"):
             continue
         cols = line.split("\t")
         assert len(cols) == 4, f"leak-vectors.tsv:{number}: expected 4 TAB columns"
-        rows.append(Vector(*cols))
+        rows.append(cols)
     return rows
+
+
+def _vectors() -> List[Vector]:
+    # #192: the tracked .tsv holds <<NAME>> tokens instead of literal home
+    # roots (#145 Part A). Every column goes through the one decoder, so a
+    # vector is tested exactly as the scanners will see it.
+    return [Vector(*(leak_scan.expand_vector_tokens(c) for c in cols)) for cols in _raw_rows()]
 
 
 VECTORS = _vectors()
@@ -146,6 +154,147 @@ def test_each_pattern_is_load_bearing(name: str) -> None:
     reduced = [p for p in PATTERNS if p[0] != name]
     escaped = [v for v in BLOCK if v.pattern == name and not leak_scan.match_line(_line(v.sample), reduced)]
     assert escaped, f"removing {name!r} changes nothing: add a vector only it catches"
+
+
+# ---------------------------------------------------------------------------
+# #192: <<NAME>> token decoder for leak-vectors.tsv
+# ---------------------------------------------------------------------------
+
+# Expected expansions, assembled at runtime from the roots above so this file
+# holds no literal home path. Keys must match leak_scan.VECTOR_TOKENS exactly.
+_TOKEN_EXPECTED: Dict[str, str] = {
+    "USERS": _U,
+    "USERSUPPER": _U.upper(),
+    "HOME": _H,
+    "WINUSERS": "C:\\" + _U[1:],
+    "WINUSERSESC": "C:\\\\" + _U[1:],
+    "TILDE": "~",
+    "ENVHOME": "$" + "HOME",
+    "ENVHOMEBR": "${" + "HOME}",
+}
+
+
+def test_vector_token_table_matches_expected_names() -> None:
+    assert set(leak_scan.VECTOR_TOKENS) == set(_TOKEN_EXPECTED)
+
+
+@pytest.mark.parametrize("name", sorted(_TOKEN_EXPECTED))
+def test_vector_token_expands_to_exact_value(name: str) -> None:
+    want = _TOKEN_EXPECTED[name]
+    assert leak_scan.expand_vector_tokens(f"<<{name}>>") == want
+    # In context: surrounding text is untouched, repeats all expand.
+    assert leak_scan.expand_vector_tokens(f"a <<{name}>>/x<<{name}>> b") == f"a {want}/x{want} b"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "no tokens here",
+        "a < b > c",
+        "\uff1c\uff1cUSERS\uff1e\uff1e",  # fullwidth look-alike brackets are not a token
+        "\u2039\u2039USERS\u203a\u203a",
+    ],
+    ids=ascii,
+)
+def test_vector_token_free_text_is_unchanged(text: str) -> None:
+    assert leak_scan.expand_vector_tokens(text) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "<<users>>",            # case typo
+        "<<>>",                 # empty name
+        "<<USERS >>",           # trailing space
+        "<< USERS>>",
+        "<<USE\u200bRS>>",       # Cf inside the name is not stripped into a match
+        "<<USERS\u2028>>",       # line separator
+        "<<USERS\x00>>",         # NUL
+        "<<\ud800>>",            # lone surrogate
+        "<<\u202eSRESU>>",       # bidi override
+        "<<\x1b[31mUSERS>>",     # terminal escape
+        "<<",
+        ">>",
+        "x<<USERS",             # unterminated
+        "USERS>>",
+        "<<USERS>>>>",
+        "<<<<USERS>>",
+        "<<US<<ERS>>",          # nested
+        "<<USERS>> then <<",
+    ],
+    ids=ascii,
+)
+def test_vector_token_unknown_or_stray_raises(text: str) -> None:
+    with pytest.raises(ValueError) as info:
+        leak_scan.expand_vector_tokens(text)
+    msg = str(info.value)
+    # Message honesty and output safety: ASCII only, bounded, no raw bytes.
+    assert msg.isascii() and msg.isprintable(), ascii(msg)
+    assert len(msg) < 200
+
+
+def test_vector_token_error_truncates_long_unknown_name() -> None:
+    with pytest.raises(ValueError) as info:
+        leak_scan.expand_vector_tokens("<<" + "Z" * 10000 + ">>")
+    assert len(str(info.value)) < 200
+
+
+_TWO_MB = 2 * 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    "unit, raises",
+    [
+        ("<<USERS>>", False),       # many valid tokens
+        ("<<", True),
+        (">>", True),
+        ("<<<", True),
+        ("<<A", True),             # many unknown-or-unterminated starts
+        ("<<A>>", True),
+        ("<", True),               # "<" * n contains "<<"
+        ("a<b>", False),           # single brackets are text
+        ("a", False),
+    ],
+    ids=ascii,
+)
+def test_vector_token_decoder_is_linear_on_2mb_hostile_line(unit: str, raises: bool) -> None:
+    import time
+
+    def run(size: int) -> float:
+        text = unit * (size // len(unit))
+        best = float("inf")
+        for _ in range(3):
+            start = time.perf_counter()
+            try:
+                leak_scan.expand_vector_tokens(text)
+                assert not raises, "hostile line was accepted"
+            except ValueError:
+                assert raises, "valid line was rejected"
+            best = min(best, time.perf_counter() - start)
+        return best
+
+    small, big = run(_TWO_MB // 8), run(_TWO_MB)
+    # 8x the input: linear is ~8x the time, quadratic is ~64x. Allow noise.
+    assert big < 24 * small + 0.05, f"8x input took {big / max(small, 1e-9):.1f}x time"
+
+
+def test_unterminated_token_on_2mb_line_raises() -> None:
+    with pytest.raises(ValueError):
+        leak_scan.expand_vector_tokens("<<" + "A" * _TWO_MB)
+
+
+def test_every_vector_row_decodes_with_no_leftover_tokens() -> None:
+    rows = _raw_rows()
+    used = set()
+    for cols in rows:
+        for col in cols:
+            used.update(re.findall(r"<<([^<>]*)>>", col))
+            out = leak_scan.expand_vector_tokens(col)
+            assert "<<" not in out and ">>" not in out, ascii(out[:80])
+    # Not vacuous: the table really uses the decoder, and no token is dead.
+    assert used == set(leak_scan.VECTOR_TOKENS), used ^ set(leak_scan.VECTOR_TOKENS)
+    assert len(rows) == len(VECTORS)
 
 
 def test_pattern_file_quoting_itself_is_allowed() -> None:
