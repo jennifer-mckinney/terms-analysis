@@ -53,6 +53,8 @@ ACTION_REPOS = {"actions/checkout", "anthropics/claude-code-action"}
 COMMENT_TOOL = "mcp__github_inline_comment__create_inline_comment"
 ALLOWED_TOOLS = {"Read", "Grep", "Glob", "Edit(./p9-verdict.json)", COMMENT_TOOL}
 DISALLOWED_TOOLS = {"Bash", "WebFetch", "WebSearch"}
+# Exact deny set. The runner-temp rule is derived from runner.temp (F13), and
+# ./.git is denied because the action writes the job token into .git/config.
 READ_DENY = {
     "Read(/proc/**)",
     "Read(//proc/**)",
@@ -461,21 +463,6 @@ def test_checkout_does_not_persist_the_job_token() -> None:
         checkouts = [s for s in job["steps"] if str(s.get("uses", "")).startswith("actions/checkout@")]
         assert len(checkouts) == 1, name
         assert checkouts[0]["with"]["persist-credentials"] is False, name
-
-
-def test_reviewer_cannot_read_git_metadata() -> None:
-    # The action writes the job token into the origin URL in .git/config.
-    for name, job in _jobs().items():
-        deny = json.loads(_action_step(job)["with"]["settings"])["permissions"]["deny"]
-        assert "Read(./.git/**)" in deny, name
-
-
-def test_runner_temp_deny_rule_follows_the_runner() -> None:
-    # F13: derived from runner.temp, never a literal hosted-runner path.
-    for name, job in _jobs().items():
-        deny = json.loads(_action_step(job)["with"]["settings"])["permissions"]["deny"]
-        assert "Read(/${{ runner.temp }}/_runner_file_commands/**)" in deny, name
-        assert not any("/home/runner" in rule for rule in deny), name
 
 
 def test_diff_prep_step_runs_before_the_reviewer() -> None:

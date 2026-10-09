@@ -39,9 +39,20 @@ Workflow: `.github/workflows/p9-review.yml`.
   rules (Claude Code permissions docs, "Read and Edit").
 - **Read deny rules:** the action's `settings` input turns on
   `permissions.blockReadsOutsideWorkingDirectories` (working directories: the
-  checkout and `$RUNNER_TEMP/p9`) and denies `/proc`, `/sys` and runner
-  credential paths, so the process environment (`ANTHROPIC_API_KEY`, the job
-  token) cannot be read back. `Read` deny rules also cover Grep and Glob.
+  checkout and `$RUNNER_TEMP/p9`) and sets exactly these `Read` deny rules:
+  - `Read(/proc/**)`, `Read(//proc/**)` and `Read(//sys/**)`: the process
+    environment (`ANTHROPIC_API_KEY`, the job token) cannot be read back;
+  - `Read(~/.git-credentials)`, `Read(~/.config/gh/**)` and
+    `Read(~/.claude/.credentials.json)`: runner credential files;
+  - `Read(/${{ runner.temp }}/_runner_file_commands/**)`: the runner's
+    step-command files, derived from `runner.temp` rather than a hard-coded
+    hosted-runner path;
+  - `Read(./.git/**)`: the checkout keeps no credential
+    (`persist-credentials: false`), but claude-code-action itself writes the
+    job token into the `origin` URL in `.git/config`, so the reviewer may not
+    read the checkout's git metadata.
+
+  `Read` deny rules also cover Grep and Glob.
   `--setting-sources user` ignores any `.claude/settings.json` the PR adds.
 - **Permissions:** the workflow grants nothing by default; each job gets
   `contents: read` and `pull-requests: write` (for the inline comments) and
