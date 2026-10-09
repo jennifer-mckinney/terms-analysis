@@ -1225,6 +1225,7 @@ Chunks marked `# Status: PLACEHOLDER` in the corpus file metadata carry `status=
 - The name is resolved once (`socket.getaddrinfo`, off the event loop); if any answer, or any IPv4 embedded in an IPv6 answer (mapped, compatible, 6to4, Teredo, NAT64), is in `url_fetch_blocked_networks`, the fetch is refused (`address`). The request then goes to the checked IP literal with the original Host header and TLS SNI, so DNS rebinding cannot swap the target.
 - Redirects are followed by hand: every hop runs the same checks; at most `url_fetch_max_redirects`.
 - One total deadline `url_fetch_timeout_s` covers DNS, connect, every hop and the body (`timeout`); the body is capped at `url_fetch_max_bytes` while streaming, and a bad `Content-Length` is refused (`size`).
+- Bodies are never decoded: every hop sends `Accept-Encoding: identity`, a response with any `Content-Encoding` other than `identity` (case-insensitive; every coding in a list) is refused before a body byte is read (`encoding`), and the body is read raw so a compressed bomb cannot inflate past the cap.
 - Errors are `UnsafeUrlError` (policy) or `UrlFetchError` (fetch) with a `.reason` and a fixed message; no untrusted text is echoed.
 - All limits are config (`app.config.Settings`, documented in `.env.example`) and are validated at load; bad values fail startup.
 

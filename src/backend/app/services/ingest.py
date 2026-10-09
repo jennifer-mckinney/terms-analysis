@@ -159,6 +159,9 @@ def extract_text_from_bytes(
 # DNS answer can never swap the target (DNS rebinding). Redirects are followed
 # by hand, re-running the same checks on every hop. One deadline covers DNS,
 # connect, every hop and the body; the body cap is enforced while streaming.
+# Bodies are never decoded: every hop asks for identity encoding, any other
+# Content-Encoding is refused before a body byte is read, and the body is
+# read raw, so a compressed bomb never inflates past the cap.
 # Every failure is a UrlFetchError with a fixed, clean message and a
 # machine-readable ``.reason``; no untrusted bytes are echoed.
 # ---------------------------------------------------------------------------
@@ -166,7 +169,7 @@ def extract_text_from_bytes(
 
 class UrlFetchError(ValueError):
     """A URL fetch failed. ``reason`` is one of redirects, size, timeout,
-    dns, connect, status (or an UnsafeUrlError reason)."""
+    dns, connect, status, encoding (or an UnsafeUrlError reason)."""
 
     def __init__(self, reason: str, message: str) -> None:
         super().__init__(message)
@@ -194,6 +197,7 @@ _MSG_TOO_MANY_REDIRECTS = "This website redirected too many times (limit {limit}
 _MSG_NO_LOCATION = "This website sent a redirect without a destination. Try pasting the policy text instead."
 _MSG_TOO_LARGE = "This page is larger than the {limit}-byte limit. Try pasting the policy text instead."
 _MSG_BAD_LENGTH = "This website sent an invalid size header. Try pasting the policy text instead."
+_MSG_ENCODING = "This website sent a compressed page, which is not supported. Try pasting the policy text instead."
 _MSG_BLOCKED_STATUS = (
     "This website blocks automated access. Copy the policy from your browser into "
     "the 'Paste text' tab, or save the page as PDF or HTML and use the 'Upload file' tab."
@@ -438,6 +442,8 @@ _FETCH_HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
+    # Never ask for a compressed body (see _check_encoding).
+    "Accept-Encoding": "identity",
 }
 
 
@@ -448,7 +454,23 @@ def _check_status(status: int) -> None:
         raise UrlFetchError("status", _MSG_STATUS.format(status=int(status)))
 
 
+def _check_encoding(response: httpx.Response) -> None:
+    """Refuse any Content-Encoding other than identity.
+
+    httpx inflates each read in full before a size cap sees it, so a body is
+    never decoded. Content codings are case-insensitive (RFC 9110); a list is
+    accepted only if every coding in it is identity. The header value is
+    never echoed.
+    """
+    value = response.headers.get("content-encoding")
+    if value is None:
+        return
+    if any(token.strip().lower() != "identity" for token in value.split(",")):
+        raise UrlFetchError("encoding", _MSG_ENCODING)
+
+
 async def _read_capped(response: httpx.Response, max_bytes: int) -> bytes:
+    _check_encoding(response)  # before one body byte is read
     declared = response.headers.get("content-length")
     if declared is not None:
         declared = declared.strip()
@@ -462,7 +484,8 @@ async def _read_capped(response: httpx.Response, max_bytes: int) -> bytes:
             raise UrlFetchError("size", _MSG_TOO_LARGE.format(limit=max_bytes))
     chunks = []
     total = 0
-    async for chunk in response.aiter_bytes():
+    # Raw bytes: httpx never decodes them (_check_encoding allowed identity only).
+    async for chunk in response.aiter_raw():
         total += len(chunk)
         if total > max_bytes:
             raise UrlFetchError("size", _MSG_TOO_LARGE.format(limit=max_bytes))
