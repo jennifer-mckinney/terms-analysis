@@ -21,11 +21,30 @@ def test_extracts_rtf_text():
     assert "text." in text
 
 
+async def _stream_of(data):
+    yield data
+
+
 def _patch_transport(monkeypatch, handler):
+    """Route every AsyncClient through ``handler``. A response built from bytes
+    is re-emitted as a stream: MockTransport hands bytes bodies back already
+    read, which a raw (never decoded) reader cannot iterate, while a real
+    socket always streams. Status, headers (incl. any Content-Length) and body
+    are unchanged."""
     original_init = httpx.AsyncClient.__init__
 
+    async def streamed(request):
+        result = handler(request)
+        if not isinstance(result, httpx.Response):
+            result = await result
+        if isinstance(result.stream, httpx.ByteStream):
+            result = httpx.Response(
+                result.status_code, headers=result.headers, content=_stream_of(result.content)
+            )
+        return result
+
     def patched_init(self, *args, **kwargs):
-        kwargs["transport"] = httpx.MockTransport(handler)
+        kwargs["transport"] = httpx.MockTransport(streamed)
         original_init(self, *args, **kwargs)
 
     monkeypatch.setattr(httpx.AsyncClient, "__init__", patched_init)
@@ -103,6 +122,7 @@ def test_fetch_url_text_caps_redirect_chain_length(monkeypatch):
 # ---------------------------------------------------------------------------
 
 import dataclasses
+import gzip
 import ipaddress
 import math
 import socket
@@ -113,7 +133,7 @@ from app.config import Settings
 from app.services import ingest
 
 UNSAFE_REASONS = frozenset({"malformed", "scheme", "userinfo", "host", "address"})
-FETCH_REASONS = frozenset({"redirects", "size", "timeout", "dns", "connect", "status"})
+FETCH_REASONS = frozenset({"redirects", "size", "timeout", "dns", "connect", "status", "encoding"})
 
 PUBLIC_V4 = "93.184.216.34"
 PUBLIC_V4_B = "93.184.216.35"
@@ -903,6 +923,85 @@ def test_undeclared_stream_is_cut_off_at_cap(small_cap, origin):
     assert body.pulled <= small_cap + body.chunk
 
 
+# ---- content encoding: never decoded, refused before the body is read --------
+
+class _RecordedBody:
+    """A streamed body of fixed bytes that records how much was pulled."""
+
+    def __init__(self, data, chunk=16):
+        self.data, self.chunk, self.pulled = data, chunk, 0
+
+    async def __aiter__(self):
+        while self.pulled < len(self.data):
+            await asyncio.sleep(0)
+            piece = self.data[self.pulled:self.pulled + self.chunk]
+            self.pulled += len(piece)
+            yield piece
+
+
+def _gzip_bomb(cap):
+    """Double-gzipped zeros: a few hundred bytes on the wire, far over ``cap``
+    once decoded."""
+    return gzip.compress(gzip.compress(b"\0" * (cap * 10_000)))
+
+
+def test_request_asks_for_identity_encoding_on_every_hop(resolver, origin):
+    resolver.table["example.test"] = [PUBLIC_V4]
+    origin.routes[(PUBLIC_V4, "/start")] = _redirect("/final")
+    origin.routes[(PUBLIC_V4, "/final")] = _text()
+    assert _fetch("http://example.test/start") == "Policy text."
+    assert [r.headers.get("accept-encoding") for r in origin.requests] == ["identity", "identity"]
+
+
+@pytest.mark.parametrize(
+    "encoding",
+    [
+        "gzip",
+        "gzip, gzip",
+        "GZIP",
+        "x-gzip",
+        "deflate",
+        "br",
+        "zstd",
+        "identity, gzip",
+        "gzip, identity",
+        "x-SSRF-LEAK-coding",
+        ", ".join(["gzip"] * 200),
+    ],
+    ids=lambda v: v[:24],
+)
+def test_compressed_response_is_refused_before_the_body_is_read(encoding, small_cap, origin):
+    """A body is never decoded (decoding a bomb happens before any size cap
+    sees a byte). Any Content-Encoding other than identity is refused with
+    reason "encoding", without pulling one byte, and without echoing the
+    header back."""
+    bomb = _gzip_bomb(small_cap)
+    body = _RecordedBody(bomb)
+    origin.routes[(PUBLIC_V4, "/p")] = lambda request: httpx.Response(
+        200,
+        headers={"content-type": "text/plain", "content-encoding": encoding},
+        content=body,
+    )
+    exc = _expect("UrlFetchError", {"encoding"}, f"http://{PUBLIC_V4}/p")
+    assert not isinstance(exc, _contract("UnsafeUrlError"))
+    assert body.pulled == 0, f"{body.pulled} of {len(bomb)} body bytes pulled before refusal"
+    _assert_clean_message(exc, "SSRF-LEAK", "gzip, gzip")
+
+
+@pytest.mark.parametrize("encoding", [None, "identity", "Identity"], ids=["absent", "identity", "Identity"])
+def test_identity_or_absent_encoding_is_read_raw(encoding, small_cap, origin):
+    """Positive control: identity (content codings are case-insensitive,
+    RFC 9110) or no Content-Encoding reads the plain body, still under the cap."""
+    text = b"y" * small_cap
+    headers = {"content-type": "text/plain"}
+    if encoding is not None:
+        headers["content-encoding"] = encoding
+    origin.routes[(PUBLIC_V4, "/p")] = lambda request: httpx.Response(
+        200, headers=headers, content=_RecordedBody(text)
+    )
+    assert _fetch(f"http://{PUBLIC_V4}/p") == text.decode()
+
+
 @pytest.mark.parametrize("value", ["abc", "-1", "1e3", "0x40", "1, 2", "99999999999999999999999999"])
 def test_invalid_or_absurd_content_length_is_a_clean_error(value, small_cap, origin):
     origin.routes[(PUBLIC_V4, "/p")] = _text(b"ok", headers={"content-length": value})
@@ -1036,6 +1135,18 @@ def test_analyze_url_redirect_to_internal_host_is_400_and_clean(app_client, reso
     assert isinstance(detail, str) and "Traceback" not in detail
     assert "10.0.0.5" not in detail and "internal.test" not in detail
     assert len(origin.requests) == 1
+
+
+def test_analyze_url_compressed_response_is_400_and_body_never_read(app_client, small_cap, origin):
+    body = _RecordedBody(_gzip_bomb(small_cap))
+    origin.routes[(PUBLIC_V4, "/terms")] = lambda request: httpx.Response(
+        200, headers={"content-type": "text/plain", "content-encoding": "gzip, gzip"}, content=body
+    )
+    response = app_client.post("/analyze/url", json={"url": f"http://{PUBLIC_V4}/terms"})
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert isinstance(detail, str) and "Traceback" not in detail and "gzip, gzip" not in detail
+    assert body.pulled == 0
 
 
 def test_analyze_url_bad_content_length_is_400_without_parser_internals(app_client, origin):
