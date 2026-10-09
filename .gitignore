@@ -118,6 +118,9 @@ ignore/
 .pip-cache/
 *.db-journal
 
+# Per-developer governance manifest: hashes of private $HOME files (#200)
+.claude/_governance-manifest.local.json
+
 # Agent-sweep backups (Doer/Critic diff record for .claude/ rewrites; not committed)
 .claude/_pre-agent-sweep-backup/
 
