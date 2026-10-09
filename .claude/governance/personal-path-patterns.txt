@@ -59,9 +59,16 @@
 #      run before a segment (`https://<host>/` + `users/<login>`) is a URL
 #      and stays allowed. Row 4 stays: it matches a `file:` URL with a
 #      slash run before deeper segments, which this row does not.
+#   6. Glued compiler or linker flags: a home root directly after a short
+#      flag (one dash, then letters, e.g. the include, library and isystem
+#      flags), with slash runs around the root. The dash must start at a
+#      boundary like row 1, so a dash inside a word (a relative path such as
+#      a hyphenated directory name) does not match. Owner over-block policy:
+#      any letters count as a flag.
 
 (^|[^A-Za-z0-9._~/:-])(/+[A-Za-z0-9._-]+)*/+(Users|home)/+[A-Za-z0-9._-]
 (^|[^A-Za-z0-9])[A-Za-z]:[\\/]+Users[\\/]+[A-Za-z0-9._-]
 (~|\$HOME|\$\{HOME\})/(Documents|Desktop|Downloads)([^A-Za-z0-9._-]|$)
 (^|[^A-Za-z0-9])file:/+([A-Za-z0-9._-]+/+)*(Users|home)/+[A-Za-z0-9._-]
 :(/+|/([A-Za-z0-9._-]+/+)+)(Users|home)/+[A-Za-z0-9._-]
+(^|[^A-Za-z0-9._~/:-])-[A-Za-z]+/+(Users|home)/+[A-Za-z0-9._-]
