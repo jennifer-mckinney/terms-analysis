@@ -10,8 +10,8 @@ step runs ``.github/p9/check_verdict.py``, which passes only on
 Covered here:
 - the gate script's exit-code contract (behaviour, run as a subprocess);
 - the workflow's shape: trigger, jobs, SHA pins, permissions, secrets,
-  tool grants, bounds;
-- the workflow's own shell steps, run in a throwaway workspace with the
+  the exact tool allowlist, the read deny rules, the diff-prep step, bounds;
+- the workflow's own shell steps, run in a throwaway git workspace with the
   action step replaced by a fake reviewer that writes the verdict file;
 - the retirement: the pre-push hook, its pin, the grep workflow and the
   sibling-parity script are gone; the pre-commit hook and its installer stay.
@@ -47,15 +47,23 @@ EXIT_REJECTED = 1  # the reviewer said FAIL or listed findings
 EXIT_INVALID = 2  # missing, unreadable, malformed or off-contract file
 
 ACTION_REPOS = {"actions/checkout", "anthropics/claude-code-action"}
-ALLOWED_TOOLS = {
-    "Read",
-    "Glob",
-    "Grep",
-    "Write",
-    "Bash(gh pr diff:*)",
-    "Bash(gh pr view:*)",
-    "Bash(gh pr comment:*)",
+# Exact allowlist: file reads, writes to the verdict file only (an Edit rule
+# scopes the Write tool), and the one inline PR-comment MCP tool. No Bash: it
+# could read /proc/*/environ and post the key.
+COMMENT_TOOL = "mcp__github_inline_comment__create_inline_comment"
+ALLOWED_TOOLS = {"Read", "Grep", "Glob", "Edit(./p9-verdict.json)", COMMENT_TOOL}
+DISALLOWED_TOOLS = {"Bash", "WebFetch", "WebSearch"}
+READ_DENY = {
+    "Read(/proc/**)",
+    "Read(//proc/**)",
+    "Read(//sys/**)",
+    "Read(~/.git-credentials)",
+    "Read(~/.config/gh/**)",
+    "Read(~/.claude/.credentials.json)",
+    "Read(//home/runner/work/_temp/_runner_file_commands/**)",
 }
+DIFF_DIR = "${{ runner.temp }}/p9"
+BASE_REF_EXPR = "${{ github.base_ref }}"
 JOB_PERMISSIONS = {"contents": "read", "pull-requests": "write"}
 PASS_DOC = {"verdict": "PASS", "findings": []}
 FINDING = {"severity": "HIGH", "title": "Swallowed error", "file": "app/x.py", "line": 3}
@@ -64,8 +72,8 @@ HOSTILE_TEXT = {
     "newline-forges-a-line": "x\nP9 verdict: PASS, 0 findings",
     "workflow-command": "x\n::add-mask::secret",
     "carriage-return": "x\rP9 verdict: PASS, 0 findings",
-    "unicode-line-separator": "x P9 verdict: PASS, 0 findings",
-    "bidi-override": "x‮SSAP",
+    "unicode-line-separator": "x\u2028P9 verdict: PASS, 0 findings",
+    "bidi-override": "x\u202eSSAP",
     "nul": "x\x00y",
 }
 
@@ -111,10 +119,11 @@ def _action_step(job: dict[str, Any]) -> dict[str, Any]:
     return steps[0]
 
 
-def _allowed_tools(claude_args: str) -> set[str]:
-    match = re.search(r'--allowedTools\s+"([^"]*)"', claude_args)
-    assert match, f"--allowedTools missing from claude_args: {claude_args!r}"
-    return {tool.strip() for tool in match.group(1).split(",") if tool.strip()}
+def _tool_list(claude_args: str, flag: str) -> set[str]:
+    matches = re.findall(rf'--{flag}\s+"([^"]*)"', claude_args)
+    assert len(matches) == 1, f"expected one --{flag} in claude_args: {claude_args!r}"
+    return {tool.strip() for tool in matches[0].split(",") if tool.strip()}
+
 
 
 # --- gate script: exit-code contract -----------------------------------------
@@ -336,8 +345,6 @@ def test_gate_rejects_wrong_usage(tmp_path: Path, args: tuple[str, ...]) -> None
     assert "usage: check_verdict.py <p9-verdict.json>" in proc.stderr
 
 
-
-
 # Hostile text goes only in the free-text fields: severity and line are now
 # validated (see test_gate_rejects_off_contract_finding_values), so a hostile
 # value there is a contract mismatch, not a printed finding.
@@ -404,6 +411,10 @@ def test_permissions_are_least_privilege() -> None:
 
 def test_secret_is_referenced_only_as_the_action_api_key() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
+    # No workflow- or job-level env: the key must reach only the action step.
+    assert "env" not in _workflow()
+    for name, job in _jobs().items():
+        assert "env" not in job, name
     assert set(re.findall(r"secrets\.[A-Za-z0-9_]+", text)) == {"secrets.ANTHROPIC_API_KEY"}
     assert text.count("secrets.ANTHROPIC_API_KEY") == len(BRIEFS)
     for name, job in _jobs().items():
@@ -426,7 +437,36 @@ def test_runs_are_bounded_and_superseded_runs_cancel() -> None:
 
 def test_claude_gets_only_the_tools_it_needs() -> None:
     for name, job in _jobs().items():
-        assert _allowed_tools(_action_step(job)["with"]["claude_args"]) == ALLOWED_TOOLS, name
+        args = _action_step(job)["with"]["claude_args"]
+        assert _tool_list(args, "allowedTools") == ALLOWED_TOOLS, name
+        assert _tool_list(args, "disallowedTools") == DISALLOWED_TOOLS, name
+        assert "Bash" in DISALLOWED_TOOLS and not any("Bash" in tool for tool in ALLOWED_TOOLS)
+
+
+def test_reads_are_fenced_and_pr_settings_are_ignored() -> None:
+    for name, job in _jobs().items():
+        step = _action_step(job)["with"]
+        args = step["claude_args"]
+        # Only user settings (the action's `settings` input) load, so a
+        # .claude/settings.json added by the PR cannot widen the grants.
+        assert re.findall(r"--setting-sources\s+(\S+)", args) == ["user"], name
+        assert re.findall(r"--add-dir\s+([^\n]+)", args) == [DIFF_DIR], name
+        permissions = json.loads(step["settings"])["permissions"]
+        assert permissions["blockReadsOutsideWorkingDirectories"] is True, name
+        assert set(permissions["deny"]) == READ_DENY, name
+        assert "allow" not in permissions, name
+
+
+def test_diff_prep_step_runs_before_the_reviewer() -> None:
+    for name, job in _jobs().items():
+        steps = job["steps"]
+        assert steps[0]["with"]["fetch-depth"] == 0, name
+        prep = [s for s in steps if s.get("name") == "Prepare PR diff"]
+        assert len(prep) == 1, name
+        assert steps.index(prep[0]) < steps.index(_action_step(job)), name
+        # The base branch arrives through env, never inline in the script.
+        assert prep[0]["env"] == {"BASE_REF": BASE_REF_EXPR}, name
+        assert "${{" not in prep[0]["run"], name
 
 
 def test_each_job_prompts_with_its_vendored_brief() -> None:
@@ -434,47 +474,97 @@ def test_each_job_prompts_with_its_vendored_brief() -> None:
         brief = BRIEFS[name]
         prompt = _action_step(job)["with"]["prompt"]
         assert brief.relative_to(REPO_ROOT).as_posix() in prompt, name
+        assert f"First read {DIFF_DIR}/changed-files.txt and\n{DIFF_DIR}/pr.diff" in prompt, name
         text = brief.read_text(encoding="utf-8")
-        assert "p9-verdict.json" in text and "gh pr comment" in text, brief.name
+        assert COMMENT_TOOL in text and "p9-verdict.json" in text, brief.name
+        assert "gh pr" not in text, brief.name
+        # The brief states the same CI tool set as the workflow allowlist.
+        tools = text.split("## Tools in CI", 1)[1].split("\n## ", 1)[0]
+        assert "`Read`, `Grep`, `Glob`, `Write` limited to `p9-verdict.json`" in tools, brief.name
+        assert COMMENT_TOOL in tools and "No Bash, no web, no other MCP." in tools, brief.name
+        assert "## Accepted / tracked items: do not re-report" in text, brief.name
+        assert all(card in text for card in ("#216", "#215", "rebase")), brief.name
         assert "/Users/" not in text and "/home/" not in text, brief.name
 
 
 # --- workflow steps, run for real with a fake reviewer -----------------------
 
 
-def _shell_steps(job: dict[str, Any]) -> tuple[list[str], list[str]]:
-    """Return the `run:` scripts before and after the action step."""
-    before: list[str] = []
-    after: list[str] = []
+def _shell_steps(job: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return the `run:` steps before and after the action step."""
+    before: list[dict[str, Any]] = []
+    after: list[dict[str, Any]] = []
     seen_action = False
     for step in job["steps"]:
         if step is _action_step(job):
             seen_action = True
         elif "run" in step:
-            (after if seen_action else before).append(step["run"])
+            (after if seen_action else before).append(step)
     assert seen_action and before and after, "expected run steps around the action"
     return before, after
 
 
 Reviewer = Callable[[Path], object]  # stands in for the review action
+_needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is required for this test")
+GIT_TIMEOUT = 30
 
 
-def _run_job(tmp_path: Path, job: dict[str, Any], reviewer: Reviewer) -> subprocess.CompletedProcess[str]:
-    """Run the job's shell steps in a copy of the repo files they touch."""
+def _git(repo: Path, *args: str) -> None:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+        cwd=repo,
+        env=env,
+        check=True,
+        capture_output=True,
+        timeout=GIT_TIMEOUT,
+    )
+
+
+def _step_env(step: dict[str, Any]) -> dict[str, str]:
+    """The step's env, with the base-branch expression resolved to main."""
+    resolved: dict[str, str] = {}
+    for key, value in step.get("env", {}).items():
+        assert value == BASE_REF_EXPR, f"unexpected env expression {key}={value!r}"
+        resolved[key] = "main"
+    return resolved
+
+
+def _run_job(
+    tmp_path: Path, job: dict[str, Any], reviewer: Reviewer, committed: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run the job's shell steps in a git workspace: origin/main, then the PR."""
     workspace = tmp_path / "ws"
     runner_temp = tmp_path / "runner-temp"
     (workspace / ".github" / "p9").mkdir(parents=True)
     runner_temp.mkdir()
     shutil.copy2(GATE, workspace / ".github" / "p9" / "check_verdict.py")
+    _git(workspace, "init", "-q")
+    _git(workspace, "add", "-A")
+    _git(workspace, "commit", "-q", "-m", "base")
+    _git(workspace, "update-ref", "refs/remotes/origin/main", "HEAD")
+    for rel, content in {"app/changed.py": "x = 1\n", **(committed or {})}.items():
+        (workspace / rel).parent.mkdir(parents=True, exist_ok=True)
+        (workspace / rel).write_text(content, encoding="utf-8")
+    _git(workspace, "add", "-A")
+    _git(workspace, "commit", "-q", "-m", "pr")
     env = {"PATH": os.environ["PATH"], "RUNNER_TEMP": str(runner_temp), "HOME": str(tmp_path)}
     before, after = _shell_steps(job)
-    for script in before:
-        subprocess.run(["bash", "-e", "-c", script], cwd=workspace, env=env, check=True, timeout=30)
+    for step in before:
+        subprocess.run(
+            ["bash", "-e", "-c", step["run"]], cwd=workspace, env={**env, **_step_env(step)}, check=True, timeout=30
+        )
     reviewer(workspace)  # stands in for anthropics/claude-code-action
     result = None
-    for script in after:
+    for step in after:
         result = subprocess.run(
-            ["bash", "-e", "-c", script], cwd=workspace, env=env, text=True, capture_output=True, timeout=30
+            ["bash", "-e", "-c", step["run"]],
+            cwd=workspace,
+            env={**env, **_step_env(step)},
+            text=True,
+            capture_output=True,
+            timeout=30,
         )
         if result.returncode != 0:
             break
@@ -486,32 +576,52 @@ def _writes(doc: object) -> Reviewer:
     return lambda ws: (ws / "p9-verdict.json").write_text(json.dumps(doc), encoding="utf-8")
 
 
+@_needs_git
 @pytest.mark.parametrize("name", sorted(BRIEFS))
 @pytest.mark.parametrize(
-    ("reviewer", "expected"),
+    ("reviewer", "expected", "message"),
     [
-        pytest.param(_writes(PASS_DOC), EXIT_PASS, id="pass"),
-        pytest.param(_writes({"verdict": "FAIL", "findings": [FINDING]}), EXIT_REJECTED, id="fail"),
-        pytest.param(lambda ws: None, EXIT_INVALID, id="reviewer-wrote-nothing"),
+        pytest.param(_writes(PASS_DOC), EXIT_PASS, "P9 verdict: PASS, 0 findings", id="pass"),
+        pytest.param(
+            _writes({"verdict": "FAIL", "findings": [FINDING]}), EXIT_REJECTED, "P9 verdict: FAIL", id="fail"
+        ),
+        pytest.param(lambda ws: None, EXIT_INVALID, "was not written", id="reviewer-wrote-nothing"),
     ],
 )
-def test_job_steps_gate_on_the_reviewer_verdict(tmp_path: Path, name: str, reviewer: Reviewer, expected: int) -> None:
+def test_job_steps_gate_on_the_reviewer_verdict(
+    tmp_path: Path, name: str, reviewer: Reviewer, expected: int, message: str
+) -> None:
     proc = _run_job(tmp_path, _jobs()[name], reviewer)
     assert proc.returncode == expected, proc.stderr
+    assert message in proc.stdout + proc.stderr
 
 
+@_needs_git
+@pytest.mark.parametrize("name", sorted(BRIEFS))
+def test_prepare_step_writes_the_pr_diff_for_the_reviewer(tmp_path: Path, name: str) -> None:
+    seen: list[str] = []
+
+    def read_inputs(ws: Path) -> None:
+        for rel in ("pr.diff", "changed-files.txt"):
+            seen.append((tmp_path / "runner-temp" / "p9" / rel).read_text(encoding="utf-8"))
+        _writes(PASS_DOC)(ws)
+
+    proc = _run_job(tmp_path, _jobs()[name], read_inputs)
+    assert proc.returncode == EXIT_PASS, proc.stderr
+    diff, changed = seen
+    assert "+++ b/app/changed.py" in diff
+    assert ".github/p9/check_verdict.py" not in diff, "the base commit must not be in the diff"
+    assert changed == "app/changed.py\n"
+
+
+@_needs_git
 @pytest.mark.parametrize("name", sorted(BRIEFS))
 def test_a_verdict_committed_in_the_pr_cannot_pass_the_job(tmp_path: Path, name: str) -> None:
-    def committed_then_silent(ws: Path) -> None:
-        return None
-
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    (workspace / "p9-verdict.json").write_text(json.dumps(PASS_DOC), encoding="utf-8")
-    proc = _run_job(tmp_path, _jobs()[name], committed_then_silent)
+    proc = _run_job(tmp_path, _jobs()[name], lambda ws: None, committed={"p9-verdict.json": json.dumps(PASS_DOC)})
     assert proc.returncode == EXIT_INVALID, proc.stderr
 
 
+@_needs_git
 @pytest.mark.parametrize("name", sorted(BRIEFS))
 def test_reviewer_cannot_swap_the_gate_script(tmp_path: Path, name: str) -> None:
     def tamper(ws: Path) -> None:
@@ -539,6 +649,7 @@ def test_retired_p9_gate_files_are_gone(rel: str) -> None:
     assert not (REPO_ROOT / rel).exists(), f"{rel} belongs to the retired local P9 gate"
 
 
+@_needs_git
 def test_pre_commit_hook_and_installer_are_tracked_executable() -> None:
     out = subprocess.run(
         ["git", "ls-files", "-s", ".githooks/pre-commit", "scripts/install-hooks.sh"],
@@ -546,11 +657,12 @@ def test_pre_commit_hook_and_installer_are_tracked_executable() -> None:
         text=True,
         capture_output=True,
         check=True,
+        timeout=GIT_TIMEOUT,
     ).stdout.splitlines()
     assert len(out) == 2 and all(line.startswith("100755 ") for line in out), out
 
 
-@pytest.mark.skipif(shutil.which("git") is None, reason="git is required to run the installer")
+@_needs_git
 def test_installer_wires_pre_commit_and_no_longer_creates_reviews(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
@@ -562,15 +674,20 @@ def test_installer_wires_pre_commit_and_no_longer_creates_reviews(tmp_path: Path
     shutil.copy2(REPO_ROOT / ".githooks" / "pre-commit", repo / ".githooks" / "pre-commit")
     shutil.copy2(INSTALLER, repo / "scripts" / "install-hooks.sh")
     (repo / ".githooks" / "pre-commit").chmod(0o644)
-    subprocess.run(["git", "init", "-q"], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "init", "-q"], cwd=repo, env=env, check=True, timeout=GIT_TIMEOUT)
 
     proc = subprocess.run(
-        ["bash", "scripts/install-hooks.sh"], cwd=repo, env=env, text=True, capture_output=True
+        ["bash", "scripts/install-hooks.sh"], cwd=repo, env=env, text=True, capture_output=True, timeout=GIT_TIMEOUT
     )
 
     assert proc.returncode == 0, proc.stderr
     hooks_path = subprocess.run(
-        ["git", "config", "--get", "core.hooksPath"], cwd=repo, env=env, text=True, capture_output=True
+        ["git", "config", "--get", "core.hooksPath"],
+        cwd=repo,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=GIT_TIMEOUT,
     ).stdout.strip()
     assert hooks_path == ".githooks"
     assert os.access(repo / ".githooks" / "pre-commit", os.X_OK)

@@ -16,30 +16,45 @@ Workflow: `.github/workflows/p9-review.yml`.
   with the base repository's secrets.
 - **Jobs:** `security-review` and `grumpy-review`, on `ubuntu-latest`.
   Each job:
-  1. checks out the PR (`actions/checkout`, pinned by commit SHA);
+  1. checks out the PR with full history (`actions/checkout`, pinned by
+     commit SHA, `fetch-depth: 0`);
   2. deletes any `p9-verdict.json` committed in the PR and copies
      `.github/p9/check_verdict.py` to the runner's temp directory, before the
      reviewer can touch the tree;
-  3. runs `anthropics/claude-code-action` (pinned by commit SHA) with a prompt
-     that points at its brief, `.github/p9/security-engineer.md` or
-     `.github/p9/grumpy-developer.md`;
-  4. runs the copied gate on `p9-verdict.json`.
+  3. writes `git diff origin/<base>...HEAD` to `$RUNNER_TEMP/p9/pr.diff` and
+     the changed-file list to `$RUNNER_TEMP/p9/changed-files.txt` (the base
+     branch passes through `env`, not inline);
+  4. runs `anthropics/claude-code-action` (pinned by commit SHA) with a prompt
+     that has it read those two files first, then its brief,
+     `.github/p9/security-engineer.md` or `.github/p9/grumpy-developer.md`;
+  5. runs the copied gate on `p9-verdict.json`.
 - **Bounds:** `timeout-minutes` per job, `--max-turns` for the reviewer, and a
   `concurrency` group per PR that cancels the run for a superseded commit.
-- **Tools:** the reviewer may only read files (`Read`, `Glob`, `Grep`), write
-  the verdict file (`Write`), and run `gh pr diff`, `gh pr view` and
-  `gh pr comment`.
+- **Tools:** an exact `--allowedTools` allowlist: `Read`, `Grep`, `Glob`,
+  writes to `p9-verdict.json` only, and the inline PR-comment MCP tool
+  (`mcp__github_inline_comment__create_inline_comment`). `Bash`, `WebFetch`
+  and `WebSearch` are disallowed. The write scope is the rule
+  `Edit(./p9-verdict.json)`: Claude Code checks every file-writing tool,
+  `Write` included, against `Edit(path)` rules and ignores `Write(path)`
+  rules (Claude Code permissions docs, "Read and Edit").
+- **Read deny rules:** the action's `settings` input turns on
+  `permissions.blockReadsOutsideWorkingDirectories` (working directories: the
+  checkout and `$RUNNER_TEMP/p9`) and denies `/proc`, `/sys` and runner
+  credential paths, so the process environment (`ANTHROPIC_API_KEY`, the job
+  token) cannot be read back. `Read` deny rules also cover Grep and Glob.
+  `--setting-sources user` ignores any `.claude/settings.json` the PR adds.
 - **Permissions:** the workflow grants nothing by default; each job gets
-  `contents: read` and `pull-requests: write` (for the comment) and uses the
-  job's own `github.token`.
+  `contents: read` and `pull-requests: write` (for the inline comments) and
+  uses the job's own `github.token`.
 - **Secret:** `ANTHROPIC_API_KEY`, used only as the action's
-  `anthropic_api_key` input. Fork PRs receive no secrets, so the review step
+  `anthropic_api_key` input, so it is set in that step only; there is no
+  workflow- or job-level `env`. Fork PRs receive no secrets, so the review step
   fails and the job fails closed.
 
 ## Verdict contract
 
-Each reviewer posts one summary comment on the PR and writes
-`p9-verdict.json` in the working directory:
+Each reviewer comments inline on each finding and writes `p9-verdict.json`
+in the working directory:
 
 ```json
 {"verdict": "PASS", "findings": []}
@@ -82,8 +97,10 @@ the owner can waive a finding, at merge time.
   any `pull_request` workflow. A PR that edits them changes its own review;
   that edit is visible in the diff both reviewers read and the owner merges.
 - The reviewer reads untrusted PR content. The gate copy, the deleted
-  committed verdict and the narrow tool list limit what a prompt injection can
-  change; the owner's merge decision remains the final control.
+  committed verdict, the tool allowlist and the read deny rules limit what
+  a prompt injection can change; the owner's merge decision remains the final
+  control. Workflow self-modification (#216) is an accepted, tracked risk; the
+  briefs list it under "Accepted / tracked items".
 
 ## Local hooks
 

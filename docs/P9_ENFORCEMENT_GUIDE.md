@@ -28,7 +28,7 @@ files and the `enforce-p9-review.yml` text check are retired.
 ## Developer workflow
 
 1. Push the feature branch and open a PR to `main`.
-2. Read the two review comments on the PR.
+2. Read the reviewers' inline comments on the PR and the job logs.
 3. If either job fails, fix every finding and push again; both jobs re-run.
 4. When both jobs pass on the head commit, the PR is ready for the owner to
    merge.
@@ -41,7 +41,7 @@ files and the `enforce-p9-review.yml` text check are retired.
 - **Job fails with `does not match the verdict contract`:** the reviewer wrote
   the wrong shape. Re-run the job; if it repeats, tighten the brief.
 - **Job fails with `P9 verdict: FAIL`:** read the findings in the job log or
-  the PR comment, fix them, and push.
+  the inline PR comments, fix them, and push.
 
 ## References
 

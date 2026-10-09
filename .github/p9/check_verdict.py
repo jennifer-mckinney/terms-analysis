@@ -89,8 +89,6 @@ def load(path: Path) -> dict[str, object]:
         doc = json.loads(
             path.read_text(encoding="utf-8"), object_pairs_hook=_reject_duplicate_keys
         )
-    except InvalidVerdict:
-        raise
     except (OSError, UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise InvalidVerdict(f"{path.name} is not valid JSON ({type(exc).__name__})") from None
     # Exact key sets: the document and every finding carry the contract keys
