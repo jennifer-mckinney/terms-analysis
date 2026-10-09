@@ -2,16 +2,25 @@
 
 ## After clone: install governance hooks
 
-Run once after cloning:
+Run once after cloning (from the main checkout or any worktree):
 
 ```bash
 scripts/install-hooks.sh
 ```
 
-This copies `.githooks/pre-commit` into `.git/hooks/pre-commit`. The hook
-enforces `.gitignore` governance invariants before every commit. CI enforces
-the same invariants via `.github/workflows/gitignore-enforcement.yml`, so the
-pre-commit hook is a fast local convenience, not the only line of defense.
+This sets `core.hooksPath=.githooks`, so git runs the tracked
+`.githooks/pre-commit`. The hook enforces `.gitignore` governance invariants
+before every commit. CI enforces the same invariants via
+`.github/workflows/gitignore-enforcement.yml`, so the pre-commit hook is a
+fast local convenience, not the only line of defense.
+
+## P9 review runs in CI
+
+There is no local pre-push gate. Every PR to `main` runs the
+`security-review` and `grumpy-review` jobs
+(`.github/workflows/p9-review.yml`). Once the owner makes both required
+checks on `main` (pending, after the first green run), both must pass before
+the PR can merge. See `automations/p9-pre-push.md`.
 
 ## What patterns are protected
 
