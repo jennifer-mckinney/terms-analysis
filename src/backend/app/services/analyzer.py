@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import List, Optional, get_args
+from typing import Any, Dict, List, Optional, Tuple, get_args
 from uuid import uuid4
 
 from ..config import settings
@@ -18,12 +19,20 @@ from ..schemas import (
     Finding,
     IndustryProfile,
     Jurisdiction,
+    normalise_corpus_status,
+    passage_label_keys,
 )
 from .context import apply_category_weights, verdict_headline, verdict_label
-from .legal_kb import get_legal_kb
+from .legal_kb import (
+    RetrievalResult,
+    get_legal_kb,
+    relevance_floor_disabled,
+)
 from .localai import LocalAIClient
 from .rules import _seed_irp, detect_findings
 from .validation import validate_findings
+
+logger = logging.getLogger("uvicorn.error")
 
 
 @dataclass(frozen=True)
@@ -642,6 +651,11 @@ async def analyze_text(
     # Normalise context to a list so downstream helpers can trust the type.
     context_list: List[ContextChip] = list(context) if context else []
     
+    # Issue #91: quick mode never consults the legal KB, so it is never
+    # grounded; the full path overwrites these from the retrieval status.
+    legal_context: List[Dict[str, Any]] = []
+    legal_grounding = False
+
     # Quick mode: only detect high-severity findings, skip ML inference
     if mode == "quick":
         rule_findings = detect_high_severity_findings(cleaned, jurisdictions)
@@ -661,8 +675,8 @@ async def analyze_text(
                 formatted_rules.append(json.loads(finding.json()))
 
         legal_query = " ".join(jurisdictions) + " " + cleaned[:500]
-        legal_context = await get_legal_kb().retrieve(
-            legal_query, client, jurisdictions=jurisdictions
+        legal_context, legal_grounding = await _retrieve_legal_context(
+            legal_query, client, jurisdictions
         )
 
         llm_payload = await client.analyze(
@@ -771,6 +785,9 @@ async def analyze_text(
     )
 
     elapsed_time = time.time() - start_time
+    # Issue #91: project chunks once so the authoritative flag is computed
+    # from exactly the (status-normalised) citations the response exposes.
+    citations = [_legal_citation(c) for c in legal_context]
 
     payload = AnalysisPayload(
         id=str(uuid4()),
@@ -798,8 +815,96 @@ async def analyze_text(
         verdict_label=verdict_label(context_list, action_readiness),
         top_by_domain=top_by_domain,
         action_items=action_items,
+        legal_grounding=legal_grounding,
+        legal_grounding_authoritative=_grounding_is_authoritative(
+            legal_grounding, citations, jurisdictions
+        ),
+        legal_context=citations,
     )
     return AnalysisResult(payload=payload, issues=validation.issues)
+
+
+async def _retrieve_legal_context(
+    query: str,
+    client: LocalAIClient,
+    jurisdictions: List[Jurisdiction],
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Retrieve legal-KB context and decide whether the analysis is grounded.
+
+    Returns ``(chunks, grounded)``. ``grounded`` is True only when an index
+    loaded and retrieval ran (NO_MATCH still counts, with no chunks). On
+    NO_INDEX / ERROR, or if the KB call itself raises, returns ``([], False)``
+    so no legal context can reach the LLM prompt (HR5: degrade, never 500).
+
+    Fails closed (grumpy F4): anything other than a ``RetrievalResult`` (for
+    example a plain list from a status-less KB stub) carries no evidence that
+    retrieval ran against a loaded index, so it is treated as ungrounded and
+    logged at ERROR rather than reviving the old "``[]`` means ran fine"
+    ambiguity.
+    """
+    try:
+        result = await get_legal_kb().retrieve(
+            query, client, jurisdictions=jurisdictions
+        )
+    except Exception:
+        logger.error(
+            "Legal KB retrieve() raised — analysis will run without legal grounding",
+            exc_info=True,
+        )
+        return [], False
+    if not isinstance(result, RetrievalResult):
+        logger.error(
+            "Legal KB retrieve() returned %s without a RetrievalStatus; treating as ungrounded",
+            type(result).__name__,
+        )
+        return [], False
+    if not result.grounded:
+        return [], False
+    return list(result.chunks), True
+
+
+def _legal_citation(chunk: Dict[str, Any]) -> Dict[str, Any]:
+    """Project a retrieved chunk onto the public ``LegalCitation`` shape."""
+    score = chunk.get("score")
+    return {
+        "jurisdiction": chunk.get("jurisdiction"),
+        "law": chunk.get("law"),
+        "section": chunk.get("section"),
+        # Grumpy F2: normalised so "PLACEHOLDER" in the corpus is exposed
+        # (and compared) as the documented "placeholder".
+        "status": normalise_corpus_status(chunk.get("status")),
+        "score": float(score) if isinstance(score, (int, float)) else None,
+    }
+
+
+def _grounding_is_authoritative(
+    grounded: bool,
+    citations: List[Dict[str, Any]],
+    jurisdictions: List[Jurisdiction],
+) -> bool:
+    """True only when grounded, the floor is on, and one citation is authoritative law.
+
+    Grumpy F3 / security F2: the shipped corpus is entirely placeholder, so
+    ``legal_grounding`` alone can be True with no real law in the prompt.
+    Round-2 (grumpy #2 / security R2-F4): fail closed on provenance; only a
+    status in ``schemas.AUTHORITATIVE_STATUSES`` counts, so a null, unknown
+    or misspelled status is NOT authoritative. Round-2 owner ruling (grumpy
+    #1): forced False while ``settings.legal_kb_min_score`` is unset, because
+    with no relevance floor nobody checked the passages are relevant.
+    Round 8 (grumpy 2 / security F2): the citation must also be for
+    a known, requested jurisdiction (any known one when none was requested);
+    round 10: never for a null, blank or unrecognised jurisdiction, where
+    "known" means in ``schemas.KNOWN_JURISDICTIONS``. A citation counts
+    only when ``schemas.passage_label_keys`` gives it no label, the same
+    table that labels the passage in the LLM prompt, so the flag and the
+    prompt can never disagree about which passages are authoritative.
+    """
+    if not grounded or relevance_floor_disabled():
+        return False
+    return any(
+        not passage_label_keys(c.get("status"), c.get("jurisdiction"), jurisdictions)
+        for c in citations
+    )
 
 
 def _merge_findings(

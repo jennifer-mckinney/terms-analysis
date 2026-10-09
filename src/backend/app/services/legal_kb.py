@@ -20,24 +20,33 @@ Architecture:
   Fusion   — Reciprocal Rank Fusion (embedding.py::rrf_fuse), same k as the
              document-chunk ensemble.
 
-Falls back to an empty result set if the index hasn't been built yet, the
-embedding endpoint is unreachable, or retrieval fails for any other reason
-(e.g. a stale index built with a different embedding dimension) —
-analyze_text() must never be blocked by legal-KB availability (same fallback
-philosophy as embedding.py/localai.py).
+Retrieval never raises to the caller: analyze_text() must never be blocked by
+legal-KB availability (same fallback philosophy as embedding.py/localai.py,
+HR5 "degrade, don't crash"). Unlike the original blanket ``except: return []``,
+every result now carries a ``RetrievalStatus`` (issue #91) so callers can tell
+"no index" (NO_INDEX), "index searched, nothing relevant" (NO_MATCH) and
+"retrieval broke" (ERROR) apart from a grounded hit (OK).
 """
 
 import json
 import logging
 import re
+import sys
+import unicodedata
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import yaml
 
 from ..config import settings
 from ..exceptions import CorpusMismatchError
+from ..schemas import AUTHORITATIVE_STATUSES as _SCHEMA_AUTHORITATIVE_STATUSES
+from ..schemas import PLACEHOLDER_STATUS as _SCHEMA_PLACEHOLDER_STATUS
+from ..schemas import is_valid_utf8 as _is_valid_utf8
+from ..schemas import normalise_jurisdiction, normalise_section_title
 from .embedding import bm25_scores, chunk_text, rrf_fuse
 from .localai import LocalAIClient
 
@@ -47,8 +56,212 @@ _SECTION_HEADER = re.compile(r"^##\s+(.+)$", re.MULTILINE)
 _META_LINE = re.compile(r"^#\s*([\w ]+):\s*(.+)$")
 
 # Placeholder-status chunks must always carry this warning into the LLM
-# prompt — see build_user_prompt() in prompts.py.
-PLACEHOLDER_STATUS = "placeholder"
+# prompt — see build_user_prompt() in prompts.py. Defined in schemas (shared
+# with prompts.py without an import cycle) and re-exported here.
+PLACEHOLDER_STATUS = _SCHEMA_PLACEHOLDER_STATUS
+
+# The ONLY corpus statuses that count as authoritative law (allowlist, fails
+# closed). Defined in schemas (round 8, security F3: one allowlist for the
+# analyzer flag and the prompt labels) and re-exported here.
+AUTHORITATIVE_STATUSES = _SCHEMA_AUTHORITATIVE_STATUSES
+
+# Round 8 (security F10): chunk metadata keys exposed through LegalCitation.
+# Each must be a string or null; anything else would fail response
+# validation (a 500), so the index is rejected as corrupt at load instead.
+_STRING_METADATA_KEYS = ("jurisdiction", "law", "section", "status")
+
+
+def _section_is_unsafe(section: str) -> bool:
+    """True when a (normalised) section holds a control or line-break character.
+
+    Round 10 (security F2): every boundary ``str.splitlines`` honours is a
+    control character (Cc) or U+2028 / U+2029 (Zl / Zp). Brackets are no
+    longer rejected here: round 11 maps them to parentheses in
+    ``schemas.normalise_section_title`` first, so a real title such as
+    "Article 6 [Lawfulness]" builds and loads. prompts.py renders headers so
+    they can't be forged regardless (its INVARIANT); this is defence in depth.
+    """
+    return any(unicodedata.category(ch) in ("Cc", "Zl", "Zp") for ch in section)
+
+
+def _validate_chunks(chunks: Any, source: Path) -> List[Dict[str, Any]]:
+    """Return ``chunks`` if every entry is a well-typed chunk, else raise.
+
+    Raises LegalKBIndexCorruptError (retrieve() maps it to ERROR, so the
+    analysis degrades to ungrounded instead of returning a 500) when the
+    metadata is not a list, an entry is not a dict, ``text`` is not a string,
+    or a ``_STRING_METADATA_KEYS`` value is neither a string nor null, any
+    string key or value is not valid UTF-8 (round 12, ``_is_valid_utf8``), or
+    ``section`` holds a control / line-break character (``_section_is_unsafe``).
+    Messages name the chunk and field, never the offending value, so they
+    stay encodable and safe to log.
+
+    Round 11: the ONE validation, run by build() on each parsed corpus file
+    before anything is embedded or written, and by _load() and
+    load_from_bundle(). It also normalises each ``section`` through
+    ``schemas.normalise_section_title`` (brackets to parentheses, format
+    characters stripped), so build and load agree on every title. The
+    returned chunks are copies; the input is not mutated.
+    """
+    if not isinstance(chunks, list):
+        raise LegalKBIndexCorruptError(
+            f"Legal KB metadata at {source} is a {type(chunks).__name__}, expected a list"
+        )
+    validated: List[Dict[str, Any]] = []
+    for number, chunk in enumerate(chunks):
+        if not isinstance(chunk, dict):
+            raise LegalKBIndexCorruptError(
+                f"Legal KB metadata at {source}: chunk {number} is a {type(chunk).__name__}, expected an object"
+            )
+        if not isinstance(chunk.get("text"), str):
+            raise LegalKBIndexCorruptError(
+                f"Legal KB metadata at {source}: chunk {number} has no string 'text'"
+            )
+        for key in _STRING_METADATA_KEYS:
+            value = chunk.get(key)
+            if value is not None and not isinstance(value, str):
+                raise LegalKBIndexCorruptError(
+                    f"Legal KB metadata at {source}: chunk {number} field {key!r} is a "
+                    f"{type(value).__name__}, expected a string or null"
+                )
+        # Round 12 (security F2): every string key and value, not a list of
+        # known fields, because file-level corpus metadata ("# Source:", ...)
+        # is copied into every chunk and any of it can reach a response.
+        for key, value in chunk.items():
+            if isinstance(key, str) and not _is_valid_utf8(key):
+                raise LegalKBIndexCorruptError(
+                    f"Legal KB metadata at {source}: chunk {number} has a key that is "
+                    "not valid UTF-8 (lone surrogate)"
+                )
+            if isinstance(value, str) and not _is_valid_utf8(value):
+                raise LegalKBIndexCorruptError(
+                    f"Legal KB metadata at {source}: chunk {number} field {key!r} is "
+                    "not valid UTF-8 (lone surrogate)"
+                )
+        section = chunk.get("section")
+        if section is not None:
+            section = normalise_section_title(section)
+            if _section_is_unsafe(section):
+                raise LegalKBIndexCorruptError(
+                    f"Legal KB metadata at {source}: chunk {number} field 'section' holds a "
+                    "control / line-break character"
+                )
+            chunk = {**chunk, "section": section}
+        validated.append(chunk)
+    return validated
+
+
+class RetrievalStatus(str, Enum):
+    """Outcome of one legal-KB retrieval (issue #91).
+
+    OK        -- index loaded, retrieval ran, at least one chunk returned.
+    NO_MATCH  -- index loaded, retrieval ran, every candidate scored below
+                 ``settings.legal_kb_min_score``. Unreachable while that floor
+                 is unset (None = disabled, the default until calibrated).
+    NO_INDEX  -- index/metadata files absent (or empty): retrieval never ran.
+    ERROR     -- index present but unusable, or retrieval raised.
+    """
+
+    OK = "ok"
+    NO_MATCH = "no_match"
+    NO_INDEX = "no_index"
+    ERROR = "error"
+
+    @property
+    def grounded(self) -> bool:
+        """True only when an index loaded and retrieval actually ran."""
+        return self in (RetrievalStatus.OK, RetrievalStatus.NO_MATCH)
+
+
+@dataclass(frozen=True)
+class RetrievalResult:
+    """Retrieved chunks plus the ``RetrievalStatus`` that produced them.
+
+    Issue #91 round-1 (grumpy F5): this used to subclass ``list`` with a
+    defaulted ``status=NO_MATCH``. That was fail-open twice over: a bare
+    ``RetrievalResult()`` claimed to be grounded, and slicing / ``list()`` /
+    ``+`` silently returned plain lists with no status, while
+    ``RetrievalResult(status=ERROR) == []`` made ERROR and NO_MATCH compare
+    equal. It is now a frozen value object rather than a list, so the status
+    can never be dropped by a copy and is never compared away: ``status`` is
+    a required field with no default, and callers read ``.chunks`` explicitly.
+    The container is immutable (``chunks`` is stored as a tuple); the chunk
+    dicts inside it are fresh copies built per retrieve() call, not shared
+    with the index.
+    """
+
+    chunks: Tuple[Dict[str, Any], ...]
+    status: RetrievalStatus
+
+    def __post_init__(self) -> None:
+        # Accept any iterable of chunks (e.g. a list) but store a tuple so the
+        # frozen dataclass really is immutable.
+        object.__setattr__(self, "chunks", tuple(self.chunks))
+        if not isinstance(self.status, RetrievalStatus):
+            raise TypeError(
+                f"RetrievalResult.status must be a RetrievalStatus, got {type(self.status).__name__}"
+            )
+
+    @property
+    def grounded(self) -> bool:
+        return self.status.grounded
+
+
+def relevance_floor_disabled() -> bool:
+    """True when ``settings.legal_kb_min_score`` is unset (floor disabled)."""
+    return settings.legal_kb_min_score is None
+
+
+def warn_if_relevance_floor_disabled() -> bool:
+    """Log the owner-mandated startup WARNING when the floor is disabled.
+
+    Issue #91 round-2 owner ruling ("Disabled + loud"): with no floor, RRF
+    always returns top-k passages, so "no relevant law" (NO_MATCH) cannot be
+    reported and legal_grounding_authoritative is forced False. Returns True
+    when the warning was logged. Called once from ``main.lifespan``.
+    """
+    if not relevance_floor_disabled():
+        return False
+    logger.warning(
+        "Legal KB relevance floor disabled (LEGAL_KB_MIN_SCORE unset, uncalibrated): "
+        "NO_MATCH cannot be reported and legal_grounding_authoritative is forced False"
+    )
+    return True
+
+
+class LegalKBError(Exception):
+    """Base class for typed legal-KB retrieval failures."""
+
+
+class LegalKBIndexMissingError(LegalKBError):
+    """Index or metadata file is absent; carries the missing paths."""
+
+    def __init__(self, missing: List[Path]) -> None:
+        self.missing = missing
+        super().__init__(
+            "Legal KB index not found: " + ", ".join(str(p) for p in missing)
+        )
+
+
+class LegalKBIndexEmptyError(LegalKBError):
+    """Index files exist and load but hold zero chunks (grumpy F6).
+
+    Kept distinct from LegalKBIndexMissingError so operators are not told a
+    file on disk is missing; retrieve() still maps it to NO_INDEX because a
+    zero-row index cannot ground anything.
+    """
+
+    def __init__(self, index_path: Path) -> None:
+        self.index_path = index_path
+        super().__init__(f"Legal KB index at {index_path} has 0 chunks")
+
+
+class LegalKBIndexCorruptError(LegalKBError):
+    """Index files exist but cannot be loaded or disagree with each other."""
+
+
+class LegalKBRetrievalError(LegalKBError):
+    """Index loaded but the retrieval step itself could not complete."""
 
 
 def _parse_corpus_file(path: Path) -> List[Dict[str, Any]]:
@@ -104,6 +317,11 @@ def _parse_corpus_file(path: Path) -> List[Dict[str, Any]]:
     return chunks
 
 
+# Sentinel for ``LegalKnowledgeBase._loaded_from`` when the matrix came from
+# load_from_bundle() rather than the configured settings paths.
+_BUNDLE_SOURCE: Tuple[str, str] = ("<bundle>", "<bundle>")
+
+
 def _iter_corpus_files(corpus_dir: Path) -> List[Path]:
     if not corpus_dir.is_dir():
         return []
@@ -124,6 +342,8 @@ class LegalKnowledgeBase:
     def __init__(self) -> None:
         self._matrix: Optional[np.ndarray] = None  # shape (n_chunks, dim), L2-normalized
         self._chunks: List[Dict[str, Any]] = []
+        # Where the cached matrix came from: settings paths, _BUNDLE_SOURCE, or None.
+        self._loaded_from: Optional[Tuple[str, str]] = None
 
     @property
     def chunk_count(self) -> int:
@@ -136,11 +356,26 @@ class LegalKnowledgeBase:
 
         Returns the number of chunks indexed (0 if the corpus directory is
         empty or the embedding endpoint is unreachable).
+
+        Raises LegalKBIndexCorruptError, naming the corpus file and chunk,
+        when a parsed chunk fails ``_validate_chunks`` (round 11, grumpy
+        MEDIUM / security F2): every file is validated before the first
+        embedding call, so an invalid corpus writes no index and leaves any
+        existing one untouched. The CLI turns this into exit status 1.
         """
         directory = corpus_dir or settings.legal_corpus_dir
         chunks: List[Dict[str, Any]] = []
         for file_path in _iter_corpus_files(directory):
-            chunks.extend(_parse_corpus_file(file_path))
+            try:
+                parsed = _parse_corpus_file(file_path)
+            except UnicodeDecodeError as exc:
+                # Round 12 (security F2): undecodable bytes fail the build
+                # through the same error the CLI reports, not a traceback.
+                raise LegalKBIndexCorruptError(
+                    f"Legal KB corpus file {file_path} is not valid UTF-8 "
+                    f"(byte offset {exc.start})"
+                ) from exc
+            chunks.extend(_validate_chunks(parsed, file_path))
 
         if not chunks:
             logger.warning("No legal corpus files found under %s", directory)
@@ -172,34 +407,56 @@ class LegalKnowledgeBase:
 
         self._matrix = matrix
         self._chunks = kept_chunks
+        self._loaded_from = (
+            str(settings.legal_kb_index_path),
+            str(settings.legal_kb_metadata_path),
+        )
         logger.info("Legal KB built: %d chunks from %s", len(kept_chunks), directory)
         return len(kept_chunks)
 
-    def _load(self) -> bool:
-        if self._matrix is not None:
-            return True
+    def _load(self) -> None:
+        """Load the on-disk index, raising a typed error when it can't be used.
+
+        Returns normally once an index is loaded (grumpy F10: the old ``bool``
+        return was always True and ignored). Raises LegalKBIndexMissingError
+        if either file is absent and LegalKBIndexCorruptError if the files
+        exist but are unreadable or inconsistent. A cached matrix is reused
+        only if it came from a bundle or from the currently configured paths,
+        so a changed ``settings.legal_kb_index_path`` can't serve stale data.
+        """
         index_path = settings.legal_kb_index_path
         metadata_path = settings.legal_kb_metadata_path
-        if not index_path.exists() or not metadata_path.exists():
-            return False
+        current_source: Tuple[str, str] = (str(index_path), str(metadata_path))
+        if self._matrix is not None and self._loaded_from in (
+            _BUNDLE_SOURCE,
+            current_source,
+        ):
+            return
+        self._matrix = None
+        self._chunks = []
+        self._loaded_from = None
+
+        missing = [p for p in (index_path, metadata_path) if not p.exists()]
+        if missing:
+            raise LegalKBIndexMissingError(missing)
         try:
-            self._matrix = np.load(index_path, allow_pickle=False)
-            self._chunks = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            logger.warning("Failed to load legal KB index: %s", exc)
-            self._matrix = None
-            self._chunks = []
-            return False
-        if self._matrix.shape[0] != len(self._chunks):
-            logger.warning(
-                "Legal KB index/metadata mismatch (%d vectors, %d chunks) — ignoring",
-                self._matrix.shape[0],
-                len(self._chunks),
+            matrix = np.load(index_path, allow_pickle=False)
+            chunks = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            # ValueError covers numpy format errors and json.JSONDecodeError.
+            raise LegalKBIndexCorruptError(
+                f"Failed to load legal KB index {index_path}: {exc}"
+            ) from exc
+        chunks = _validate_chunks(chunks, metadata_path)
+        if matrix.ndim != 2 or matrix.shape[0] != len(chunks):
+            raise LegalKBIndexCorruptError(
+                f"Legal KB index/metadata mismatch at {index_path} "
+                f"(matrix shape {matrix.shape}, "
+                f"{len(chunks)} chunks)"
             )
-            self._matrix = None
-            self._chunks = []
-            return False
-        return True
+        self._matrix = matrix
+        self._chunks = chunks
+        self._loaded_from = current_source
 
     def load_from_bundle(
         self,
@@ -221,6 +478,8 @@ class LegalKnowledgeBase:
                 match the corresponding ``expected_*`` argument, or if the
                 row count of the loaded matrix does not match the metadata
                 chunk count.
+            LegalKBIndexCorruptError: if the metadata is not a list of
+                well-typed chunks (see ``_validate_chunks``).
         """
         manifest_path = bundle_dir / "MANIFEST.yaml"
         if not manifest_path.exists():
@@ -273,9 +532,17 @@ class LegalKnowledgeBase:
 
         # allow_pickle=False enforces safe numeric-only deserialization (no object arrays)
         matrix = np.load(index_path, allow_pickle=False)
-        chunks: List[Dict[str, Any]] = json.loads(
-            metadata_path.read_text(encoding="utf-8")
-        )
+        # Round 12 (security F2): undecodable bytes or invalid JSON are a
+        # corrupt index, as in _load(), not a raw decode error.
+        try:
+            raw_chunks = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            raise LegalKBIndexCorruptError(
+                f"Legal KB metadata at {metadata_path} is not valid UTF-8 JSON "
+                f"({type(exc).__name__})"
+            ) from exc
+        # Round 8 (security F10): same chunk validation as _load().
+        chunks: List[Dict[str, Any]] = _validate_chunks(raw_chunks, metadata_path)
 
         # Guard against a mismatch between the persisted matrix row count and
         # the metadata list length — both must agree for retrieval to be safe.
@@ -297,6 +564,7 @@ class LegalKnowledgeBase:
 
         self._matrix = matrix
         self._chunks = chunks
+        self._loaded_from = _BUNDLE_SOURCE
         logger.info(
             "Legal KB loaded from bundle: %d chunks from %s", len(chunks), bundle_dir
         )
@@ -307,19 +575,44 @@ class LegalKnowledgeBase:
         client: LocalAIClient,
         jurisdictions: Optional[List[str]] = None,
         top_k: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
-        """Return top-k relevant legal chunks, optionally filtered by jurisdiction.
+    ) -> RetrievalResult:
+        """Return top-k relevant legal chunks plus a ``RetrievalStatus``.
 
-        Returns [] if the index hasn't been built, the embedding endpoint is
-        unreachable, or retrieval fails for any reason (e.g. a stale index
-        built with a different embedding dimension) — callers must treat
-        legal-KB context as optional, never load-bearing for analyze_text().
+        Never raises: a missing index yields NO_INDEX (WARNING naming the
+        missing paths), an empty index yields NO_INDEX (WARNING naming the
+        index and its 0 chunks), an unusable index or a failing retrieval step
+        (including a zero-norm query embedding) yields ERROR (logged with the
+        exception type and exc_info), and a loaded index whose candidates all
+        fall below ``settings.legal_kb_min_score`` yields NO_MATCH. Callers
+        must treat legal-KB context as optional, never load-bearing for
+        analyze_text() (HR5).
         """
         try:
-            return await self._retrieve(query, client, jurisdictions, top_k)
+            chunks = await self._retrieve(query, client, jurisdictions, top_k)
+        except LegalKBIndexMissingError as exc:
+            logger.warning(
+                "Legal KB index missing (%s) — analysis will run without legal grounding",
+                ", ".join(str(p) for p in exc.missing),
+            )
+            return RetrievalResult((), status=RetrievalStatus.NO_INDEX)
+        except LegalKBIndexEmptyError as exc:
+            logger.warning(
+                "Legal KB index at %s has 0 chunks — analysis will run without legal grounding",
+                exc.index_path,
+            )
+            return RetrievalResult((), status=RetrievalStatus.NO_INDEX)
         except Exception as exc:
-            logger.warning("Legal KB retrieval failed, returning no context: %s", exc)
-            return []
+            logger.error(
+                "Legal KB retrieval failed with %s: %s — analysis will run "
+                "without legal grounding",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+            return RetrievalResult((), status=RetrievalStatus.ERROR)
+
+        status = RetrievalStatus.OK if chunks else RetrievalStatus.NO_MATCH
+        return RetrievalResult(chunks, status=status)
 
     async def _retrieve(
         self,
@@ -328,54 +621,106 @@ class LegalKnowledgeBase:
         jurisdictions: Optional[List[str]],
         top_k: Optional[int],
     ) -> List[Dict[str, Any]]:
-        if not self._load() or not self._chunks:
-            return []
+        # Round 8 (grumpy 6): validate top-k before anything else. A k < 1
+        # used to return no chunks (NO_MATCH, "grounded, no relevant law")
+        # with the floor disabled, and a negative slice silently dropped the
+        # last candidates. retrieve() maps the ValueError to ERROR.
+        k = settings.legal_kb_top_k if top_k is None else top_k
+        if isinstance(k, bool) or not isinstance(k, int) or k < 1:
+            raise ValueError(f"legal KB top_k must be an integer >= 1, got {k!r}")
+        # Raises LegalKBIndexMissingError / LegalKBIndexCorruptError; retrieve()
+        # maps those to NO_INDEX / ERROR.
+        self._load()
+        # Grumpy F7: snapshot the loaded index into locals before the first
+        # await. A concurrent _load()/build() on this singleton could otherwise
+        # reset or swap self._matrix / self._chunks during client.embed(),
+        # leaving ``pool`` indices pointing into a different corpus (wrong
+        # citations) or at None (AttributeError). Everything below reads only
+        # these locals.
+        matrix = self._matrix
+        chunks = self._chunks
+        if not chunks:
+            # Grumpy F6: a zero-row index is reported as empty, not missing.
+            raise LegalKBIndexEmptyError(settings.legal_kb_index_path)
 
         if jurisdictions:
-            wanted = {j.lower() for j in jurisdictions}
+            # Round 8: the shared normaliser (schemas.normalise_jurisdiction),
+            # so the filter and the authoritative check compare the same form
+            # and a null jurisdiction can't raise.
+            wanted = {normalise_jurisdiction(j) for j in jurisdictions} - {None}
             pool = [
                 i
-                for i, c in enumerate(self._chunks)
-                if c.get("jurisdiction", "").lower() in wanted
+                for i, c in enumerate(chunks)
+                if normalise_jurisdiction(c.get("jurisdiction")) in wanted
             ]
             if not pool:
+                # Fallback chunks are, by construction, for jurisdictions that
+                # were NOT requested: schemas.passage_label_keys labels them
+                # out of (or unknown) jurisdiction in the prompt and they never make the
+                # analysis authoritative (round 8, security F2).
                 logger.warning(
-                    "No legal KB chunks match jurisdictions=%s — searching full corpus",
+                    "No legal KB chunks match jurisdictions=%s — searching full corpus "
+                    "(results are out of jurisdiction, never authoritative)",
                     jurisdictions,
                 )
-                pool = list(range(len(self._chunks)))
+                pool = list(range(len(chunks)))
         else:
-            pool = list(range(len(self._chunks)))
+            pool = list(range(len(chunks)))
 
+        # The failures below used to return [] (indistinguishable from "no
+        # relevant law"); they now raise so retrieve() reports ERROR.
         query_embedding = await client.embed(query, model=settings.model_world)
         if query_embedding is None:
-            return []
+            raise LegalKBRetrievalError("embedding endpoint returned no query vector")
         query_vec = _normalize(query_embedding)
         if query_vec is None:
-            return []
+            # Grumpy F1: the query is never empty (jurisdiction codes + up to
+            # 500 chars of document), so a working embedder never returns a
+            # zero vector. A zero-norm vector means the embedder is broken or
+            # degenerate; reporting it as NO_MATCH would claim "grounded, no
+            # relevant law" for a dead embedder. Treat it as a failure.
+            raise LegalKBRetrievalError("embedding endpoint returned a zero-norm query vector")
 
-        if query_vec.shape[0] != self._matrix.shape[1]:
-            logger.warning(
-                "Legal KB embedding dimension mismatch (query=%d, index=%d) — "
-                "index likely stale for the current embedding model",
-                query_vec.shape[0],
-                self._matrix.shape[1],
+        if query_vec.shape[0] != matrix.shape[1]:
+            raise LegalKBRetrievalError(
+                f"embedding dimension mismatch (query={query_vec.shape[0]}, "
+                f"index={matrix.shape[1]}) — index likely stale for the "
+                "current embedding model"
             )
-            return []
 
         # Exact (exhaustive) cosine similarity over the full jurisdiction-filtered
         # pool — no top-K truncation before filtering/fusion, so relevant chunks
         # in a minority jurisdiction can't be silently dropped.
-        pool_matrix = self._matrix[pool]
-        dense_scores = (pool_matrix @ query_vec).tolist()
-        pool_texts = [self._chunks[idx]["text"] for idx in pool]
+        dense_scores = (matrix[pool] @ query_vec).tolist()
+
+        # Grumpy F1(b): relevance floor on dense cosine, applied before fusion.
+        # RRF scores are rank-based and always positive, so without a floor a
+        # loaded index always returns k chunks and NO_MATCH is unreachable.
+        # Candidates strictly below the floor are dropped; if none survive the
+        # index was searched and nothing relevant matched (NO_MATCH).
+        # Owner ruling 2026-10-07: None = floor disabled (uncalibrated), so
+        # every candidate is kept and NO_MATCH cannot be reported; the startup
+        # WARNING (main.lifespan) and the authoritative gate (analyzer) say so.
+        floor = settings.legal_kb_min_score
+        if floor is not None:
+            kept = [(idx, score) for idx, score in zip(pool, dense_scores) if score >= floor]
+            if not kept:
+                logger.info(
+                    "Legal KB: all %d candidates scored below legal_kb_min_score=%s — no relevant passages",
+                    len(pool),
+                    floor,
+                )
+                return []
+            pool = [idx for idx, _ in kept]
+            dense_scores = [score for _, score in kept]
+
+        pool_texts = [chunks[idx]["text"] for idx in pool]
         bm25 = bm25_scores(query, pool_texts)
         fused = rrf_fuse([dense_scores, bm25], k=settings.rrf_k)
 
-        k = top_k or settings.legal_kb_top_k
         ranked = sorted(zip(pool, fused), key=lambda pair: pair[1], reverse=True)[:k]
 
-        return [{**self._chunks[idx], "score": score} for idx, score in ranked]
+        return [{**chunks[idx], "score": score} for idx, score in ranked]
 
 
 _legal_kb = LegalKnowledgeBase()
@@ -403,7 +748,13 @@ async def _main() -> None:
 
     kb = get_legal_kb()
     client = LocalAIClient()
-    count = await kb.build(client)
+    try:
+        count = await kb.build(client)
+    except LegalKBIndexCorruptError as exc:
+        # Round 11: an invalid corpus fails the build loudly (stderr, exit 1)
+        # instead of writing an index the server would refuse at load.
+        print(f"Legal KB build failed, no index written: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
     print(f"Indexed {count} legal KB chunks from {settings.legal_corpus_dir}")
 
 
