@@ -189,7 +189,7 @@ Shipped [`src/backend/app/main.py:298` `POST /analyze/url`; `src/backend/app/ser
 - URL scheme validated at schema layer [`schemas.py:204` `AnalyzeUrlRequest._validate_url_scheme`] — rejects anything not `http` / `https`, requires a hostname.
 - SSRF guard (`ingest._validate_url`, see §15.4): every hop is checked against the configured `url_fetch_blocked_networks` and the request is pinned to the checked IP.
 - Redirect handling: followed by hand, each hop re-validated, capped at `url_fetch_max_redirects`; `_BLOCKED_STATUSES = {401, 403, 407, 429, 503}` short-circuits fetch.
-- Timeout: `LM_REQUEST_TIMEOUT_S` env var default 60s [`config.py:82`]. **OPEN QUESTION:** PRD specifies 30s timeout for URL fetch [PRD §F1.1 Technical Notes]; shipped default is 60s. Which is authoritative?
+- Timeout: `LM_URL_FETCH_TIMEOUT_S` (`url_fetch_timeout_s`, default 30 s, per PRD §F1.1 Technical Notes) is one total deadline for the whole fetch: DNS resolution, connect (including fallback to the next checked address), every redirect hop and the body. It is separate from `LM_REQUEST_TIMEOUT_S` (default 60 s), which governs LLM inference only. It must be finite, > 0, and not exceed `LM_REQUEST_TIMEOUT_S`; a value that breaks this stops the backend at startup.
 
 **OPEN QUESTION:** PRD requires "handles JavaScript-rendered content"; shipped ingestion is pure httpx + BeautifulSoup with no headless browser. JS-rendered SPAs will return their skeleton HTML, not their post-hydration text. Reconcile as either (a) update PRD to remove JS rendering, or (b) accept as future work.
 
