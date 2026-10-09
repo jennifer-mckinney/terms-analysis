@@ -25,7 +25,7 @@ Development-time CI review tooling is exempt. This covers `anthropics/claude-cod
 The exemption holds only while all of these are true. If any one stops being true, the exemption lapses and HR1-HR4 and HR6 apply in full.
 
 1. **SHA-pinned action.** Every `uses:` of the action is pinned to a full 40-character commit SHA, not a tag or branch.
-2. **Read-only tool allowlist.** The review agent gets only read tools (`Read`, `Grep`, `Glob`), an edit permission limited to its own verdict file, and the inline-comment tool. `Bash`, `WebFetch` and `WebSearch` are disallowed. Reads outside the checkout and reads of credentials and `.git` are denied.
+2. **Read-only tool allowlist.** The review agent gets only read tools (`Read`, `Grep`, `Glob`), an edit permission limited to its own verdict file, and the inline-comment tool. `Bash`, `WebFetch` and `WebSearch` are disallowed. Reads are limited to the checkout plus the job's own pre-written input directory (`$RUNNER_TEMP/p9`: the PR diff, changed-file list and commit list); reads of `/proc`, `/sys`, credentials and `.git` are denied.
 3. **No product data beyond the PR diff.** The jobs run on GitHub-hosted runners. What reaches the API is the PR diff, the changed-file list, the commit list and tracked repository files the read tools open. User documents, the SQLite database and the legal-KB index and metadata are untracked (`.gitignore`) and are never in that checkout.
 4. **Not in the application.** The action and its API client are not in any `requirements*.txt` file and are not installed or imported by the backend or the UI.
 
