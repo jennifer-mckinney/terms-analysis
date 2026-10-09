@@ -1,28 +1,23 @@
 #!/usr/bin/env bash
 # regen-manifest.sh
-# Regenerate .claude/_governance-manifest.json with current SHA256 hashes for
-# the five tracked governance files. Use ONLY after an intentional principle
-# or governance change that has been reviewed via PR.
+# Regenerate the governance hash manifests with current SHA256 hashes:
+#   .claude/_governance-manifest.json        tracked; repo-relative entries
+#   .claude/_governance-manifest.local.json  untracked (gitignored); $HOME/ entries
+# The $HOME entries live only in the local manifest so the public repo never
+# publishes hashes of a developer's private files (#200). Use ONLY after an
+# intentional principle or governance change that has been reviewed via PR.
 #
 # Usage:
 #   scripts/governance/regen-manifest.sh          # interactive confirm
 #   scripts/governance/regen-manifest.sh --yes    # non-interactive
 #
 # Exit codes:
-#   0 - manifest written
-#   1 - user declined or a tracked file is missing
-#   2 - required tool unavailable
+#   0 - both manifests written and verify-hashes.sh accepts them
+#   1 - user declined, a listed file is missing, HOME is unset, or the
+#       written manifests fail verify-hashes.sh (round trip)
+#   2 - required tool unavailable or a write failed
 
 set -u
-
-if command -v sha256sum >/dev/null 2>&1; then
-    SHA_CMD="sha256sum"
-elif command -v shasum >/dev/null 2>&1; then
-    SHA_CMD="shasum -a 256"
-else
-    echo "ERROR: neither sha256sum nor shasum available on PATH" >&2
-    exit 2
-fi
 
 if ! command -v python3 >/dev/null 2>&1; then
     echo "ERROR: python3 required to emit JSON manifest" >&2
@@ -31,16 +26,20 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-MANIFEST="${REPO_ROOT}/.claude/_governance-manifest.json"
+TRACKED_REL=".claude/_governance-manifest.json"
+LOCAL_REL=".claude/_governance-manifest.local.json"
 
-# Tracked entries. Each row: <manifest_path>|<resolved_filesystem_path>|<note>
-# $HOME entries are recorded literally in the manifest and resolved at verify time.
-ENTRIES=(
-    ".claude/CLAUDE.md|${REPO_ROOT}/.claude/CLAUDE.md|Project governance charter."
-    ".claude/library/LIB-PRINCIPLES.md|${REPO_ROOT}/.claude/library/LIB-PRINCIPLES.md|LIB-PRINCIPLES P8 v2 baseline; single source of truth for role principles."
-    "\$HOME/.claude/CLAUDE.md|${HOME}/.claude/CLAUDE.md|Global user CLAUDE.md; changes here affect every project session."
-    "\$HOME/.claude/library/PEAS.md|${HOME}/.claude/library/PEAS.md|PEAS agent design framework reference."
-    ".claude/governance/required-gitignore.txt|${REPO_ROOT}/.claude/governance/required-gitignore.txt|Reviewer P9 F9 SSoT for required .gitignore patterns read by both pre-commit hook and CI workflow."
+# Entries. Each row: <manifest_path>|<note>
+# Repo-relative rows go to the tracked manifest; $HOME/ rows go to the local
+# manifest and are resolved against HOME at regen and verify time.
+REPO_ENTRIES=(
+    ".claude/CLAUDE.md|Project governance charter."
+    ".claude/library/LIB-PRINCIPLES.md|LIB-PRINCIPLES P8 v2 baseline; single source of truth for role principles."
+    ".claude/governance/required-gitignore.txt|Reviewer P9 F9 SSoT for required .gitignore patterns read by both pre-commit hook and CI workflow."
+)
+LOCAL_ENTRIES=(
+    "\$HOME/.claude/CLAUDE.md|Global user CLAUDE.md; changes here affect every project session."
+    "\$HOME/.claude/library/PEAS.md|PEAS agent design framework reference."
 )
 
 AUTO_YES=0
@@ -52,7 +51,7 @@ for arg in "$@"; do
 done
 
 if [ "${AUTO_YES}" -ne 1 ]; then
-    echo "This overwrites _governance-manifest.json - only run after an intentional governance change was reviewed. Continue? [y/N]"
+    echo "This overwrites _governance-manifest.json and _governance-manifest.local.json - only run after an intentional governance change was reviewed. Continue? [y/N]"
     read -r reply
     case "${reply}" in
         y|Y|yes|YES) ;;
@@ -60,72 +59,90 @@ if [ "${AUTO_YES}" -ne 1 ]; then
     esac
 fi
 
-# Verify every tracked file exists before we overwrite anything.
-for row in "${ENTRIES[@]}"; do
-    IFS='|' read -r _mpath fpath _note <<< "${row}"
-    if [ ! -f "${fpath}" ]; then
-        echo "ERROR: tracked file missing on disk: ${fpath}" >&2
-        exit 1
-    fi
-done
-
 TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-# Reviewer P9 (grumpy F4): drop the tab-delimited intermediate. Compute each
-# entry's hash + size in shell, then hand (mpath, hash, size, note) tuples
-# straight to python3 as CLI args. python3 emits valid JSON — no risk of a
-# note containing a literal tab breaking the round-trip.
-PY_ARGS=("${MANIFEST}" "${TS}")
-for row in "${ENTRIES[@]}"; do
-    IFS='|' read -r mpath fpath note <<< "${row}"
-    hash="$(${SHA_CMD} "${fpath}" | awk '{print $1}')"
-    size="$(wc -c < "${fpath}" | tr -d ' ')"
-    PY_ARGS+=("${mpath}" "${hash}" "${size}" "${note}")
+# Hand (scope, path, note) rows to python3 as argv; python3 hashes every file
+# before writing anything, then writes each manifest via temp file + rename.
+PY_ARGS=("${REPO_ROOT}" "${TRACKED_REL}" "${LOCAL_REL}" "${TS}")
+for row in "${REPO_ENTRIES[@]}"; do
+    IFS='|' read -r mpath note <<< "${row}"
+    PY_ARGS+=("repo" "${mpath}" "${note}")
+done
+for row in "${LOCAL_ENTRIES[@]}"; do
+    IFS='|' read -r mpath note <<< "${row}"
+    PY_ARGS+=("home" "${mpath}" "${note}")
 done
 
-python3 - "${PY_ARGS[@]}" <<'PY'
+python3 -I - "${PY_ARGS[@]}" <<'PY'
+import hashlib
 import json
+import os
 import sys
 
-manifest_path = sys.argv[1]
-ts = sys.argv[2]
-rest = sys.argv[3:]
-if len(rest) % 4 != 0:
-    print(
-        "regen-manifest.sh: internal error — entry args not a multiple of 4",
-        file=sys.stderr,
-    )
+HOME_PREFIX = "$HOME/"
+repo, tracked_rel, local_rel, ts = sys.argv[1:5]
+rest = sys.argv[5:]
+if len(rest) % 3 != 0:
+    print("regen-manifest.sh: internal error, entry args not a multiple of 3", file=sys.stderr)
     sys.exit(2)
 
-entries = []
-for i in range(0, len(rest), 4):
-    mpath, sha, size, note = rest[i], rest[i + 1], rest[i + 2], rest[i + 3]
-    entries.append(
-        {
-            "path": mpath,
-            "sha256": sha,
-            "size_bytes": int(size),
-            "recorded_at": ts,
-            "note": note,
-        }
-    )
+home = os.environ.get("HOME", "")
+groups = {"repo": [], "home": []}
+for i in range(0, len(rest), 3):
+    scope, mpath, note = rest[i], rest[i + 1], rest[i + 2]
+    if scope == "home":
+        if not os.path.isabs(home):
+            print("ERROR: HOME is not an absolute path; cannot resolve %s" % mpath, file=sys.stderr)
+            sys.exit(1)
+        fpath = os.path.join(home, mpath[len(HOME_PREFIX):])
+    else:
+        fpath = os.path.join(repo, mpath)
+    if not os.path.isfile(fpath):
+        print("ERROR: file missing on disk: %s" % mpath, file=sys.stderr)
+        sys.exit(1)
+    with open(fpath, "rb") as fh:
+        blob = fh.read()
+    groups[scope].append({
+        "path": mpath,
+        "sha256": hashlib.sha256(blob).hexdigest(),
+        "size_bytes": len(blob),
+        "recorded_at": ts,
+        "note": note,
+    })
 
-doc = {
-    "schema_version": 1,
-    "generated_at": ts,
-    "note": (
-        "Baseline captured after governance change. Paths beginning with "
-        "$HOME/ are resolved at verify time via shell expansion; "
-        "project-relative paths are resolved from the repo root."
-    ),
-    "entries": entries,
-}
-
-with open(manifest_path, "w") as f:
-    json.dump(doc, f, indent=2)
-    f.write("\n")
+docs = (
+    (tracked_rel, 0o644, groups["repo"],
+     "Baseline captured after governance change. Repo-relative paths only, "
+     "resolved from the repo root. Per-developer files are hashed in the "
+     "untracked local manifest (see scripts/governance/README.md)."),
+    (local_rel, 0o600, groups["home"],
+     "Untracked, per-developer manifest (gitignored). Entries resolve "
+     "against HOME at verify time. Never commit this file."),
+)
+try:
+    for rel, mode, entries, note in docs:
+        dest = os.path.join(repo, rel)
+        tmp = dest + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"schema_version": 1, "generated_at": ts, "note": note,
+                       "entries": entries}, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, dest)
+except OSError as exc:
+    print("ERROR: could not write manifest (%s)" % type(exc).__name__, file=sys.stderr)
+    sys.exit(2)
 PY
+rc=$?
+if [ "${rc}" -ne 0 ]; then
+    exit "${rc}"
+fi
 
-count="${#ENTRIES[@]}"
-echo "MANIFEST REGENERATED: ${count} entries"
+# Round trip: the reader's validator must accept what was just written.
+if ! bash "${SCRIPT_DIR}/verify-hashes.sh" >/dev/null; then
+    echo "ERROR: regenerated manifests fail verify-hashes.sh" >&2
+    exit 1
+fi
+
+echo "MANIFEST REGENERATED: ${#REPO_ENTRIES[@]} tracked entries (${TRACKED_REL}), ${#LOCAL_ENTRIES[@]} local entries (${LOCAL_REL})"
 exit 0

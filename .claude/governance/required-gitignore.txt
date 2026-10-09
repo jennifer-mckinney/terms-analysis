@@ -30,3 +30,4 @@ node_modules/
 .DS_Store
 *.db-journal
 *.db
+.claude/_governance-manifest.local.json
