@@ -1,245 +1,121 @@
-format: agent-optimized (2026-07-03)
-# terms-analysis — project identity, hard requirements, library index
+format: agent-optimized (refreshed 2026-10-10; replaces the 2026-07-03 version)
+# terms-analysis: project identity, hard requirements, index
 loads: auto
 scope: project
-xref: [[LIB-ARCH]] [[LIB-STACK]] [[LIB-LEGAL]] [[LIB-TEST]] [[LIB-API]] [[LIB-RULES]] [[LIB-EVAL]] [[LIB-CONTEXT]] [[LIB-VOICE]] [[LIB-PRINCIPLES]] [[docs/BRD_Terms_Policies_Reviewer.md]] [[docs/PRD_Terms_Policies_Reviewer.md]] [[PRODUCT.md]] [[_AUTOMATION/CLAUDE.md]]
+xref: [[LIB-ARCH]] [[LIB-STACK]] [[LIB-LEGAL]] [[LIB-TEST]] [[LIB-API]] [[LIB-RULES]] [[LIB-EVAL]] [[LIB-CONTEXT]] [[LIB-VOICE]] [[LIB-PRINCIPLES]] [[docs/BRD_Terms_Policies_Reviewer.md]] [[docs/PRD_Terms_Policies_Reviewer.md]] [[PRODUCT.md]]
+
+## resume-here
+
+- Current state and next actions: the newest `SESSION_HANDOFF_*.md` in the repo root. Read it first.
+- Execution pipeline and owner limits: `~/.claude/library/EXECUTION-PLAYBOOK.md`.
+- Settled plan (D1-D10, R1-R7, gate order G0 → GM → G1 → G1b → G2 → G2b → G3 → G4): `~/.claude/plans/as-my-principal-engineer-tidy-tulip.md`. Don't re-litigate it.
+- Live log for the day: `docs/evidence/<date>-status.md` (untracked).
+- Human-readable system overview: `docs/research/2026-10-09-system-playbook.md`.
 
 ## identity
 
 | Key | Value |
 |-----|-------|
-| Purpose | Analyze ToS/Privacy Policies for compliance risks via rule + LLM + RAG detection |
-| Stack | FastAPI backend, Streamlit UI (v2 primary, v1 legacy rollback), SQLite, LocalAI (Apertus-8B/EuroLLM-22B), numpy exhaustive search (legal-KB — not FAISS) |
-| Jurisdictions | 30 codes incl. US-CA (CCPA/CPRA), GDPR, PIPEDA, US-CO, US-CT, US-NY (full list in `schemas.py`) |
-| Risk method | IRP composite per finding: `clamp(0.5*(impact/5)+0.4*(likelihood/5)-0.3*(safeguard/5), 0, 1)`; seeded in `rules.py::_seed_irp`; requested from LLM; hybrid merge takes rule impact/likelihood + `safeguard=max(rule,llm)`; recomputed in `_compute_irp`; sort tier-first `(weight, irp_score, severity_rank)` all desc; falls back to severity weight for legacy findings |
-| Status | Beta — PR #4, #5, #34, #35 merged |
-
-xref: [[LIB-RULES#IRP]] [[LIB-CONTEXT]]
+| Purpose | Analyse ToS and privacy policies for compliance risk, using rule + LLM + RAG detection |
+| Stack | FastAPI backend; Streamlit UI (v2 primary, v1 legacy rollback; Vue 3 planned under D2/G4); SQLite; LocalAI (Apertus-8B, EuroLLM-22B); numpy exhaustive search for the legal KB (no FAISS, no ANN) |
+| Python | CI runs 3.11 (`ci.yml`); local dev is 3.14. Moving CI to 3.14 is #215, blocked by #265 |
+| Jurisdictions | 30 codes (full list in `schemas.py`); empty `jurisdictions=[]` means no filter |
+| Risk method | IRP composite per finding. Details: [[LIB-RULES#IRP]] |
+| Sibling repo | `legal-corpus-ingester` (PUBLIC, like this one). Corpus bundles feed `legal_kb.py`; `load_from_bundle` is still unwired (D9 / two silent failures) |
+| Hosting | Railway hosts the frontend (D10); railtail bridges to the local backend. Vercel is removed |
+| Review | P9 runs as CI jobs on every PR: `security-review` + `grumpy-review` in `.github/workflows/p9-review.yml` (#214). CRITICAL/HIGH/MEDIUM block; LOW/NIT are carded P3 (#218) |
 
 ## hard-requirements
 
-### HR1: open-source-only
-rule: all dependencies MUST be open source (Apache 2.0, MIT, BSD preferred)
-scope: product runtime/data path; dev-time CI review tooling exempt per docs/adr/0001-dependency-rules-scope-ci-review-tooling.md
+These identifiers mean different things in the ingester repo. Never cite a bare "HR7" across repos.
 
-### HR2: no-investor-lawsuit-vendors
-rule: no tools/services from companies facing investor lawsuits (excludes Meta-origin, e.g. FAISS)
-because: legal-KB vector index uses numpy exhaustive search instead
-scope: product runtime/data path; dev-time CI review tooling exempt per docs/adr/0001-dependency-rules-scope-ci-review-tooling.md
-
-### HR3: IRP-grade-A-or-higher
-rule: all dependencies MUST score IRP Grade A or higher
-scope: product runtime/data path; dev-time CI review tooling exempt per docs/adr/0001-dependency-rules-scope-ci-review-tooling.md
-
-### HR4: local-only-data
-rule: all data stays local; no external API calls
-scope: product runtime/data path (user documents, results, legal-KB data); CI review of repo source diffs exempt per docs/adr/0001-dependency-rules-scope-ci-review-tooling.md
-
-### HR5: LLM-fallback-to-rules
-rule: LLM failures MUST fall back to rule-only findings with reduced confidence
-
-### HR6: no-openai-local-LLM-only
-rule: no OpenAI dependency; LLM inference is local-only via LocalAI (EuroLLM-22B for EU/legal, Apertus-8B for multilingual/world)
-scope: product runtime/data path; dev-time CI review tooling exempt per docs/adr/0001-dependency-rules-scope-ci-review-tooling.md
-
-### HR7: HITL-threshold
-rule: confidence < 0.80 triggers human-in-the-loop review
-
-### HR8: rule-confidence-clamp
-rule: rule confidence (active path, `_confidence_rules_based`) clamped to [0.90, 0.95]
-
-### HR9: risk-grade-thresholds
-rule: risk scores (0-10, higher=worse) map to grades: A (<3.5), A- (3.5-4.5), B (4.5-5.5), B- (5.5-6.5), C+ (6.5-7.5), C (7.5-8.5), D+ (>=8.5)
+- HR1 open-source-only: Apache-2.0, MIT or BSD preferred.
+- HR2 no vendors facing investor lawsuits, so no Meta-origin dependencies (FAISS excluded). Split HR2a (vendor, zero hops) / HR2b (licence, not origin) is approved (plan R1).
+- HR3 every dependency at IRP grade A or higher (`/dependency-audit`).
+- HR4 local-only data. Amended by D10 for Railway; see the plan.
+- HR5 an LLM failure falls back to rule-only findings with reduced confidence. The LLM answer is validated by `schemas.LLMAnswer` inside `analyze()`.
+- HR6 no OpenAI; LocalAI only. EuroLLM-22B for EU/legal, Apertus-8B for multilingual.
+- HR7 confidence below 0.80 triggers human-in-the-loop review.
+- HR8 rule confidence clamped to [0.90, 0.95]. Scheduled for replacement by per-rule calibrated precision (plan Workstream I, G2b).
+- HR9 grades: A <3.5, A- <4.5, B <5.5, B- <6.5, C+ <7.5, C <8.5, D+ >=8.5.
+- Model bars (screen before any research): no Meta, no Chinese-origin, no VC-funded LLM house, no ANN index. Memory: `model_constraint_stack`.
+- ADR 0001 (`docs/adr/0001-dependency-rules-scope-ci-review-tooling.md`): HR1-HR4 and HR6 cover the PRODUCT. CI review tooling (claude-code-action, CodeQL, Copilot) is exempt.
 
 ## project-map
 
 | Path | Purpose |
 |------|---------|
-| `src/webapp/` | Streamlit UI: `app_streamlit_v2.py` (primary, issue #19) + `app_streamlit_legacy.py` (v1 rollback via `STREAMLIT_UI=v1`) |
-| `src/backend/app/` | FastAPI: `main.py` (25 endpoints + `/health`), `services/`, `schemas.py`, `models.py` |
-| `src/backend/app/services/` | Core: `rules.py`, `analyzer.py`, `validation.py`, `ingest.py`, `localai.py`, `embedding.py`, `legal_kb.py`, `diffing.py`, `prompts.py` |
-| `src/backend/tests/` | pytest suite (unit tests, 25 files; measured 2026-10-07 on `feat/g0-6-coverage-precision`: 836 passed, 98.17% line coverage; branch coverage not gated yet, see G3) |
-| `tests/` | Root integration/E2E tests separate from unit tests in `src/backend/tests/`; 4 files: `test_api_endpoints.py`, `test_batch_analysis.py`, `test_child_context_simplification.py`, `test_quick_mode.py` |
-| `data/legal_corpus/` | Legal-KB source text (tracked; placeholder pending real statute ingestion — see `.claude/skills/legal-kb`) |
-| `src/backend/evaluation/` | Gold dataset + F1/Kappa scripts |
-| `docs/` | `DESIGN.md`, `TODO.md`, `reports/`, `specs/`, `wireframes/` |
-| `docs/plans/` | Architecture analysis, agent/skills audit, roadmap |
+| `src/webapp/` | Streamlit `app_streamlit_v2.py` (primary) and `app_streamlit_legacy.py` (`STREAMLIT_UI=v1`) |
+| `src/backend/app/` | FastAPI `main.py`, `schemas.py`, `models.py`, `config.py` (fail-closed validators), `services/` (rules, analyzer, validation, ingest, localai, embedding, legal_kb, diffing, prompts) |
+| `src/backend/app/services/ingest.py` | SSRF-safe URL fetcher (#258): resolve once, blocklist every address, pin the connected one, identity-only encoding, byte cap, one total deadline. Typed `UrlFetchError.reason` |
+| `src/backend/tests/` | pytest suite. CI enforces a 98% coverage floor at precision 2 (#208) |
+| `tests/` | root integration and E2E tests |
+| `.githooks/pre-commit` | gitignore SSoT, graveyard, case-insensitive `.env` guard, evidence leak guard (check 4). Install with `scripts/install-hooks.sh`. There is no pre-push hook any more |
+| `.github/workflows/` | `ci.yml` (lint, test, evidence-scan, audit; job timeouts; least-privilege permissions), `p9-review.yml` (CI reviews), `gitignore-enforcement.yml`, `board-sync.yml` (#219; needs the `PROJECT_TOKEN` secret) |
+| `.claude/governance/` | `required-gitignore.txt`, `personal-path-patterns.txt` (#145), `evidence-leak-regex.txt` + `leak-vectors.tsv` (#192) |
+| `scripts/governance/` | `leak_scan.py` + `scan-evidence-leaks.sh` (#192), `verify-hashes.sh`, `regen-manifest.sh` (regen needs owner intent) |
+| `docs/adr/` | ADR 0001 (dependency rules scope) |
+| `docs/evidence/` | review, design and status evidence. UNTRACKED. Never commit it; the evidence-scan job and pre-commit check 4 refuse local paths |
+| `docs/plans/`, `docs/specs/`, `docs/reports/`, `docs/research/` | plans, specs, reports, research |
 
 ## commands
 
 | Task | Command |
 |------|---------|
-| Run backend | `cd src/backend && uvicorn app.main:app --reload` |
-| Run frontend | `cd src/webapp && streamlit run app_streamlit_v2.py --server.port 8501` |
-| Run both | `./run.sh` |
-| Run tests | `cd src/backend && python -m pytest -v` |
-| Run tests + coverage | `cd src/backend && python -m pytest --cov=app --cov-report=term-missing -v` |
-| Run evaluation | `cd src/backend && python scripts/evaluate.py` |
+| Backend | `cd src/backend && uvicorn app.main:app --reload` |
+| Frontend | `cd src/webapp && streamlit run app_streamlit_v2.py --server.port 8501` |
+| Both | `./run.sh` |
+| Tests as CI runs them | copy the pytest line from `.github/workflows/ci.yml` verbatim and run it from `src/backend` on a Python 3.11 venv |
+| Evaluation | `cd src/backend && python scripts/evaluate.py` |
+| Governance hashes | `bash scripts/governance/verify-hashes.sh` |
+| Evidence leak scan | `bash scripts/governance/scan-evidence-leaks.sh "$(git rev-parse --show-toplevel)"` |
+| Install hooks | `bash scripts/install-hooks.sh` (sets `core.hooksPath=.githooks`) |
 
-## git-conventions
+## git-and-review
 
-### G1: commit-prefixes
-rule: use `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `style:`
+- G1 prefixes: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `style:`, `chore:`. Subject under 72 characters. Reference the issue. Rules: `.claude/rules/code-style.md`.
+- G2 agents never work on `main`. Each lane has its own worktree, `../ta-<card>` or `../lci-<card>`, and a branch cut on GitHub from main and pushed before work starts.
+- G3 merge commits only. No rebase, no force-push, no `--no-verify`.
+- G4 pipeline per card: design gate (new mechanisms only) → `test-author` (red commit) → `coder` → push + PR → CI reviews → fix rounds → ready → owner merges. After each merge the lead merges main into dependent branches.
+- G5 `coder` and `test-author` always run on their defined model (opus), never Sonnet. Sonnet is for the PM and board work only.
+- G6 fixes change existing files only (R1). New mechanisms become new cards. No hard-coded values (F13).
+- G7 bot commits on our branches are owner-ruled; the default is to absorb them with `merge -s ours`.
+- G8 push: agents push feature branches freely and open PRs (owner authorisations A1, A3). Never `main`. No local signoff exists any more.
+- G9 "ready to merge #N" requires CI green on the exact `headRefOid`, `mergeStateStatus` CLEAN, and every review thread resolved after checking it against the code (reply with the fixing sha or the card number). Merging is owner-only.
+- G10 blocking threshold (owner, 2026-10-09): CRITICAL, HIGH and MEDIUM block and are fixed; LOW and NIT are filed as P3 cards and their threads resolved. Copilot threads are judged the same way. Security findings that touch secrets or access are always fixed.
+- G11 standard CI/CD over custom machinery: GitHub-hosted Actions, required checks, vendor-documented patterns. Check the docs and decide; don't build bespoke gates.
+- G12 validate by disk: an agent report is not evidence. Read `git log`, `git show --stat`, test output and `gh pr view` before repeating a claim.
 
-### G2: active-branch
-rule: active development branch is `claude/issue-19-arch-docs-followup`; prior branches merged: `claude/analyze-project-1Q21W`, `claude/improve-test-coverage-DGT1c`, `claude/terms-analysis-setup-fpvabq` (PR #5), `claude/issue-19-plain-language-redesign` (PR #34)
+## p9-governance
 
-## session-outcomes-2026-07-03
-
-### SO1: PR34-shipped
-rule: PR #34 (`claude/issue-19-plain-language-redesign`) landed across 4 commits — `e4fd706` -> `2626e2b` -> `671d3e5` -> `b5ea947`; earlier figures (873 tests / 98.06% at PR #34 merge; 828 tests / "98%" on 2026-07-31) were rounded or unverified: that 2026-07-31 baseline measured 97.58% (2187 stmts, 53 missed) and passed only because the gate rounded at precision 0 (#177). Measured baseline (2026-10-07, `feat/g0-6-coverage-precision`, CI command with `--cov-precision=2`): **836 passed, 98.17% line coverage** (2187 stmts, 40 missed); branch coverage is not gated yet (G3)
-
-### SO2: IRP-scoring-shipped
-rule: `impact`, `likelihood`, `safeguard_score`, `irp_score` fields live on `Finding`; was "planned" in prior LIB-ARCH text
-detail: `analyzer.py::_compute_irp` computes composite; `rules.py::_seed_irp` seeds from `_CATEGORY_IRP_DEFAULTS` (38 categories); LLM prompts request the three fields; hybrid merge takes rule impact/likelihood + `safeguard=max(rule,llm)`; sort tier-first `(weight, irp_score, severity_rank)` all desc; context weight leads
-xref: [[LIB-RULES#IRP]]
-
-### SO3: context-chip-taxonomy-shipped
-rule: 5 chips aligned to BRD segments — `want_understand`, `for_child`, `for_care`, `for_work`, `just_curious`
-weights: 1.0 baseline / 2.0 boosted / 2.5 priority / 3.0 signature; multi-select sums, capped at 3.0
-xref: [[LIB-CONTEXT]]
-
-### SO4: domain-grouped-results
-rule: findings group into 4 fixed domains — `Data` (collection), `Data use`, `Terms of use`, `Privacy rights`; `analyzer._group_by_domain` maps ~50 categories to these 4 buckets
-hardware_scope: camera/mic/contacts/location = scope caveat only, NEVER chip or domain group with findings
-xref: [[LIB-PRINCIPLES#P4]] [[LIB-VOICE#V11]]
-
-### SO5: global-tool-contract
-rule: empty `jurisdictions=[]` = "no filter" mode across rules + LLM post-filter + Streamlit resolution
-forbidden: US-CA + GDPR default fallback anywhere
-default_ui: location dropdowns blank (`index=None`)
-
-### SO6: schema-derived-allowlists
-rule: `_VALID_CHIPS` and `_VALID_JURISDICTIONS` in `main.py` derived at module load via `frozenset(get_args(ContextChip))`; `schemas.CATEGORIES` is canonical frozenset for category strings; `context.py` and `analyzer.py` validate category-keyed dicts against it at import time
-because: future drift fails at import, not at CI review
-xref: [[.claude/rules/testing.md#R1]]
-
-### SO7: streamlit-v2-feature-flag
-rule: v2 shipped behind `STREAMLIT_UI=v2` in `run.sh`; `app_streamlit_legacy.py` retained as rollback
-detail: v2 is ~972 lines, teal palette, two-view state, tabbed input (link/text/file), 5 multi-select context option cards, hover-tooltips, 4 domain sections from `top_by_domain`, always-visible scope box, dynamic action items from `AnalysisPayload.action_items`
-
-### SO8: infer-endpoint
-rule: new `POST /infer` — accepts URL and/or text; returns TLD-based jurisdiction + doc_type + industry signals
-impl: `@lru_cache` on hot paths; pre-compiled regexes; observability logging
-
-### SO10: shell-native-test-scripts
-rule: two shell scripts mirror Python test counterparts and kept side-by-side for comparison
-files: `scripts/testing/simplification-check.sh` (14 assertions, live app_streamlit_v2.py source, streamlit stubbed headless) + `scripts/testing/smoke-test.sh` (9 live HTTP tests via curl+jq)
-verify_scopes: `verify.sh simplification` + `verify.sh smoke-live` (both exec directly, bypass pytest/summarizer)
-key_diff: .py counterparts test copied/mocked function; .sh scripts test live source — run both to catch divergence
-p9_findings_fixed: F1-F5 security + G1-G5 grumpy (all fixed before push 2026-07-03)
-coverage_matrix: `docs/research/test-coverage-matrix.md` — 20 journeys mapped, 2 CRITICAL gaps (rule categories, HITL threshold)
-xref: [[.claude/rules/testing.md]] [[LIB-PRINCIPLES#P9]]
-
-### SO9: regressions-file
-rule: `test_regressions_pr34.py` — 42 tests (post-PR-#87 count, verified via `pytest --collect-only`) across 10 test classes (Categories A-I + JurisdictionFilterBoundary) covering cross-endpoint consistency via `typing.get_args()` runtime iteration, schema-Literal allowlist parity, XSS defense-in-depth (blocks `javascript:`, `data:`, `vbscript:` schemes), malformed inputs, ReDoS canary on `inference.py`, domain-grouping edges, sort stability, schema validator edges (H), inference edges (I)
-xref: [[.claude/rules/testing.md]]
-
-## session-outcomes-2026-07-04
-
-### SO11: p9-loop-pattern-active
-rule: every PR to `main` runs the parallel security+grumpy review loop. A CRITICAL, HIGH or MEDIUM finding triggers a fix-Coder dispatch; iterate until neither job reports a blocking finding. LOW and NIT findings are posted and carded, not chased (owner, 2026-10-09)
-codified: since 2026-10-09 (#191) the loop runs in CI: `.github/workflows/p9-review.yml` jobs `security-review` + `grumpy-review`, verdict contract in `automations/p9-pre-push.md`
-because: user directive 2026-07-04 made P9 zero-tolerance; narrowed 2026-10-09 to CRITICAL/HIGH/MEDIUM after Anthropic guidance and our own round data showed nit-chasing drove over-engineering
-whack-a-mole warning: when name-based deny-lists keep growing across rounds, switch to structural fix (pattern-based rules, schema-driven ordering, input normalization). Two structural-fix wins this session:
-  - SO12 F2 (chip order): switched `_ACTION_ITEMS_BY_CHIP.items()` → `typing.get_args(ContextChip)`
-  - ingester rounds 6-9: added `_REDACT_SUFFIXES` + `_normalize_key(camelCase→snake_case)` instead of growing exact-name list further
-xref: [[LIB-PRINCIPLES#P9]] [[automations/p9-pre-push.md]]
-
-### SO12: revamp-branch-shipped
-rule: `revamp/results-report-card` pushed to `origin/revamp/results-report-card` at `ae3dda2`. 4 P9 loop rounds converged
-commits: `569260b` (st.form intake), `a4b4c66` (chip-tune action_items), `f1d8ca3` (corpus plans landed), `9bc3dbc` (grumpy F1-F3 fixes: short-circuit + schema-order + real dedupe), `3db1d0e` (grumpy F4: drop stale context arg from call_infer), `f5065cd` (mirror P9 hook), `ae3dda2` (P9_ENFORCEMENT_GUIDE.md updated for hard-gate)
-detail: `/infer` handler verified to ignore context arg (main.py:340-349, inference.py:535) — arg dropped from call_infer signature + docstring explains why
-xref: [[automations/p9-pre-push.md]] [[SO11]]
-
-### SO13: p9-gate-in-ci
-rule: P9 is enforced in CI (2026-10-09, #191, superseding the 2026-07-04 local hook). `.github/workflows/p9-review.yml` runs `security-review` + `grumpy-review` on `pull_request` to `main`; each job runs `anthropics/claude-code-action` (SHA-pinned) with its brief from `.github/p9/` and an exact tool allowlist (Read/Grep/Glob, Write scoped to `p9-verdict.json`, the inline PR-comment MCP tool; no Bash), reads a pre-written diff, comments inline on findings, writes `p9-verdict.json`, and fails unless `.github/p9/check_verdict.py` sees verdict PASS with `findings: []`. Branch protection pending: the owner makes both jobs required checks on `main` after the first green run
-retired: `.githooks/pre-push` + its `.sha256` pin, `.git/reviews/<sha>.signoff.json` signoffs, `.github/workflows/enforce-p9-review.yml`, `scripts/ci/p9-sibling-parity.sh` and the #175 hook-only test suites
-existing: `.githooks/pre-commit` unchanged (project-specific gitignore-SSoT + graveyard + case-insensitive .env guards); `scripts/install-hooks.sh` still sets `core.hooksPath=.githooks` for it
-owner_steps: add the `ANTHROPIC_API_KEY` repo secret; after the first green run, require `security-review` + `grumpy-review` in branch protection
-docs: `automations/p9-pre-push.md` + `docs/P9_ENFORCEMENT_GUIDE.md` + `docs/DEV_SETUP.md` (updated 2026-10-09)
-xref: [[SO11]]
-
-### SO14: sibling-project-legal-corpus-ingester
-rule: sibling project `~/<projects>/legal-corpus-ingester/` bootstrapped 2026-07-04. Phase 0.1 Tasks 1-40 complete and pushed at `459a1b8`.
-remote: `jennifer-mckinney/legal-corpus-ingester` (private)
-plan: `docs/plans/2026-07-04-legal-corpus-ingester.md` (this repo) — complete; Phase 1 EU plan at `docs/plans/2026-07-04-legal-corpus-ingester-phase1-EU.md`
-consumer contract: `src/backend/app/services/legal_kb.py` — consumes corpus bundles from ingester per plan Task 28
-xref: [[docs/plans/2026-07-04-legal-corpus-ingester.md]] [[docs/plans/2026-07-04-legal-corpus-ingester-phase1-EU.md]]
-
-## session-outcomes-2026-07-04b
-
-### SO15: ingester-phase-01-complete
-rule: legal-corpus-ingester Phase 0.1 Tasks 1-40 all complete and pushed at HEAD `459a1b8`.
-phase-00: P1-P10 (bootstrapping, governance, CI skeleton, fetcher, cleaner, chunker, embedder, publisher, pipeline orchestrator, tools/agents/skills)
-phase-01: T1-T40 (VCR cassettes, snapshot tests, retention policy, CLI subcommands audit-license/validate-round-trip/prune/refresh, Docker, self-hosted runner, weekly refresh workflow, approval expiry watcher, VCR drift canary, nightly health check)
-bugs-fixed: 10 GitHub issues (Groups A-D) — EXIT_NO_SOURCES, SHA-pinned actions, duplicate-issue guards, sha256 validation, ModuleNotFoundError narrowing, retrieve truthiness check, --offline flag, VCR integration test, consumer stub test
-next: Phase 1 EU cluster ingestion (GDPR + AI Act + DSA + Data Act + DMA) per `docs/plans/2026-07-04-legal-corpus-ingester-phase1-EU.md`
-xref: [[SO14]]
-
-### SO16: ingester-ci-venv-fix
-rule: `.github/workflows/ci.yml` test step had no guard for missing `.venv/bin/activate`; caused CI failure on `a8365d5`. Fixed at `9db68f3` — now handled in Phase 0.1 Task 2 pyproject setup.
-status: RESOLVED — historical note only
-
-## reference-library
-
-Access via `@.claude/library/<file>` when deeper context is needed.
-
-| Key | File | Use When |
-|-----|------|----------|
-| **LIB-ARCH** | `@.claude/library/LIB-ARCH.md` | Architecture, data flow, failure modes, RAG pipeline |
-| **LIB-STACK** | `@.claude/library/LIB-STACK.md` | Dependencies, versions, config, approved tools |
-| **LIB-LEGAL** | `@.claude/library/LIB-LEGAL.md` | Legal LLM/embedding models, RAG architecture, legal corpora |
-| **LIB-TEST** | `@.claude/library/LIB-TEST.md` | Test coverage, implementation plan |
-| **LIB-API** | `@.claude/library/LIB-API.md` | API endpoints, request/response contracts |
-| **LIB-RULES** | `@.claude/library/LIB-RULES.md` | Rule engine (~50 categories/64 patterns), confidence/risk-score, IRP |
-| **LIB-EVAL** | `@.claude/library/LIB-EVAL.md` | Rubric, F1/Kappa, grading thresholds |
-| **LIB-CONTEXT** | `@.claude/library/LIB-CONTEXT.md` | Context chip taxonomy, weight tiers, sort semantics, verdict copy |
-| **LIB-VOICE** | `@.claude/library/LIB-VOICE.md` | Two-voice copy, no-em-dash, scope-honesty gap |
-| **LIB-PRINCIPLES** | `@.claude/library/LIB-PRINCIPLES.md` | Governance principles P1-P9 (P8 agent-separation, P9 PR review in CI) |
+- P9 (LIB-PRINCIPLES): independent security and code-quality review before code reaches main. Since 2026-10-09 it runs in CI (`p9-review.yml`, claude-code-action on Opus, read-only tool allowlist, deny rules for `/proc`, `.git` and credentials). Reviews cost API credit; a `billing_error` shows as `is_error:true`, $0, under 1 s.
+- Retired on 2026-10-09 (#214): the local pre-push hard gate, `.git/reviews/*.signoff.json`, owner push scripts, evidence comments, `automations/p9-pre-push.md`.
+- Required checks on `main` today: `Lint (ruff)`, `Test (pytest + coverage)`, `Dependency audit (pip-audit)`. `security-review`, `grumpy-review` and `Evidence leak scan (docs/evidence)` are NOT required yet (owner action; a red review does not block the merge button until then). `main` requires conversation resolution, so an unresolved thread blocks the merge.
+- Round cap: a third review FAIL on a card goes to the owner (re-scope, or ship LOW/NIT with cards).
 
 ## governance-monitoring
 
-### G1: injection-consistency
-script: `~/.claude/scripts/verify-injection.sh`
-reads: `~/.claude/session-start.log`
-gate: confirms LIB-PRINCIPLES + PEAS + global CLAUDE.md + project CLAUDE.md appeared in most recent session-start injection
-exit_codes: 0=ok, 1=drift-missing-file, 2=no-matching-entry, 3=no-log, 4=no-jq
-run_from: project root
-because: guards against silent hook failure or misconfiguration
-xref: [[LIB-PRINCIPLES#P8]] [[$HOME/.claude/CLAUDE.md#session-start-governance-chain]]
+- G1 injection: `~/.claude/scripts/verify-injection.sh`, which reads `~/.claude/session-start.log`.
+- G2 content: `.claude/_governance-manifest.json` tracks this file, LIB-PRINCIPLES, `required-gitignore.txt` and (until #200 lands) the global CLAUDE.md and PEAS. Run `verify-hashes.sh`. Regenerate only with owner intent, as part of a reviewed PR.
+- G3 periodic "is it wired" pass. Reviews catch diffs, not absences, so grep for callers of every public entry point and watch for success paths that can't tell "nothing to do" from "not wired". Automating this is #224.
 
-### G2: content-consistency
-manifest: `.claude/_governance-manifest.json`
-tracks: SHA256 of `.claude/CLAUDE.md`, `.claude/library/LIB-PRINCIPLES.md`, `$HOME/.claude/CLAUDE.md`, `$HOME/.claude/library/PEAS.md`
-verify: `scripts/governance/verify-hashes.sh` — exit 0 ok, 1 drift, 2 manifest-missing, 3 tracked-file-missing
-regen: `scripts/governance/regen-manifest.sh` — requires explicit intent (`y/N` prompt or `--yes` flag)
-regen_policy: only after intentional governance-file change reviewed via PR
-because: catches silent governance drift between sessions
-xref: [[LIB-PRINCIPLES#P8]]
+## reference-library
 
-### G3: pr-independent-review
-rule: enforce LIB-PRINCIPLES P9 — every PR to `main` gets security-engineer + grumpy-developer reviews in CI. A CRITICAL, HIGH or MEDIUM finding from either triggers a fix-Coder + new push until neither reports a blocking finding; LOW and NIT are carded (owner, 2026-10-09)
-automation: `.github/workflows/p9-review.yml` jobs `security-review` + `grumpy-review`; required checks on `main` pending owner setup after the first green run (see [[SO11]] [[SO13]])
-gate: any CRITICAL/HIGH/MEDIUM finding (`BLOCKING_SEVERITIES` in `.github/p9/check_verdict.py`), or a missing/unparseable verdict, fails the job (which blocks merge once the checks are required); only the owner can waive
-xref: [[LIB-PRINCIPLES#P9]] [[SO11]] [[SO13]] [[automations/p9-pre-push.md]]
+| Key | File | Use when |
+|-----|------|----------|
+| LIB-ARCH | `@.claude/library/LIB-ARCH.md` | architecture, data flow, RAG pipeline |
+| LIB-STACK | `@.claude/library/LIB-STACK.md` | dependencies, versions, approved tools |
+| LIB-LEGAL | `@.claude/library/LIB-LEGAL.md` | legal models, corpora |
+| LIB-TEST | `@.claude/library/LIB-TEST.md` | test coverage plan |
+| LIB-API | `@.claude/library/LIB-API.md` | endpoint contracts |
+| LIB-RULES | `@.claude/library/LIB-RULES.md` | rule engine, confidence, IRP |
+| LIB-EVAL | `@.claude/library/LIB-EVAL.md` | rubric, F1/Kappa |
+| LIB-CONTEXT | `@.claude/library/LIB-CONTEXT.md` | context chips, weights, sort |
+| LIB-VOICE | `@.claude/library/LIB-VOICE.md` | copy rules |
+| LIB-PRINCIPLES | `@.claude/library/LIB-PRINCIPLES.md` | P1-P9 governance (P7 attribution, P8 roles, P9 review) |
 
-## plans-and-analysis
-
-| Document | Path | Purpose |
-|----------|------|---------|
-| Data Integrity & Architecture | `docs/plans/data-integrity-architecture-analysis.md` | Pipeline integrity audit, current→future state, gaps (P0-P3) |
-| Agent & Skills Audit | `docs/plans/agent-skills-surface-area-audit.md` | Skills inventory, PEAS per skill, subagent patterns, gap analysis |
+History of shipped work before 2026-10 (PR #34/#35, IRP, chips, `/infer`, the v2 UI): git log and `docs/reports/`. Don't restate it here.
 
 ## skills
 
-| Skill | Trigger | Purpose |
-|-------|---------|---------|
-| `/test-suite` | "run tests", "check coverage" | Run pytest + coverage, analyze failures, report gaps |
-| `/write-tests` | "write tests for X", "add coverage" | Guided workflow: read source → plan cases → write tests → verify |
-| `/evaluate` | "run evaluation", "check F1" | Run gold dataset evaluation, report F1/Kappa vs targets |
-| `/review` | "review this", "check changes" | Code quality review against project conventions |
-| `/webapp-testing` | "test the webapp", "browser test" | Playwright-based frontend + API testing |
-| `/dependency-audit` | "audit dependency", "check license" | IRP-score a dependency against hard requirements |
-| `/legal-kb` | "update legal corpus", "add jurisdiction" | Manage legal knowledge base for RAG |
-| `/ralph-loop` | "iterate on X", "loop until done" | Self-referential dev loop until completion promise met |
+`/test-suite`, `/write-tests`, `/evaluate`, `/review`, `/webapp-testing`, `/dependency-audit`, `/legal-kb`, `/ralph-loop`. Descriptions are in each skill's SKILL.md.
