@@ -83,7 +83,8 @@ HOSTILE_TEXT = {
 # Fake gh: logs every call, answers by GraphQL operation name or subcommand.
 # FAKE_GH_STATE maps a kind (operation name, or "item-edit") to a response:
 # {"stdout": str, "stderr": str, "rc": int, "sleep": float, "big": int}.
-# BoardSyncAddItem with no stdout echoes an item id built from the content id.
+# BoardSyncAddItem with no stdout echoes an item id built from the content id;
+# adds and item-edits succeed by default.
 FAKE_GH = r'''
 import json, os, re, sys, time
 state = json.loads(open(os.environ["FAKE_GH_STATE"], encoding="utf-8").read())
@@ -100,7 +101,9 @@ if args[:2] == ["api", "graphql"]:
     kind = match.group(2) if match else "anonymous"
 elif args[:2] == ["project", "item-edit"]:
     kind = "item-edit"
-resp = state.get(kind, {"rc": 97, "stderr": "fake gh: unexpected call " + kind})
+# Adds and edits succeed unless a test scripts them; anything else must be scripted.
+defaults = {"BoardSyncAddItem": {}, "item-edit": {}}
+resp = state.get(kind, defaults.get(kind, {"rc": 97, "stderr": "fake gh: unexpected call " + kind}))
 if resp.get("sleep"):
     time.sleep(resp["sleep"])
 out = resp.get("stdout")
@@ -388,6 +391,27 @@ def test_unparseable_config_fails_closed(tmp_path: Path, content: str) -> None:
     assert "config" in proc.stderr
 
 
+def test_duplicate_key_in_an_otherwise_valid_config_fails_closed(tmp_path: Path) -> None:
+    env = Env(tmp_path)
+    cfg = tmp_path / "config.json"
+    valid = json.dumps(_real_config())
+    cfg.write_text('{"status_field": "Shadowed", ' + valid[1:], encoding="utf-8")
+    proc = _run("plan", env.env("issues", _issue_event("opened")), cfg)
+    assert proc.returncode == EXIT_INVALID
+    assert "config" in proc.stderr
+
+
+def test_duplicate_key_in_the_event_payload_fails_closed(tmp_path: Path) -> None:
+    env = Env(tmp_path)
+    run_env = env.env("issues", {})
+    body = json.dumps(_issue_event("closed", "not_planned"))
+    env.event_file.write_text('{"action": "opened", ' + body[1:], encoding="utf-8")
+    proc = _run("plan", run_env)
+    assert proc.returncode == EXIT_INVALID
+    assert "payload" in proc.stderr
+    assert env.outputs() == {}
+
+
 def test_missing_config_fails_closed(tmp_path: Path) -> None:
     env = Env(tmp_path)
     proc = _run("plan", env.env("issues", _issue_event("opened")), tmp_path / "absent.json")
@@ -669,6 +693,17 @@ def test_apply_reports_the_github_error_text(tmp_path: Path) -> None:
     env.state["BoardSyncProject"] = GH_FAILURES["nonzero-exit"]
     proc = _apply(env, "issues", _issue_event("closed", "not_planned"))
     assert "Bad credentials" in proc.stderr
+
+
+def test_apply_fails_on_graphql_errors_even_with_partial_data(tmp_path: Path) -> None:
+    env = Env(tmp_path)
+    doc = Board().response()
+    doc["errors"] = [{"message": "Resource not accessible by personal access token"}]
+    env.state["BoardSyncProject"] = _ok(doc)
+    proc = _apply(env, "issues", _issue_event("closed", "not_planned"))
+    assert proc.returncode == EXIT_FAILED
+    assert "Resource not accessible" in proc.stderr
+    assert env.edits() == []
 
 
 def test_apply_times_out_a_hanging_gh(tmp_path: Path) -> None:
