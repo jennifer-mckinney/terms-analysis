@@ -230,7 +230,7 @@ gh repo create jennifer-mckinney/legal-corpus-ingester \
   --add-readme=false
 ```
 
-Expected: repo created, local clone at `~/Documents/…/01_Claude_Projects/legal-corpus-ingester`.
+Expected: repo created, local clone at `~/<projects>/legal-corpus-ingester`.
 
 **Step 3: Verify remote**
 
@@ -1239,7 +1239,7 @@ Phase 1 (EU cluster), Phase 2 (US federal), Phase 3 (US state), Phase 4 (APAC + 
 **Step 1: Create directory and initialize git**
 
 ```bash
-cd ~/Documents/05_Technical_Development/01_AUTOMATION/01_Claude_Projects
+cd ~/<projects>
 mkdir legal-corpus-ingester
 cd legal-corpus-ingester
 git init
