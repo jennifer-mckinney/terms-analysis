@@ -29,14 +29,14 @@ Home-path vectors are assembled at runtime so this file is not a leak itself.
 """
 from __future__ import annotations
 
+import io
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tarfile
-import io
-import json
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -234,9 +234,18 @@ BLOCK_ROWS = [
     ("slash-run", "file://host/" + "Users" + "//x"),
     ("slash-run", "file://srv/" + "home" + "//x"),
     ("slash-run", "see file://nas/" + "USERS" + "///bob/x"),  # case + longer run
-    ("slash-run", "file://srv/" + "Users" + "/​/bob"),  # Cf hides the run
+    ("slash-run", "file://srv/" + "Users" + "/\u200b/bob"),  # Cf hides the run
     ("slash-run", "PATH=/usr/bin:/" + "Users" + "//bob/bin"),  # list item with a run
     ("slash-run", "PATH=bin:/" + "home" + "//bob"),
+    # PR #210 security LOW (owner over-block policy): a home path glued to a
+    # compiler or linker flag has a word character right before the root.
+    ("glued-flag", "-I" + home("Users", "bob", "")),
+    ("glued-flag", "-L" + home("home", "bob", "")),
+    ("glued-flag", "-isystem" + home("Users", "bob", "")),
+    ("glued-flag", "--prefix=" + home("Users", "bob", "")),
+    ("glued-flag", "-Wl,-rpath," + home("home", "bob", "")),
+    ("glued-flag", "cc -I" + home("Users", "bob", "/include") + " x.c"),  # in a command line
+    ("glued-flag", "-L" + home("HOME", "bob", "//lib")),  # case + slash run
 ]
 
 ALLOW_ROWS = [
@@ -258,6 +267,9 @@ ALLOW_ROWS = [
     ("slash-run", "/" + "home" + "//<user>/x"),
     ("slash-run", "// " + "Users" + "/alice is a comment, not a path"),
     ("slash-run", "src//" + "home" + "/x"),  # relative with a run: no anchor
+    ("glued-flag", "-I/usr/include"),  # flags with no home path stay allowed
+    ("glued-flag", "-L/opt/lib --prefix=/usr/local"),
+    ("glued-flag", "-I" + "/" + "Users" + "/<name>/include"),  # placeholder
 ]
 
 BLOCK_VECTORS = [v for _, v in BLOCK_ROWS]
@@ -425,8 +437,8 @@ def _tracked_entries() -> list[tuple[str, str]]:
 def test_tracked_tree_has_no_home_paths() -> None:
     """Part A acceptance: no tracked blob (or symlink target) has a home path.
 
-    Red today: 2 docs with absolute home paths, 3 governance docs with a
-    tilde standard-home-folder prefix (O3), and the tracked .pip-cache/.
+    Green on this branch: the Part A cleanup removed every tracked home path
+    and the tracked .pip-cache/. Any new tracked leak turns it red.
     """
     patterns = _home_patterns()
     offenders: list[str] = []
