@@ -12,9 +12,9 @@
     },
     {
       "path": ".claude/library/LIB-PRINCIPLES.md",
-      "sha256": "ca41bcac45ae4156f61dc35c728c576589706d5b72f1e199d200411c5705ce45",
-      "size_bytes": 14787,
-      "recorded_at": "2026-10-09T00:43:23Z",
+      "sha256": "3a6d5fe87e9baf53a512dfe8021dc44c74cc16ecaca2092c9dd20e6b233118a5",
+      "size_bytes": 15323,
+      "recorded_at": "2026-10-09T01:33:45Z",
       "note": "LIB-PRINCIPLES P8 v2 baseline; single source of truth for role principles."
     },
     {
