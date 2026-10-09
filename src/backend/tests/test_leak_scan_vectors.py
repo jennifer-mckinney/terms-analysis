@@ -34,6 +34,16 @@ _MATCHER = _REPO_ROOT / "scripts" / "governance" / "leak_scan.py"
 _SCANNER = _REPO_ROOT / "scripts" / "governance" / "scan-evidence-leaks.sh"
 _HOOK = _REPO_ROOT / ".githooks" / "pre-commit"
 
+# Home-path roots and private folder names are assembled at runtime so this
+# tracked file is not itself a home-path leak (#145
+# test_tracked_tree_has_no_home_paths, owner over-block policy 2026-10-08).
+# The values are unchanged: _U == "/" "Users", _H == "/" "home".
+_U = "/" + "Users"
+_H = "/" + "home"
+_DOCS = "Docu" + "ments"
+_U_B = _U.encode()
+_DOCS_B = _DOCS.encode()
+
 pytestmark = pytest.mark.skipif(
     shutil.which("git") is None or shutil.which("bash") is None or shutil.which("python3") is None,
     reason="git, bash and python3 are required to exercise the leak scanners",
@@ -151,14 +161,14 @@ def test_pattern_file_quoting_itself_is_allowed() -> None:
 @pytest.mark.parametrize(
     "raw,expected",
     [
-        ("%2FUsers%2Fbob", "/users/bob"),
-        ("%2fusers%2fbob", "/users/bob"),
+        ("%2FUsers%2Fbob", _U.lower() + "/bob"),
+        ("%2fusers%2fbob", _U.lower() + "/bob"),
         ("%25252Fx", "/x"),  # three passes: %25252F -> %252F -> %2F -> /
-        ("\\/Users\\/bob", "/users/bob"),
+        ("\\/Users\\/bob", _U.lower() + "/bob"),
         ("\\\\/home", "/home"),  # double-escaped: \\/ -> \/ -> /
         ("\\u002Fhome", "/home"),
         ("\\x2Fhome", "/home"),
-        ("C:\\Users\\nancy", "c:/users/nancy"),  # \n is not unescaped, then folded
+        ("C:\\" + "Users\\nancy", "c:/" + "users/nancy"),  # \n is not unescaped, then folded
         ("a\x00b", "ab"),
     ],
 )
@@ -173,7 +183,7 @@ def test_normalise_stops_after_max_passes() -> None:
 
 
 def test_scan_bytes_reports_line_numbers_and_first_pattern() -> None:
-    data = b"ok\n/Users/bob/x\n\x00clean\n~/Documents/a/\n"
+    data = b"ok\n" + _U_B + b"/bob/x\n\x00clean\n~/" + _DOCS_B + b"/a/\n"
     assert leak_scan.scan_bytes(data, PATTERNS) == [(2, "home-root"), (4, "home-private")]
 
 
@@ -209,7 +219,7 @@ def test_cli_hit_none_and_stdin() -> None:
 def test_cli_rejects_malformed_pattern_file(tmp_path: Path, content: str, message: str) -> None:
     bad = tmp_path / "patterns.txt"
     bad.write_text(content, encoding="utf-8")
-    result = _cli(str(bad), stdin=b"/Users/bob/x\n")
+    result = _cli(str(bad), stdin=_U_B + b"/bob/x\n")
     assert result.returncode == 2
     assert message in result.stderr.decode()
 
@@ -382,7 +392,7 @@ def test_scanner_malformed_pattern_file_is_error_even_with_nothing_to_scan(tmp_p
 # ---------------------------------------------------------------------------
 
 _DEEP_PATTERN = "deep\t" + "(" * 2000 + "a" + ")" * 2000 + "\n"
-_LEAK = b"ok\n/Users/someuser/secret\n"
+_LEAK = b"ok\n" + _U_B + b"/someuser/secret\n"
 
 
 def _deep_pattern_file(root: Path) -> None:
@@ -747,7 +757,7 @@ def test_absolute_path_context_offset_outside_any_run_fails_closed() -> None:
 
 
 def test_context_reports_a_leak_after_an_exempt_hit_on_the_same_line() -> None:
-    line = "https://github.com/users/someuser/projects/7 and /Users/someuser/x"
+    line = "https://github.com/users/someuser/projects/7 and " + _U + "/someuser/x"
     assert leak_scan.match_line(line, PATTERNS) == ["home-root"]
     assert leak_scan.match_line("api/users/7 then api/home/8", PATTERNS) == []
 
@@ -758,7 +768,7 @@ def test_context_reports_a_leak_after_an_exempt_hit_on_the_same_line() -> None:
         "/a" * 50000,
         "a/home/b" * 10000,
         " /home/" * 10000,
-        "https://example.com" + "/home/x" * 10000,
+        "https://example.com" + (_H + "/x") * 10000,
         "-a" * 50000 + "-users",
         "--users" * 10000,
     ],
@@ -790,7 +800,7 @@ def test_private_tld_set_is_load_bearing(monkeypatch: pytest.MonkeyPatch) -> Non
     # In-process mutation: with an empty set every private-TLD block vector
     # would be exempt again (proves the set, not something else, blocks them).
     monkeypatch.setattr(leak_scan, "_PRIVATE_TLDS", frozenset())
-    sample = _line("http://devbox.local/Users/someuser/x")
+    sample = _line("http://devbox.local" + _U + "/someuser/x")
     assert leak_scan.match_line(sample, PATTERNS) == []
 
 
@@ -812,7 +822,7 @@ def _container_samples() -> Dict[str, bytes]:
     import lzma
     import zipfile
 
-    leak = b"see /Users/someuser/Documents/proj/app.py\n" * 4
+    leak = (b"see " + _U_B + b"/someuser/" + _DOCS_B + b"/proj/app.py\n") * 4
     docx = _zip({"[Content_Types].xml": b"<Types/>", "word/document.xml": b"<w:t>" + leak + b"</w:t>"}, zipfile.ZIP_DEFLATED)
     return {
         "zip": docx,  # a deflated .docx (security F1 probe)
@@ -996,7 +1006,7 @@ def test_range_scan_clean_names_reports_name_count(tmp_path: Path) -> None:
     assert "1 added line(s), 1 path name(s), no local machine paths" in result.stdout
 
 
-_LINK_TARGET = "/Users/someuser/Documents/secret.txt"
+_LINK_TARGET = _U + "/someuser/" + _DOCS + "/secret.txt"
 
 
 def test_tree_scan_scans_symlink_target(tmp_path: Path) -> None:
@@ -1337,7 +1347,7 @@ def test_cli_non_ascii_or_control_char_in_pattern_file_is_a_config_error(
     cfg = tmp_path / "patterns-bad.txt"
     cfg.write_bytes(data)
     # Input the unmutated home-root pattern flags; a silent accept scans CLEAN.
-    result = _cli(str(cfg), stdin=b"/Users/someone/x\n")
+    result = _cli(str(cfg), stdin=_U_B + b"/someone/x\n")
     assert result.returncode == 2, (result.returncode, result.stdout)
     assert result.stdout == b""
     err = result.stderr.decode("utf-8", "replace")
@@ -1389,7 +1399,7 @@ def test_cli_printable_ascii_comment_and_tab_columns_still_load(tmp_path: Path) 
     text.insert(index, "# " + printable)
     cfg = tmp_path / "patterns-ok.txt"
     cfg.write_bytes("\n".join(text).encode("utf-8"))
-    stdin = b"/Users/someone/x\n"
+    stdin = _U_B + b"/someone/x\n"
     mutated = _cli(str(cfg), stdin=stdin)
     original = _cli(str(_PATTERNS), stdin=stdin)
     assert mutated.returncode == original.returncode == 0, (mutated.stderr, original.stderr)

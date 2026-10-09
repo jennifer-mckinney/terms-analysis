@@ -22,6 +22,19 @@ _LEAK_REGEX = _REPO_ROOT / ".claude" / "governance" / "evidence-leak-regex.txt"
 _SCANNER = _REPO_ROOT / "scripts" / "governance" / "scan-evidence-leaks.sh"
 _MATCHER = _REPO_ROOT / "scripts" / "governance" / "leak_scan.py"
 
+# Home-path roots and private folder names are assembled at runtime so this
+# tracked file is not itself a home-path leak (#145
+# test_tracked_tree_has_no_home_paths, owner over-block policy 2026-10-08).
+# The values are unchanged: _U == "/" "Users", _H == "/" "home".
+_U = "/" + "Users"
+_H = "/" + "home"
+_DOCS = "Docu" + "ments"
+_DESK = "Desk" + "top"
+_DOWN = "Down" + "loads"
+_U_B = _U.encode()
+_H_B = _H.encode()
+_DOCS_B = _DOCS.encode()
+
 pytestmark = pytest.mark.skipif(
     shutil.which("git") is None or shutil.which("bash") is None,
     reason="git and bash are required to exercise the pre-commit hook",
@@ -80,7 +93,7 @@ def test_precommit_clean_evidence_file_passes(repo: Path) -> None:
     [
         "/private/var/folders/n0/abc123/T/run/legal_kb.npy",
         "<tmp>/pytest-of-someuser/pytest-55/test_0/legal_kb.npy",
-        "/Users/someuser/Documents/project/src/app.py",
+        _U + "/someuser/" + _DOCS + "/project/src/app.py",
     ],
 )
 def test_precommit_rejects_local_path_in_staged_evidence(repo: Path, leak: str) -> None:
@@ -92,13 +105,13 @@ def test_precommit_rejects_local_path_in_staged_evidence(repo: Path, leak: str) 
 
 
 def test_precommit_scans_nested_evidence_paths(repo: Path) -> None:
-    _stage(repo, {"docs/evidence/sub/deep.md": b"/Users/x/thing\n"})
+    _stage(repo, {"docs/evidence/sub/deep.md": _U_B + b"/x/thing\n"})
     assert _run_hook(repo).returncode == 1
 
 
 def test_precommit_ignores_local_paths_outside_evidence(repo: Path) -> None:
     # The guard is scoped to docs/evidence/; other paths are out of scope.
-    _stage(repo, {"docs/notes.md": b"/Users/x/thing\n", "src/a.py": b"# pytest-of-x\n"})
+    _stage(repo, {"docs/notes.md": _U_B + b"/x/thing\n", "src/a.py": b"# pytest-of-x\n"})
     assert _run_hook(repo).returncode == 0
 
 
@@ -119,13 +132,13 @@ def test_precommit_scrubbed_and_restaged_file_passes(repo: Path) -> None:
 def test_precommit_rejects_path_inside_binary_evidence_blob(repo: Path) -> None:
     # Round 2 (security R2-F3 vector 2): grep -I used to skip any blob with a
     # NUL byte, so one stray NUL hid a leak. NULs are now stripped first.
-    _stage(repo, {"docs/evidence/report.bin": b"\x00\x01/Users/x\x00\xff"})
+    _stage(repo, {"docs/evidence/report.bin": b"\x00\x01" + _U_B + b"/x\x00\xff"})
     assert _run_hook(repo).returncode == 1
 
 
 def test_precommit_rejects_utf16_evidence_file(repo: Path) -> None:
     # Security R2-F3 vector 2: a UTF-16 export interleaves NULs with ASCII.
-    content = "ok\nE   /Users/someuser/project/app.py\n".encode("utf-16")
+    content = ("ok\nE   " + _U + "/someuser/project/app.py\n").encode("utf-16")
     _stage(repo, {"docs/evidence/export.txt": content})
     result = _run_hook(repo)
     assert result.returncode == 1
@@ -135,7 +148,7 @@ def test_precommit_rejects_utf16_evidence_file(repo: Path) -> None:
 def test_precommit_rejects_non_ascii_filename(repo: Path) -> None:
     # Security R2-F3 vector 1: core.quotePath C-quoted the name, the leading
     # '"' failed the docs/evidence/ prefix test and the file was skipped.
-    _stage(repo, {"docs/evidence/r\u00e9sum\u00e9.txt": b"/Users/someuser/x\n"})
+    _stage(repo, {"docs/evidence/r\u00e9sum\u00e9.txt": _U_B + b"/someuser/x\n"})
     result = _run_hook(repo)
     assert result.returncode == 1
     assert "docs/evidence/r\u00e9sum\u00e9.txt" in result.stderr
@@ -144,7 +157,7 @@ def test_precommit_rejects_non_ascii_filename(repo: Path) -> None:
 def test_precommit_rejects_filename_with_newline(repo: Path) -> None:
     # NUL-delimited listing: a newline in a name can't split it into two
     # paths that each miss the docs/evidence/ prefix.
-    _stage(repo, {"docs/evidence/a\nb.txt": b"/home/someuser/x\n"})
+    _stage(repo, {"docs/evidence/a\nb.txt": _H_B + b"/someuser/x\n"})
     assert _run_hook(repo).returncode == 1
 
 
@@ -152,19 +165,19 @@ def test_precommit_rejects_filename_with_newline(repo: Path) -> None:
     "leak",
     [
         "/var/folders/n0/abc123/T/run.npy",  # macOS temp root without /private
-        "/home/someuser/project/app.py",  # Linux home
+        _H + "/someuser/project/app.py",  # Linux home
         "pytest-of-someuser/pytest-1/x",  # bare pytest per-user dir
         # Round 3, security R3-F1: Claude Code scratchpad, dashed account name
         "/private/tmp/claude-503/-Users-alice-Documents-x/scratchpad",
         "see -Users-alice-Documents-proj for the slug",
         "/tmp/claude-503/session/scratchpad",
         # Round 3, security R3-F2 (lead decision: block, no waiver)
-        "~/Documents/project/src",
+        "~/" + _DOCS + "/project/src",
         "~/Library/Mobile Documents/x",
-        "~/Desktop/notes/x.md",
-        "~/Downloads/a.pdf",
-        "$HOME/Documents/x",
-        "${HOME}/Desktop/x",
+        "~/" + _DESK + "/notes/x.md",
+        "~/" + _DOWN + "/a.pdf",
+        "$HOME/" + _DOCS + "/x",
+        "${HOME}/" + _DESK + "/x",
         ".claude/worktrees/agent-af118a54/src",
     ],
 )
@@ -189,7 +202,7 @@ def test_precommit_rejects_round2_regex_vectors(repo: Path, leak: str) -> None:
         "~/.claude/CLAUDE.md",
         "~/project/src",
         "~/",
-        "the ~/Documents folder",  # private folder name with no trailing slash
+        "the ~/" + _DOCS + " folder",  # private folder name with no trailing slash
     ],
 )
 def test_precommit_allows_scrubbed_placeholders(repo: Path, scrubbed: str) -> None:
@@ -277,13 +290,13 @@ def test_scanner_clean_checkout_passes_and_reports_count(tmp_path: Path) -> None
     "rel,content",
     [
         ("docs/evidence/a.txt", b"/var/folders/ab/T/x\n"),
-        ("docs/evidence/deep/b.md", b"see /home/someuser/x\n"),
-        ("docs/evidence/r\u00e9sum\u00e9.txt", b"/Users/someuser/x\n"),
-        ("docs/evidence/u16.txt", "/Users/someuser/x\n".encode("utf-16")),
+        ("docs/evidence/deep/b.md", b"see " + _H_B + b"/someuser/x\n"),
+        ("docs/evidence/r\u00e9sum\u00e9.txt", _U_B + b"/someuser/x\n"),
+        ("docs/evidence/u16.txt", (_U + "/someuser/x\n").encode("utf-16")),
         ("docs/evidence/blob.bin", b"\x00\xffpytest-of-someuser\x00"),
         # Round 3, security R3-F1 / R3-F2
         ("docs/evidence/c.md", b"ran in /private/tmp/claude-503/-Users-alice-Docs/scratchpad\n"),
-        ("docs/evidence/d.md", b"cwd ~/Documents/05_Dev/legal-corpus-ingester/\n"),
+        ("docs/evidence/d.md", b"cwd ~/" + _DOCS_B + b"/05_Dev/legal-corpus-ingester/\n"),
         ("docs/evidence/e.md", b"worktree .claude/worktrees/agent-af118a54\n"),
     ],
 )
@@ -311,7 +324,7 @@ def test_scanner_allows_scrubbed_and_quoted_forms(tmp_path: Path) -> None:
 
 
 def test_scanner_ignores_paths_outside_evidence(tmp_path: Path) -> None:
-    root = _scan_root(tmp_path, {"docs/notes.md": b"/Users/x/y\n", "docs/evidence/ok.txt": b"ok\n"})
+    root = _scan_root(tmp_path, {"docs/notes.md": _U_B + b"/x/y\n", "docs/evidence/ok.txt": b"ok\n"})
     assert _scan(root).returncode == 0
 
 
@@ -397,7 +410,7 @@ def _scan_range(root: Path, rev_range: str) -> subprocess.CompletedProcess:
 
 def test_range_scan_catches_leak_added_then_removed(tmp_path: Path) -> None:
     root = _history_repo(tmp_path)
-    _commit(root, {"docs/evidence/run.txt": b"ok\nE /Users/someuser/app.py\n"})
+    _commit(root, {"docs/evidence/run.txt": b"ok\nE " + _U_B + b"/someuser/app.py\n"})
     leak_sha = _git(root, "rev-parse", "--short=7", "HEAD").stdout.strip()
     _commit(root, {"docs/evidence/run.txt": b"ok\nE <repo>/app.py\n"})
     # The tip is clean, so the tree scan passes ...
@@ -411,7 +424,7 @@ def test_range_scan_catches_leak_added_then_removed(tmp_path: Path) -> None:
 def test_range_scan_clean_history_passes_and_reports_counts(tmp_path: Path) -> None:
     root = _history_repo(tmp_path)
     _commit(root, {"docs/evidence/a.txt": b"<tmp>/x\n~/.claude/x\n"})
-    _commit(root, {"docs/notes.md": b"/Users/someuser/outside-evidence\n"})
+    _commit(root, {"docs/notes.md": _U_B + b"/someuser/outside-evidence\n"})
     result = _scan_range(root, "base..HEAD")
     assert result.returncode == 0, result.stderr
     assert "1 commit(s) touching docs/evidence/, 2 added line(s)" in result.stdout
@@ -420,7 +433,7 @@ def test_range_scan_clean_history_passes_and_reports_counts(tmp_path: Path) -> N
 def test_range_scan_ignores_removed_lines(tmp_path: Path) -> None:
     # A commit that REMOVES a leak (scrub) must not be flagged itself.
     root = _history_repo(tmp_path)
-    _commit(root, {"docs/evidence/a.txt": b"/Users/someuser/x\n"})
+    _commit(root, {"docs/evidence/a.txt": _U_B + b"/someuser/x\n"})
     _git(root, "tag", "dirty")
     _commit(root, {}, delete=("docs/evidence/a.txt",))
     assert _scan_range(root, "dirty..HEAD").returncode == 0
@@ -429,7 +442,7 @@ def test_range_scan_ignores_removed_lines(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "content",
     [
-        "x\n/Users/someuser/x\n".encode("utf-16"),
+        ("x\n" + _U + "/someuser/x\n").encode("utf-16"),
         b"\x00\x01pytest-of-someuser\x00\xff",
     ],
 )
@@ -481,7 +494,7 @@ def test_range_scan_covers_merge_commit_resolution(tmp_path: Path) -> None:
     _git(root, "checkout", "-q", "-")
     _commit(root, {"docs/evidence/m.txt": b"main\n"})
     _git(root, "merge", "-q", "--no-commit", "--no-ff", "side")
-    (root / "docs" / "evidence" / "m.txt").write_bytes(b"main\n/home/someuser/x\n")
+    (root / "docs" / "evidence" / "m.txt").write_bytes(b"main\n" + _H_B + b"/someuser/x\n")
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "-m", "merge")
     assert _scan_range(root, "HEAD^1..HEAD").returncode == 1
