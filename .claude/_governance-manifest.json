@@ -1,41 +1,41 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-10-09T00:43:23Z",
+  "generated_at": "2026-10-09T01:43:01Z",
   "note": "Baseline captured after governance change. Paths beginning with $HOME/ are resolved at verify time via shell expansion; project-relative paths are resolved from the repo root.",
   "entries": [
     {
       "path": ".claude/CLAUDE.md",
-      "sha256": "75eda3c57161d06036dc986d6b1c678bb7ccc9fc8a435433e9e53d70a7d8909b",
-      "size_bytes": 18550,
-      "recorded_at": "2026-10-09T00:43:23Z",
+      "sha256": "83ea0433d373d51599e1327d37b15de0327ac1d3048d9f0aee532235032d8684",
+      "size_bytes": 18798,
+      "recorded_at": "2026-10-09T01:43:01Z",
       "note": "Project governance charter."
     },
     {
       "path": ".claude/library/LIB-PRINCIPLES.md",
       "sha256": "3a6d5fe87e9baf53a512dfe8021dc44c74cc16ecaca2092c9dd20e6b233118a5",
       "size_bytes": 15323,
-      "recorded_at": "2026-10-09T01:33:45Z",
+      "recorded_at": "2026-10-09T01:43:01Z",
       "note": "LIB-PRINCIPLES P8 v2 baseline; single source of truth for role principles."
     },
     {
       "path": "$HOME/.claude/CLAUDE.md",
-      "sha256": "b7ef92f188e8e7e14e338ee65f5c9688cbd5425aa7fd23b71b8f129c07e96f9c",
-      "size_bytes": 21728,
-      "recorded_at": "2026-10-09T00:43:23Z",
+      "sha256": "9fe927a20981a50f435674a75397406abaf19154a26735506dbf2f535859e677",
+      "size_bytes": 13801,
+      "recorded_at": "2026-10-09T01:43:01Z",
       "note": "Global user CLAUDE.md; changes here affect every project session."
     },
     {
       "path": "$HOME/.claude/library/PEAS.md",
       "sha256": "3f9e58fe597e85e3602fe83ae63747261353d9f7051990befad0a3adeec9a45d",
       "size_bytes": 1175,
-      "recorded_at": "2026-10-09T00:43:23Z",
+      "recorded_at": "2026-10-09T01:43:01Z",
       "note": "PEAS agent design framework reference."
     },
     {
       "path": ".claude/governance/required-gitignore.txt",
       "sha256": "c1b051ba93c638ea7efbbbe32fe27d95b224f561c8f8cd80dbb9573d1352f267",
       "size_bytes": 876,
-      "recorded_at": "2026-10-09T00:43:23Z",
+      "recorded_at": "2026-10-09T01:43:01Z",
       "note": "Reviewer P9 F9 SSoT for required .gitignore patterns read by both pre-commit hook and CI workflow."
     }
   ]
