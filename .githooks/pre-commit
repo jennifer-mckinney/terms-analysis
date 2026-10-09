@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Governance-tier pre-commit hook.
 #
-# Enforces three invariants:
+# Enforces four invariants:
 #   1. .gitignore contains every required pattern from
 #      .claude/governance/required-gitignore.txt (single source of truth,
 #      reviewer P9 grumpy F9).
@@ -9,6 +9,12 @@
 #      .pip-cache/).
 #   3. No staged file is a case-insensitive .env variant that is not on the
 #      .env.example allowlist (reviewer P9 security F6).
+#   4. No staged file under docs/evidence/ contains a local machine path
+#      or private directory name (pytest/macOS/Claude temp dirs, home
+#      directories, home-relative private folders, agent worktree IDs; pattern SSoT .claude/governance/evidence-leak-regex.txt,
+#      matcher scripts/governance/leak_scan.py, shared with CI)
+#      (issue #91 P9 security F1, round 2 R2-F3, round 5 normalising matcher;
+#      round 8: staged path names, type changes and opaque containers too).
 #
 # Install with: scripts/install-hooks.sh
 # Governance policy: to change the required list, edit
@@ -64,7 +70,8 @@ fi
 for pattern in "${REQUIRED_GITIGNORE_PATTERNS[@]}"; do
     # Exact-line match against .gitignore. Comments and inline whitespace on the
     # pattern line are not accepted -- must be a clean line-for-line match.
-    if ! grep -Fxq "${pattern}" "${GITIGNORE}"; then
+    # "--": a required pattern starting with "-" is a pattern, not an option.
+    if ! grep -Fxq -- "${pattern}" "${GITIGNORE}"; then
         fail ".gitignore is missing required pattern: \`${pattern}\`. This entry is protected -- see .claude/governance/required-gitignore.txt."
     fi
 done
@@ -89,7 +96,9 @@ fi
 if [[ -n "${STAGED}" ]]; then
     while IFS= read -r path; do
         [[ -z "${path}" ]] && continue
-        base="$(basename "${path}")"
+        # #192: parameter expansion, not basename(1). A staged name such as
+        # "-n.md" or "--help.md" was parsed as an option and killed the hook.
+        base="${path##*/}"
         # Case-insensitive regex: .env or .env.<suffix>
         if [[ "${base}" =~ ^\.[Ee][Nn][Vv](\..*)?$ ]]; then
             allowed=0
@@ -104,6 +113,93 @@ if [[ -n "${STAGED}" ]]; then
             fi
         fi
     done <<< "${STAGED}"
+fi
+
+# --- Check 4: no local machine paths in staged evidence files --------------
+# Issue #91 P9 security F1: captured test output committed under
+# docs/evidence/ leaked the local account name, the macOS per-user temp-folder
+# ID and the private directory layout into a PUBLIC repo. Scan the STAGED
+# blob (git show ":path", not the working-tree copy, so a scrubbed-but-
+# unstaged file can't mask a dirty staged one). Scrub with placeholders such
+# as <tmp>/, <repo>/ or <user>.
+# Round 2 (security R2-F3 / grumpy #6):
+#   * filenames are read NUL-delimited (-z), so a non-ASCII name is no longer
+#     C-quoted by core.quotePath and silently skipped;
+#   * NUL bytes are stripped and grep -a is used, so UTF-16 text and binary
+#     blobs are scanned instead of skipped by grep -I;
+#   * the pattern is shared with CI (scripts/governance/scan-evidence-leaks.sh)
+#     via .claude/governance/evidence-leak-regex.txt and also covers
+#     /var/folders/ without /private and Linux /home/<name>.
+# Round 3 (security R3-F1/R3-F2, grumpy #1): the SSoT also blocks the dashed
+# scratchpad account-name form, the per-uid Claude temp root, home-relative
+# private folders and agent worktree IDs, and only matches real path segments.
+# Round 5 (grumpy, whack-a-mole rule): matching moved to ONE Python matcher,
+# scripts/governance/leak_scan.py, also used by scan-evidence-leaks.sh. It
+# URL-decodes, unescapes (\/ \\ \u002f) and case-folds each line before the
+# canonical patterns run, so encoded spellings need no extra alternatives.
+# Vectors: .claude/governance/leak-vectors.tsv.
+EVIDENCE_PREFIX="docs/evidence/"
+EVIDENCE_REGEX_FILE="${REPO_ROOT}/.claude/governance/evidence-leak-regex.txt"
+EVIDENCE_MATCHER="${REPO_ROOT}/scripts/governance/leak_scan.py"
+EVIDENCE_PYTHON="${LEAK_SCAN_PYTHON:-python3}"
+EVIDENCE_STAGED_Z="$(mktemp)"
+EVIDENCE_BLOB="$(mktemp)"
+EVIDENCE_HITS="$(mktemp)"
+EVIDENCE_NAMES="$(mktemp)"
+trap 'rm -f "${EVIDENCE_STAGED_Z}" "${EVIDENCE_BLOB}" "${EVIDENCE_HITS}" "${EVIDENCE_NAMES}"' EXIT
+# #91 r8 (grumpy 5 / security F5): T (type change, e.g. a file replaced by a
+# symlink) is scanned too; git show ":path" yields a symlink's target path.
+git diff --cached --name-only -z --diff-filter=ACMRT > "${EVIDENCE_STAGED_Z}" \
+    || fail "could not list staged files for the evidence path scan"
+if [[ -s "${EVIDENCE_STAGED_Z}" ]]; then
+    [[ -f "${EVIDENCE_REGEX_FILE}" ]] \
+        || fail "evidence leak pattern SSoT missing: ${EVIDENCE_REGEX_FILE}"
+    [[ -f "${EVIDENCE_MATCHER}" ]] \
+        || fail "evidence leak matcher missing: ${EVIDENCE_MATCHER}"
+    command -v "${EVIDENCE_PYTHON}" >/dev/null 2>&1 \
+        || fail "${EVIDENCE_PYTHON} not found (needed by ${EVIDENCE_MATCHER})"
+    while IFS= read -r -d '' path; do
+        [[ -z "${path}" ]] && continue
+        [[ "${path}" == "${EVIDENCE_PREFIX}"* ]] || continue
+        # Fail closed: an unreadable staged blob or a matcher error (exit 2) is a
+        # hook failure, never a silent pass. C locale = byte-wise matching
+        # (macOS tr/grep otherwise reject non-UTF-8 bytes).
+        git show ":${path}" | LC_ALL=C tr -d '\000' > "${EVIDENCE_BLOB}" \
+            || fail "could not read staged blob for ${path}"
+        set +e
+        # grep-compatible: "<line>:<pattern>" lines, exit 0 hit / 1 none /
+        # 2 error (bad SSoT, unreadable input). -I = isolated interpreter.
+        "${EVIDENCE_PYTHON}" -I "${EVIDENCE_MATCHER}" "${EVIDENCE_REGEX_FILE}" "${EVIDENCE_BLOB}" > "${EVIDENCE_HITS}"
+        grep_rc=$?
+        set -e
+        if [[ "${grep_rc}" -eq 0 ]]; then
+            lines="$(cut -d: -f1 "${EVIDENCE_HITS}" | head -5 | paste -sd, -)"
+            pats="$(cut -d: -f2 "${EVIDENCE_HITS}" | sort -u | paste -sd, -)"
+            fail "Refusing to stage ${path}: contains a local machine path or private directory name (pattern(s) ${pats}, SSoT .claude/governance/evidence-leak-regex.txt) at line(s) ${lines}. Scrub to <tmp>/, <repo>/ or <user> before committing."
+        elif [[ "${grep_rc}" -ne 1 ]] || ! grep -Eqx 'CLEAN [0-9]+' "${EVIDENCE_HITS}"; then
+            # #91 security r6: fail closed. Exit 1 is "no leak" only with the
+            # matcher's "CLEAN <n>" sentinel; a crash before main() also
+            # exits 1 but prints none. Any other exit code is an error.
+            fail "evidence path scan failed for ${path} (matcher exit ${grep_rc}, no clean attestation)"
+        fi
+        printf '%s\n' "${path}" >> "${EVIDENCE_NAMES}"
+    done < "${EVIDENCE_STAGED_Z}"
+    # #91 r8 (security F4): the staged PATH NAMES are scanned as well, so a
+    # file or directory named after a home slug cannot slip in with clean
+    # content. Same matcher, same fail-closed sentinel rule.
+    if [[ -s "${EVIDENCE_NAMES}" ]]; then
+        set +e
+        "${EVIDENCE_PYTHON}" -I "${EVIDENCE_MATCHER}" "${EVIDENCE_REGEX_FILE}" "${EVIDENCE_NAMES}" > "${EVIDENCE_HITS}"
+        grep_rc=$?
+        set -e
+        if [[ "${grep_rc}" -eq 0 ]]; then
+            bad="$(cut -d: -f1 "${EVIDENCE_HITS}" | head -5 | while IFS= read -r n; do sed -n "${n}p" "${EVIDENCE_NAMES}"; done | paste -sd, -)"
+            pats="$(cut -d: -f2 "${EVIDENCE_HITS}" | sort -u | paste -sd, -)"
+            fail "Refusing to stage path name(s) ${bad}: the name contains a local machine path or private directory name (pattern(s) ${pats}, SSoT .claude/governance/evidence-leak-regex.txt). Rename before committing."
+        elif [[ "${grep_rc}" -ne 1 ]] || ! grep -Eqx 'CLEAN [0-9]+' "${EVIDENCE_HITS}"; then
+            fail "evidence path name scan failed (matcher exit ${grep_rc}, no clean attestation)"
+        fi
+    fi
 fi
 
 exit 0

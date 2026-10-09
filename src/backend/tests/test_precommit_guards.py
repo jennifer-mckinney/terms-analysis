@@ -13,9 +13,9 @@ Split per the #145 design gate (owner rulings on #199):
   favour of the one `leak_scan.py` scanner from #192). Matching is
   case-insensitive, after Unicode Cf characters are removed. The tilde /
   $HOME standard-home-folder prefixes are leaks too (O3).
-* Part B (after #192): staged-content guard, nested graveyard, `.env`
+* Part B (card #236): staged-content guard, nested graveyard, `.env`
   look-alikes and CI wiring. Those cases are `xfail(strict=True)` with
-  reason "Part B, #192" so they stay red for a stated reason and flip loudly
+  reason "Part B, #236" (lead ruling 2026-10-08: tracked by #236) so they stay red for a stated reason and flip loudly
   (XPASS fails the run) when Part B lands. Controls that the CURRENT hook or
   workflow already satisfy stay active, so a Part A change cannot break them.
 
@@ -277,7 +277,7 @@ ALLOW_VECTORS = [v for _, v in ALLOW_ROWS]
 
 # Part B marker (owner ruling on #199, O1). strict: an unexpected pass fails.
 # raises=AssertionError: a crash (ImportError, fixture error) is not a red XFAIL.
-PART_B = pytest.mark.xfail(strict=True, raises=AssertionError, reason="Part B, #192")
+PART_B = pytest.mark.xfail(strict=True, raises=AssertionError, reason="Part B, #236")
 
 # Refusal reason tags the Part B guard must print next to the file name, so a
 # crash (set -e, rc 1) can never be mistaken for a refusal (attack sketch s3).
@@ -691,18 +691,12 @@ def test_hostile_filename_with_leak_refused(sandbox: Path, name: str, quotepath:
     assert "\x1b" not in out and "\u202e" not in out, "raw control bytes from filename echoed"
 
 
-HOSTILE_NAME_PARAMS = [
-    pytest.param(n, id=repr(n), marks=PART_B if n.startswith("-") else ())
-    for n in HOSTILE_NAMES
-]
-
-
-@pytest.mark.parametrize("name", HOSTILE_NAME_PARAMS)
+@pytest.mark.parametrize("name", HOSTILE_NAMES, ids=[repr(n) for n in HOSTILE_NAMES])
 def test_hostile_filename_clean_allowed(sandbox: Path, name: str) -> None:
     """Positive control: hostile names with clean content are not refused.
 
-    Leading-dash names are Part B: today's hook runs `basename` without `--`
-    and crashes on them (attack sketch T7).
+    Leading-dash names ("-n.md", "--help.md") are included: the hook once ran
+    `basename` without `--` and crashed on them (attack sketch T7, fixed #192).
     """
     _write(sandbox, name, "nothing personal\n")
     _stage(sandbox, name)
