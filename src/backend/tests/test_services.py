@@ -732,13 +732,23 @@ class TestFetchUrlText:
         self._serve(monkeypatch, lambda request: httpx.Response(200, content=body()))
         assert self._fetch_error("https://example.com/policy").reason == "size"
 
-    def test_ingest_fetch_url_text_blocked_status_raises_helpful_message(self, monkeypatch):
-        """401/403/407/429/503 responses raise a plain-English hint."""
+    @pytest.mark.parametrize("status", [401, 403, 407, 429, 503])
+    def test_ingest_fetch_url_text_blocked_status_raises_helpful_message(self, monkeypatch, status):
+        """401/403/407/429/503 responses raise a plain-English hint. One
+        status per test: _serve stacks a patched AsyncClient.__init__, so a
+        second _serve in the same test is shadowed by the first handler."""
         import httpx
-        for status in (401, 403, 407, 429, 503):
-            self._serve(monkeypatch, lambda request, s=status: httpx.Response(s))
-            exc = self._fetch_error("https://example.com/policy")
-            assert "blocks automated access" in str(exc)
+        served = []
+
+        def handler(request):
+            served.append(status)
+            return httpx.Response(status)
+
+        self._serve(monkeypatch, handler)
+        exc = self._fetch_error("https://example.com/policy")
+        assert served == [status]  # this status really reached the fetcher
+        assert exc.reason == "status"
+        assert "blocks automated access" in str(exc)
 
     def test_ingest_fetch_url_text_request_error_raises_helpful_message(self, monkeypatch):
         """Network errors raise a clean connect error instead of propagating."""

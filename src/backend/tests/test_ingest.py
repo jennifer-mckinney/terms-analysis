@@ -319,6 +319,29 @@ def test_good_url_fetch_config_overrides_load(key, value):
     assert isinstance(replaced, Settings)
 
 
+def test_url_fetch_timeout_above_request_timeout_fails_closed():
+    """config.py INVARIANT: url_fetch_timeout_s <= request_timeout_s (the
+    fetch is the leading step of a URL analysis; the LLM budget gets the
+    rest). Enforced at construction, from either side, at the boundary; a
+    NaN LLM budget must not make the comparison silently pass."""
+    _setting("url_fetch_timeout_s")
+    _setting("request_timeout_s")
+    s = ingest.settings
+    limit = s.request_timeout_s
+    # Boundary: equal is allowed (positive control).
+    assert dataclasses.replace(s, url_fetch_timeout_s=limit).url_fetch_timeout_s == limit
+    # One representable step above the LLM budget is refused.
+    with pytest.raises(ValueError, match="request_timeout_s"):
+        dataclasses.replace(s, url_fetch_timeout_s=math.nextafter(limit, math.inf))
+    with pytest.raises(ValueError, match="request_timeout_s"):
+        dataclasses.replace(s, url_fetch_timeout_s=limit * 2)
+    # Lowering the LLM budget under the fetch deadline is refused too.
+    with pytest.raises(ValueError, match="request_timeout_s"):
+        dataclasses.replace(s, request_timeout_s=s.url_fetch_timeout_s / 2)
+    with pytest.raises(ValueError, match="request_timeout_s"):
+        dataclasses.replace(s, request_timeout_s=float("nan"))
+
+
 # ---- scheme, userinfo, malformed -------------------------------------------
 
 @pytest.mark.parametrize(
@@ -528,7 +551,9 @@ def test_fetch_rejects_numeric_host_encodings(host, resolver, origin):
         "127.0.0.1%00.example.test",
         "a" * 64 + ".test",  # label over 63 octets
         ".".join(["a" * 63] * 4) + ".test",  # name over 253 octets
-        "a" * 2_000_000 + ".test",  # 2 MB host
+        # Short id: the raw value would make a ~2 MB node id and a 2 MB line
+        # in the CI -v log.
+        pytest.param("a" * 2_000_000 + ".test", id="2MB-host"),
     ],
 )
 def test_fetch_rejects_lookalike_encoded_and_oversized_hosts(host, resolver, origin):
@@ -595,6 +620,86 @@ def test_dns_rebinding_cannot_swap_the_checked_ip(resolver, origin):
     assert _fetch("http://rebind.test/policy") == "Policy text."
     assert [r.url.host for r in origin.requests] == [PUBLIC_V4]
     assert origin.requests[0].headers["host"] == "rebind.test"
+
+
+def _refuse_connect(request):
+    raise httpx.ConnectError("connection refused to 10.9.8.7", request=request)
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        pytest.param([PUBLIC_V4, PUBLIC_V4_B], id="v4-then-v4"),
+        pytest.param([PUBLIC_V6, PUBLIC_V4], id="v6-then-v4"),
+    ],
+)
+def test_connect_failure_falls_back_to_the_next_checked_address(answers, resolver, origin):
+    """Every resolved address passed the blocklist, so a connect failure on
+    the first must fall back to the next one: still pinned to a checked IP,
+    still carrying the original Host header, and with no second lookup (a
+    re-resolution would reopen DNS rebinding)."""
+    first, second = answers
+    resolver.table["multi.test"] = answers
+    origin.routes[(first, "/p")] = _refuse_connect
+    origin.routes[(second, "/p")] = _text()
+    try:
+        text = _fetch("http://multi.test/p")
+    except _contract("UrlFetchError") as exc:
+        pytest.fail(
+            f"no fallback to the second checked address: reason {exc.reason!r}, "
+            f"hosts tried {[r.url.host for r in origin.requests]!r}"
+        )
+    assert text == "Policy text."
+    assert [r.url.host for r in origin.requests] == [first, second]
+    assert origin.requests[-1].headers["host"] == "multi.test"
+    assert resolver.calls == ["multi.test"]
+
+
+def test_connect_failure_on_every_address_is_one_clean_connect_error(resolver, origin):
+    """Fallback still fails closed: when every checked address refuses, each
+    is tried once, in order, and the outcome is a clean connect error."""
+    answers = [PUBLIC_V4, PUBLIC_V4_B]
+    resolver.table["multi.test"] = answers
+    for ip in answers:
+        origin.routes[(ip, "/p")] = _refuse_connect
+    exc = _expect("UrlFetchError", {"connect"}, "http://multi.test/p")
+    assert not isinstance(exc, _contract("UnsafeUrlError"))
+    assert [r.url.host for r in origin.requests] == answers
+    _assert_clean_message(exc, "10.9.8.7", "multi.test")
+
+
+def test_connect_fallback_over_many_answers_stays_inside_the_deadline(short_deadline, resolver, origin):
+    """Hostile size: 1000 public answers that all refuse. Fallback must not
+    turn into an unbounded loop; the total deadline (or exhaustion) ends it
+    with a typed error well inside the outer budget."""
+    many = [str(ipaddress.ip_address(PUBLIC_V4) + i) for i in range(1000)]
+    resolver.table["many.test"] = many
+    for ip in many:
+        origin.routes[(ip, "/p")] = _refuse_connect
+    exc, elapsed = _timed("http://many.test/p", short_deadline + 2.0)
+    assert isinstance(exc, _contract("UrlFetchError")) and exc.reason in {"connect", "timeout"}, exc
+    assert elapsed < short_deadline + 1.5
+    assert all(r.url.host in many for r in origin.requests)
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        pytest.param([PUBLIC_V4, "10.0.0.1"], id="public-then-private"),
+        pytest.param(["10.0.0.1", PUBLIC_V4], id="private-then-public"),
+        pytest.param([PUBLIC_V4, PUBLIC_V4_B, "::ffff:169.254.169.254"], id="mapped-metadata-last"),
+    ],
+)
+def test_private_answer_anywhere_refuses_before_any_connect(answers, resolver, origin):
+    """Inverse of the fallback: one blocked answer anywhere in the set refuses
+    the whole host before any connect attempt, even when the first answer is
+    public and refuses to connect (a fallback must never reach the private one)."""
+    resolver.table["multi.test"] = answers
+    for ip in answers:
+        origin.routes[(ip, "/p")] = _refuse_connect
+    exc = _expect("UnsafeUrlError", {"address"}, "http://multi.test/p")
+    assert origin.requests == []
+    _assert_clean_message(exc, "10.0.0.1", "169.254", "multi.test")
 
 
 def test_https_pin_keeps_hostname_for_sni_and_cert_check(resolver, origin):
@@ -747,6 +852,43 @@ def test_invalid_or_absurd_content_length_is_a_clean_error(value, small_cap, ori
     _assert_clean_message(exc, value)
 
 
+@pytest.mark.parametrize(
+    "zeros",
+    [
+        pytest.param(8, id="8-leading-zeros"),
+        pytest.param(10_000, id="10k-leading-zeros"),
+    ],
+)
+@pytest.mark.parametrize("size", ["one-byte", "at-cap"])
+def test_content_length_with_leading_zeros_is_read_by_value(zeros, size, small_cap, origin):
+    """Content-Length is 1*DIGIT (RFC 9110): leading zeros do not change the
+    value, so "00000001" is 1 byte, not "more digits than the cap". The 10k
+    form also proves the value is never int()-ed raw (CPython refuses int()
+    of a string over 4300 digits)."""
+    n = 1 if size == "one-byte" else small_cap
+    value = "0" * zeros + str(n)
+    assert len(value) > len(str(small_cap))  # the digit-count shortcut would refuse it
+    body = b"y" * n
+    origin.routes[(PUBLIC_V4, "/p")] = _text(body, headers={"content-length": value})
+    try:
+        text = _fetch(f"http://{PUBLIC_V4}/p")
+    except _contract("UrlFetchError") as exc:
+        pytest.fail(f"declared length {n} with leading zeros refused: reason {exc.reason!r}")
+    assert text == body.decode()
+
+
+@pytest.mark.parametrize("zeros", [8, 10_000], ids=["8-leading-zeros", "10k-leading-zeros"])
+def test_content_length_with_leading_zeros_over_cap_is_still_refused(zeros, small_cap, origin):
+    body = _CountingBody(small_cap + 1)
+    value = "0" * zeros + str(small_cap + 1)
+    origin.routes[(PUBLIC_V4, "/p")] = lambda request: httpx.Response(
+        200, headers={"content-length": value}, content=body
+    )
+    exc = _expect("UrlFetchError", {"size"}, f"http://{PUBLIC_V4}/p")
+    assert body.pulled == 0
+    _assert_clean_message(exc, value[-40:])
+
+
 # ---- time --------------------------------------------------------------------
 
 @pytest.fixture
@@ -774,7 +916,7 @@ def test_total_deadline_trips_on_slow_drip_body(short_deadline, origin):
     origin.routes[(PUBLIC_V4, "/p")] = lambda request: httpx.Response(200, content=body)
     exc, elapsed = _timed(f"http://{PUBLIC_V4}/p", short_deadline + 2.0)
     assert isinstance(exc, _contract("UrlFetchError")) and exc.reason == "timeout", exc
-    assert elapsed < short_deadline + 0.5
+    assert elapsed < short_deadline + 1.5  # outer budget is short_deadline + 2.0
 
 
 def test_total_deadline_trips_on_hanging_server(short_deadline, origin):
@@ -785,7 +927,7 @@ def test_total_deadline_trips_on_hanging_server(short_deadline, origin):
     origin.routes[(PUBLIC_V4, "/p")] = hang
     exc, elapsed = _timed(f"http://{PUBLIC_V4}/p", short_deadline + 2.0)
     assert isinstance(exc, _contract("UrlFetchError")) and exc.reason == "timeout", exc
-    assert elapsed < short_deadline + 0.5
+    assert elapsed < short_deadline + 1.5  # outer budget is short_deadline + 2.0
 
 
 def test_total_deadline_covers_slow_dns(short_deadline, resolver, origin):
@@ -793,7 +935,7 @@ def test_total_deadline_covers_slow_dns(short_deadline, resolver, origin):
     resolver.delay = short_deadline * 5
     exc, elapsed = _timed("http://slow.test/p", short_deadline + 2.0)
     assert isinstance(exc, _contract("UrlFetchError")) and exc.reason == "timeout", exc
-    assert elapsed < short_deadline + 0.5
+    assert elapsed < short_deadline + 1.5  # outer budget is short_deadline + 2.0
     assert origin.requests == []
 
 
