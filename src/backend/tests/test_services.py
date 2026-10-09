@@ -675,8 +675,24 @@ class TestFetchUrlText:
         )
         original_init = httpx.AsyncClient.__init__
 
+        async def stream_of(data):
+            yield data
+
+        async def streamed(request):
+            # MockTransport hands bytes bodies back already read, which a raw
+            # (never decoded) reader cannot iterate; a real socket always
+            # streams. Re-emit them as a stream; status, headers, body unchanged.
+            result = handler(request)
+            if not isinstance(result, httpx.Response):
+                result = await result
+            if isinstance(result.stream, httpx.ByteStream):
+                result = httpx.Response(
+                    result.status_code, headers=result.headers, content=stream_of(result.content)
+                )
+            return result
+
         def patched_init(self, *args, **kwargs):
-            kwargs["transport"] = httpx.MockTransport(handler)
+            kwargs["transport"] = httpx.MockTransport(streamed)
             original_init(self, *args, **kwargs)
 
         monkeypatch.setattr(httpx.AsyncClient, "__init__", patched_init)
