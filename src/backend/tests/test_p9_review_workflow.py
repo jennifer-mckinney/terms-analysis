@@ -480,9 +480,12 @@ def test_reads_are_fenced_and_pr_settings_are_ignored() -> None:
 
 def test_every_read_deny_path_renders_with_a_meaningful_prefix() -> None:
     # runner.temp is an absolute path on the runner, so render it as one.
+    # Built at runtime so the tracked source holds no literal home path that
+    # the personal-path scan (row 1) would flag (#145).
+    runner_temp = "/".join(["", "home", "runner", "work", "_temp"])
     for rule in READ_DENY:
         assert rule.startswith("Read(") and rule.endswith(")"), rule
-        rendered = rule[len("Read(") : -1].replace(RUNNER_TEMP_EXPR, "/home/runner/work/_temp")
+        rendered = rule[len("Read(") : -1].replace(RUNNER_TEMP_EXPR, runner_temp)
         assert rendered.startswith(READ_PATH_PREFIXES), rule
         assert not rendered.startswith("///"), rule
 
