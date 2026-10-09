@@ -402,6 +402,33 @@ async def analyze(request: AnalyzeRequest, db: Session = Depends(get_db)):
     return payload
 
 
+def _fetch_failure_response(
+    status_code: int, message: str, url: str, exc: Exception
+) -> JSONResponse:
+    """Answer a failed URL fetch without exposing the exception (CWE-209).
+
+    The client gets ``message`` and a fresh correlation id. The full
+    exception text is logged once under that id, with ``%r`` so newlines in
+    the URL or the exception cannot forge extra log lines (CWE-117).
+    Unexpected failures (5xx) keep the traceback in the log.
+    """
+    error_id = uuid4().hex
+    logger.log(
+        logging.ERROR if status_code >= 500 else logging.WARNING,
+        "URL fetch failed: error_id=%s status=%d url=%r error=%s: %r",
+        error_id,
+        status_code,
+        url,
+        type(exc).__name__,
+        str(exc),
+        exc_info=status_code >= 500,
+    )
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": message, "error_id": error_id},
+    )
+
+
 @app.post("/analyze/url", response_model=AnalysisPayload)
 async def analyze_url(request: AnalyzeUrlRequest, db: Session = Depends(get_db)):
     logger.info(
@@ -412,11 +439,15 @@ async def analyze_url(request: AnalyzeUrlRequest, db: Session = Depends(get_db))
     )
     try:
         text = await fetch_url_text(request.url)
-    except ValueError as e:
-        return JSONResponse(status_code=400, content={"detail": str(e)})
+    except ValueError as exc:
+        return _fetch_failure_response(
+            400,
+            "Could not fetch this URL. Try pasting the policy text instead.",
+            request.url,
+            exc,
+        )
     except Exception as exc:
-        logger.error("Failed to fetch URL %s: %s", request.url, exc, exc_info=True)
-        return JSONResponse(status_code=500, content={"detail": "Failed to fetch URL"})
+        return _fetch_failure_response(500, "Failed to fetch URL", request.url, exc)
 
     if not text:
         raise HTTPException(status_code=400, detail="URL content is empty")

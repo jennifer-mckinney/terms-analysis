@@ -9,10 +9,17 @@ on:
     branches:
       - main
 
+# Issue #91 round 3 (security CI note): least-privilege token for every job.
+# No job writes to the repo, issues or PRs.
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Lint (ruff)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -30,6 +37,8 @@ jobs:
   test:
     name: Test (pytest + coverage)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -68,6 +77,8 @@ jobs:
   audit:
     name: Dependency audit (pip-audit)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 

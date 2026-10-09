@@ -5,9 +5,15 @@ on:
   push:
     branches: [main]
 
+# Least-privilege token (CodeQL alert #2): the job only reads the checkout.
+permissions:
+  contents: read
+
 jobs:
   enforce-gitignore-invariants:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout with full history
         uses: actions/checkout@v4
