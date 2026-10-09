@@ -89,7 +89,7 @@ These identifiers mean different things in the ingester repo. Never cite a bare 
 ## p9-governance
 
 - P9 (LIB-PRINCIPLES): independent security and code-quality review before code reaches main. Since 2026-10-09 it runs in CI (`p9-review.yml`, claude-code-action on Opus, read-only tool allowlist, deny rules for `/proc`, `.git` and credentials). Reviews cost API credit; a `billing_error` shows as `is_error:true`, $0, under 1 s.
-- Retired on 2026-10-09 (#214): the local pre-push hard gate, `.git/reviews/*.signoff.json`, owner push scripts, evidence comments, `automations/p9-pre-push.md`.
+- Retired on 2026-10-09 (#214): the local pre-push hard gate, `.git/reviews/*.signoff.json`, owner push scripts and evidence comments. `automations/p9-pre-push.md` stays as the verdict-contract reference the CI jobs use (cited by `docs/P9_ENFORCEMENT_GUIDE.md` and `docs/DEV_SETUP.md`).
 - Required checks on `main` today: `Lint (ruff)`, `Test (pytest + coverage)`, `Dependency audit (pip-audit)`. `security-review`, `grumpy-review` and `Evidence leak scan (docs/evidence)` are NOT required yet (owner action; a red review does not block the merge button until then). `main` requires conversation resolution, so an unresolved thread blocks the merge.
 - Round cap: a third review FAIL on a card goes to the owner (re-scope, or ship LOW/NIT with cards).
 
