@@ -84,6 +84,9 @@ jobs:
     # history, so every commit in the PR / push range is scanned as well.
     name: Evidence leak scan (docs/evidence)
     runs-on: ubuntu-latest
+    # #250: every job states its own least-privilege token; read-only checkout.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:

@@ -11,12 +11,23 @@ against the decoded text:
 
   1. NUL bytes are stripped (UTF-16 text and binary blobs are scanned too).
   2. Up to MAX_PASSES rounds of
-       * URL percent-decoding (hex is case-insensitive: %2F and %2f), and
-       * JSON / backslash unescaping of \\/ , \\\\ , \\uXXXX and \\xHH,
+       * URL percent-decoding (hex is case-insensitive: %2F and %2f),
+       * JSON / backslash unescaping of \\/ , \\\\ , \\uXXXX and \\xHH, and
+       * stripping every Unicode format character (general category Cf,
+         derived from unicodedata: zero-width space / joiners, BOM, soft
+         hyphen, bidi embeddings / overrides / isolates, tag characters ...),
+         raw or just decoded, so an invisible character inside a path cannot
+         split it (#192 Copilot),
      stopping early once a round changes nothing. Double-encoded forms such
      as %252F or \\\\/ therefore decode too.
   3. Any remaining backslash is folded to "/" (Windows C:\\Users\\<name>).
   4. The text is case-folded, so patterns are written in lower case.
+
+The canonical text is always UTF-8 BYTES held one per character (latin-1),
+the form scan_bytes produces: percent escapes decode to bytes, and a
+\\uXXXX escape (a JSON surrogate pair combined into one code point first)
+decodes to the UTF-8 bytes of its code point, so every transport of the
+same character reaches the Cf strip and the patterns in the same form.
 
 A line that starts with a compressed or archived container signature
 (CONTAINER_SIGNATURES) is reported as the pseudo-pattern "opaque-container"
@@ -47,6 +58,7 @@ from __future__ import annotations
 
 import re
 import sys
+import unicodedata
 from pathlib import Path
 from bisect import bisect_right
 from typing import BinaryIO, Callable, Dict, List, Optional, Sequence, Tuple
@@ -57,7 +69,23 @@ MAX_PASSES = 3
 # Only these escapes are undone. Other backslash sequences (\n, \U ...) are
 # left alone so a Windows home path whose account name starts with "n" is not
 # mangled before the backslash fold in step 3.
-_ESCAPE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|([/\\]))")
+# #192 Copilot: a JSON surrogate pair (\uD8xx\uDCxx, how ensure_ascii writes
+# an astral character such as a Cf tag character) is matched as ONE escape so
+# it decodes to its real code point, not two lone surrogates.
+_ESCAPE = re.compile(
+    r"\\(?:u([dD][89abAB][0-9a-fA-F]{2})\\u([dD][c-fC-F][0-9a-fA-F]{2})"
+    r"|u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|([/\\]))"
+)
+
+# #192 Copilot thread: Unicode format characters (category Cf) are invisible,
+# so one inside a home path ("/Us<ZWSP>ers/...") hid it from every pattern.
+# The set is derived from the running interpreter's Unicode database, never
+# listed by hand, so a new Cf code point is covered without a code change.
+# Mapped to None for str.translate (one linear pass).
+_STRIPPED_CATEGORY = "Cf"
+_CF_TABLE: Dict[int, None] = {
+    code: None for code in range(sys.maxunicode + 1) if unicodedata.category(chr(code)) == _STRIPPED_CATEGORY
+}
 
 # (name, compiled regex, context or None). A context is built once per
 # canonical line; its is_leak(offset) says whether a regex hit is a leak.
@@ -152,16 +180,42 @@ class _Runs:
 CONTEXTS: Dict[str, Callable[[str], "_Runs"]] = {"absolute-path": _Runs}
 
 
+def _utf8_bytes(text: str) -> str:
+    """The UTF-8 bytes of text, one latin-1 character per byte.
+
+    surrogatepass keeps a lone surrogate escape lossless (it is not Cf).
+    """
+    return text.encode("utf-8", "surrogatepass").decode("latin-1")
+
+
 def _unescape(text: str) -> str:
     def repl(match: "re.Match[str]") -> str:
-        hex4, hex2, literal = match.groups()
+        high, low, hex4, hex2, literal = match.groups()
+        if high is not None:
+            code = 0x10000 + ((int(high, 16) - 0xD800) << 10) + (int(low, 16) - 0xDC00)
+            return _utf8_bytes(chr(code))
         if hex4 is not None:
-            return chr(int(hex4, 16))
+            return _utf8_bytes(chr(int(hex4, 16)))
         if hex2 is not None:
-            return chr(int(hex2, 16))
+            return chr(int(hex2, 16))  # \xHH names one byte
         return literal
 
     return _ESCAPE.sub(repl, text)
+
+
+def _strip_cf(text: str) -> str:
+    """Drop every Cf code point from byte-form text (see module docstring).
+
+    The bytes are decoded as UTF-8 with surrogateescape, so invalid sequences
+    (binary, UTF-16, a lone 0xAD byte) round-trip unchanged and only a real
+    encoded Cf character is removed. Linear: one decode, translate, encode.
+    A character above U+00FF is not byte form: encode raises (fail closed).
+    """
+    decoded = text.encode("latin-1").decode("utf-8", "surrogateescape")
+    stripped = decoded.translate(_CF_TABLE)
+    if len(stripped) == len(decoded):
+        return text
+    return stripped.encode("utf-8", "surrogateescape").decode("latin-1")
 
 
 def normalise(text: str) -> str:
@@ -169,7 +223,7 @@ def normalise(text: str) -> str:
     text = text.replace("\x00", "")
     for _ in range(MAX_PASSES):
         # latin-1 keeps every byte value lossless; the patterns are ASCII.
-        decoded = _unescape(unquote(text, encoding="latin-1"))
+        decoded = _strip_cf(_unescape(unquote(text, encoding="latin-1")))
         if decoded == text:
             break
         text = decoded
