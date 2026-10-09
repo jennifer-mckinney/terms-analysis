@@ -20,22 +20,27 @@ xref: [[LIB-RULES#IRP]] [[LIB-CONTEXT]]
 
 ### HR1: open-source-only
 rule: all dependencies MUST be open source (Apache 2.0, MIT, BSD preferred)
+scope: product runtime/data path; dev-time CI review tooling exempt per docs/adr/0001-dependency-rules-scope-ci-review-tooling.md
 
 ### HR2: no-investor-lawsuit-vendors
 rule: no tools/services from companies facing investor lawsuits (excludes Meta-origin, e.g. FAISS)
 because: legal-KB vector index uses numpy exhaustive search instead
+scope: product runtime/data path; dev-time CI review tooling exempt per docs/adr/0001-dependency-rules-scope-ci-review-tooling.md
 
 ### HR3: IRP-grade-A-or-higher
 rule: all dependencies MUST score IRP Grade A or higher
+scope: product runtime/data path; dev-time CI review tooling exempt per docs/adr/0001-dependency-rules-scope-ci-review-tooling.md
 
 ### HR4: local-only-data
 rule: all data stays local; no external API calls
+scope: product runtime/data path (user documents, results, legal-KB data); CI review of repo source diffs exempt per docs/adr/0001-dependency-rules-scope-ci-review-tooling.md
 
 ### HR5: LLM-fallback-to-rules
 rule: LLM failures MUST fall back to rule-only findings with reduced confidence
 
 ### HR6: no-openai-local-LLM-only
 rule: no OpenAI dependency; LLM inference is local-only via LocalAI (EuroLLM-22B for EU/legal, Apertus-8B for multilingual/world)
+scope: product runtime/data path; dev-time CI review tooling exempt per docs/adr/0001-dependency-rules-scope-ci-review-tooling.md
 
 ### HR7: HITL-threshold
 rule: confidence < 0.80 triggers human-in-the-loop review
@@ -133,9 +138,9 @@ xref: [[.claude/rules/testing.md]]
 ## session-outcomes-2026-07-04
 
 ### SO11: p9-loop-pattern-active
-rule: every push runs the parallel security+grumpy review loop. ANY finding of ANY severity triggers a fix-Coder dispatch; iterate to fixed-point (both PASS zero findings) before writing signoff and pushing
-codified: `.git/reviews/<sha>.signoff.json` schema in `automations/p9-pre-push.md`; hook validates signoff before allowing push
-because: user directive 2026-07-04 extends P9 zero-tolerance-security to zero-tolerance-grumpy
+rule: every PR to `main` runs the parallel security+grumpy review loop. A CRITICAL, HIGH or MEDIUM finding triggers a fix-Coder dispatch; iterate until neither job reports a blocking finding. LOW and NIT findings are posted and carded, not chased (owner, 2026-10-09)
+codified: since 2026-10-09 (#191) the loop runs in CI: `.github/workflows/p9-review.yml` jobs `security-review` + `grumpy-review`, verdict contract in `automations/p9-pre-push.md`
+because: user directive 2026-07-04 made P9 zero-tolerance; narrowed 2026-10-09 to CRITICAL/HIGH/MEDIUM after Anthropic guidance and our own round data showed nit-chasing drove over-engineering
 whack-a-mole warning: when name-based deny-lists keep growing across rounds, switch to structural fix (pattern-based rules, schema-driven ordering, input normalization). Two structural-fix wins this session:
   - SO12 F2 (chip order): switched `_ACTION_ITEMS_BY_CHIP.items()` → `typing.get_args(ContextChip)`
   - ingester rounds 6-9: added `_REDACT_SUFFIXES` + `_normalize_key(camelCase→snake_case)` instead of growing exact-name list further
@@ -147,17 +152,16 @@ commits: `569260b` (st.form intake), `a4b4c66` (chip-tune action_items), `f1d8ca
 detail: `/infer` handler verified to ignore context arg (main.py:340-349, inference.py:535) — arg dropped from call_infer signature + docstring explains why
 xref: [[automations/p9-pre-push.md]] [[SO11]]
 
-### SO13: p9-hard-gate-mirrored
-rule: `.githooks/pre-push` is the P9 hard-gate (mirrored from legal-corpus-ingester at commit `3fb017e`). Refuses push unless `.git/reviews/<HEAD_SHA>.signoff.json` exists with security_engineer.verdict=PASS + grumpy_developer.verdict=PASS (or override.used=true with reason + authorized_by)
-existing: `.githooks/pre-commit` unchanged (project-specific gitignore-SSoT + graveyard + case-insensitive .env guards)
-deleted: `.githooks/pre-push-p9-check` (dormant interactive checklist superseded by the hard gate)
-replaced: `scripts/install-hooks.sh` — was stale copy-based, now `core.hooksPath`-based (idempotent glob-chmod + `.git/reviews/` ensure)
-docs: `automations/p9-pre-push.md` + `docs/P9_ENFORCEMENT_GUIDE.md` (both updated 2026-07-04)
-classifier friction: subagent + Write both blocked when writing signoff files. Workaround: hand user a paste-block containing mkdir + cat heredoc + git push
+### SO13: p9-gate-in-ci
+rule: P9 is enforced in CI (2026-10-09, #191, superseding the 2026-07-04 local hook). `.github/workflows/p9-review.yml` runs `security-review` + `grumpy-review` on `pull_request` to `main`; each job runs `anthropics/claude-code-action` (SHA-pinned) with its brief from `.github/p9/` and an exact tool allowlist (Read/Grep/Glob, Write scoped to `p9-verdict.json`, the inline PR-comment MCP tool; no Bash), reads a pre-written diff, comments inline on findings, writes `p9-verdict.json`, and fails unless `.github/p9/check_verdict.py` sees verdict PASS with `findings: []`. Branch protection pending: the owner makes both jobs required checks on `main` after the first green run
+retired: `.githooks/pre-push` + its `.sha256` pin, `.git/reviews/<sha>.signoff.json` signoffs, `.github/workflows/enforce-p9-review.yml`, `scripts/ci/p9-sibling-parity.sh` and the #175 hook-only test suites
+existing: `.githooks/pre-commit` unchanged (project-specific gitignore-SSoT + graveyard + case-insensitive .env guards); `scripts/install-hooks.sh` still sets `core.hooksPath=.githooks` for it
+owner_steps: add the `ANTHROPIC_API_KEY` repo secret; after the first green run, require `security-review` + `grumpy-review` in branch protection
+docs: `automations/p9-pre-push.md` + `docs/P9_ENFORCEMENT_GUIDE.md` + `docs/DEV_SETUP.md` (updated 2026-10-09)
 xref: [[SO11]]
 
 ### SO14: sibling-project-legal-corpus-ingester
-rule: sibling project `~/Documents/05_Technical_Development/01_AUTOMATION/01_Claude_Projects/legal-corpus-ingester/` bootstrapped 2026-07-04. Phase 0.1 Tasks 1-40 complete and pushed at `459a1b8`.
+rule: sibling project `~/<projects>/legal-corpus-ingester/` bootstrapped 2026-07-04. Phase 0.1 Tasks 1-40 complete and pushed at `459a1b8`.
 remote: `jennifer-mckinney/legal-corpus-ingester` (private)
 plan: `docs/plans/2026-07-04-legal-corpus-ingester.md` (this repo) — complete; Phase 1 EU plan at `docs/plans/2026-07-04-legal-corpus-ingester-phase1-EU.md`
 consumer contract: `src/backend/app/services/legal_kb.py` — consumes corpus bundles from ingester per plan Task 28
@@ -192,7 +196,7 @@ Access via `@.claude/library/<file>` when deeper context is needed.
 | **LIB-EVAL** | `@.claude/library/LIB-EVAL.md` | Rubric, F1/Kappa, grading thresholds |
 | **LIB-CONTEXT** | `@.claude/library/LIB-CONTEXT.md` | Context chip taxonomy, weight tiers, sort semantics, verdict copy |
 | **LIB-VOICE** | `@.claude/library/LIB-VOICE.md` | Two-voice copy, no-em-dash, scope-honesty gap |
-| **LIB-PRINCIPLES** | `@.claude/library/LIB-PRINCIPLES.md` | Governance principles P1-P9 (P8 agent-separation, P9 pre-push review) |
+| **LIB-PRINCIPLES** | `@.claude/library/LIB-PRINCIPLES.md` | Governance principles P1-P9 (P8 agent-separation, P9 PR review in CI) |
 
 ## governance-monitoring
 
@@ -214,10 +218,10 @@ regen_policy: only after intentional governance-file change reviewed via PR
 because: catches silent governance drift between sessions
 xref: [[LIB-PRINCIPLES#P8]]
 
-### G3: pre-push-independent-review
-rule: enforce LIB-PRINCIPLES P9 — dispatch security-engineer + grumpy-developer before any push. Zero-tolerance for BOTH per 2026-07-04 user directive: ANY finding of ANY severity triggers a fix-Coder + re-review loop until both PASS
-automation: `.githooks/pre-push` hard-gate refuses push without `.git/reviews/<sha>.signoff.json` (see [[SO11]] [[SO13]])
-gate: ANY finding of ANY severity blocks push until resolved or user-overridden via `override.used=true` with reason + authorized_by
+### G3: pr-independent-review
+rule: enforce LIB-PRINCIPLES P9 — every PR to `main` gets security-engineer + grumpy-developer reviews in CI. A CRITICAL, HIGH or MEDIUM finding from either triggers a fix-Coder + new push until neither reports a blocking finding; LOW and NIT are carded (owner, 2026-10-09)
+automation: `.github/workflows/p9-review.yml` jobs `security-review` + `grumpy-review`; required checks on `main` pending owner setup after the first green run (see [[SO11]] [[SO13]])
+gate: any CRITICAL/HIGH/MEDIUM finding (`BLOCKING_SEVERITIES` in `.github/p9/check_verdict.py`), or a missing/unparseable verdict, fails the job (which blocks merge once the checks are required); only the owner can waive
 xref: [[LIB-PRINCIPLES#P9]] [[SO11]] [[SO13]] [[automations/p9-pre-push.md]]
 
 ## plans-and-analysis

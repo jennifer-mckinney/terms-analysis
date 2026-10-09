@@ -4,7 +4,7 @@
 
 Run all tests:
 ```bash
-cd /Users/jennifermckinney/Documents/05_Technical_Development/01_AUTOMATION/01_Claude_Projects/terms-analysis
+cd <repo>
 pytest tests/ -v
 ```
 
@@ -326,7 +326,7 @@ tests/test_api_endpoints.py::test_analyze_endpoint_with_mode_parameter PASSED
 
 1. **Setup**:
    ```bash
-   cd /Users/jennifermckinney/Documents/05_Technical_Development/01_AUTOMATION/01_Claude_Projects/terms-analysis
+   cd <repo>
    pip install pytest pytest-asyncio
    ```
 
