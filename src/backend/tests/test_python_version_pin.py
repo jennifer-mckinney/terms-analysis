@@ -4,7 +4,8 @@ CI used to hard-code ``python-version: '3.11'`` in every setup-python step
 while local dev ran 3.14, so CI tested an interpreter nobody develops on.
 The contract below: the repo root holds one ``.python-version`` file, every
 ``actions/setup-python`` step in every workflow reads it through
-``python-version-file``, no workflow restates a version anywhere, the pinned
+``python-version-file``, every job that runs ``python`` sets it up that way
+before the first such step, no workflow restates a version anywhere, the pinned
 version satisfies every Python floor the repo declares, and the one test known
 to behave differently on 3.14 still runs (not skipped, not xfailed).
 
@@ -43,11 +44,31 @@ SETUP_PYTHON = "actions/setup-python"
 VERSION_FILE_INPUT = "python-version-file"
 HARD_CODED_INPUT = "python-version"
 
-# Jobs that must install Python through setup-python. Guards the "did
-# nothing" case: a checker that finds zero steps must not pass.
-REQUIRED_SETUP_PYTHON_JOBS = frozenset(
-    {("ci.yml", "lint"), ("ci.yml", "test"), ("ci.yml", "audit")}
+# Jobs whose run steps invoke python. Without setup-python they run whatever
+# python3 the runner image ships, which is how the P9 gate script behaved
+# differently between interpreters (#265). Guards the "did nothing" case for
+# the run-step detector: it must keep finding these.
+PYTHON_RUNNING_JOBS = frozenset(
+    {
+        ("ci.yml", "test"),
+        ("p9-review.yml", "security-review"),
+        ("p9-review.yml", "grumpy-review"),
+        ("board-sync.yml", "board-sync"),
+    }
 )
+
+# Jobs that must install Python through setup-python. Guards the "did
+# nothing" case: a checker that finds zero steps must not pass. lint and
+# audit call pip and ruff only, but still install Python from the pin.
+REQUIRED_SETUP_PYTHON_JOBS = PYTHON_RUNNING_JOBS | frozenset(
+    {("ci.yml", "lint"), ("ci.yml", "audit")}
+)
+
+# A python interpreter as a shell word: bare, by path, or versioned
+# (python, python3, /usr/bin/python3, python3.14). Not python-dotenv,
+# python3-venv, pythonista, mypython or check_verdict.py.
+_PYTHON_WORD = re.compile(r"(?<![\w.-])python(?:3(?:\.[0-9]+)?)?(?![\w.-])", re.ASCII)
+_ECHO_WORDS = frozenset({"echo", "printf"})
 
 # Exactly "3.<minor>", ASCII digits only, no leading zero, at most 3 digits
 # (bounds int() on a hostile multi-megabyte digit run). One optional "\n".
@@ -407,6 +428,253 @@ def test_hard_coded_key_walker_survives_deep_documents() -> None:
     for _ in range(50_000):
         deep = {"k": deep}
     assert len(_hard_coded_version_keys("w.yml", deep)) == 1
+
+
+# --- acceptance: every job that runs python set it up from the pin ----------
+
+
+def _strip_shell_comment(line: str) -> str:
+    """Drop a shell comment: '#' outside quotes, at line start or after blank."""
+    quote = ""
+    for i, ch in enumerate(line):
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "#" and (i == 0 or line[i - 1] in " \t"):
+            return line[:i]
+    return line
+
+
+def _run_invokes_python(script: str) -> bool:
+    """True when a `run:` script calls a python interpreter.
+
+    Errs towards True (fail closed): an over-match only asks for a
+    setup-python step that does no harm. echo/printf arguments do not count
+    unless they hold a command substitution, which does run.
+    """
+    logical = re.sub(r"\\\r?\n", " ", script)  # join backslash continuations
+    for line in logical.splitlines():
+        for command in re.split(r"&&|\|\||[;|&(]", _strip_shell_comment(line)):
+            words = command.split()
+            if not words:
+                continue
+            if words[0] in _ECHO_WORDS and "$(" not in command and "`" not in command:
+                continue
+            if _PYTHON_WORD.search(command):
+                return True
+    return False
+
+
+def _shell_of(*candidates: object) -> str:
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            return candidate
+    return ""
+
+
+def _default_shell(node: object) -> object:
+    defaults = node.get("defaults") if isinstance(node, dict) else None
+    run = defaults.get("run") if isinstance(defaults, dict) else None
+    return run.get("shell") if isinstance(run, dict) else None
+
+
+def _step_invokes_python(step: dict[str, Any], default_shell: str) -> bool:
+    script = step.get("run")
+    if not isinstance(script, str):
+        return False  # a `uses:` step (composite or JS action) is not judged here
+    shell = _shell_of(step.get("shell"), default_shell)
+    # `shell: python` (or `python3 {0}`) runs the whole script under python.
+    return bool(_PYTHON_WORD.search(shell)) or _run_invokes_python(script)
+
+
+def _reads_the_pin(step: dict[str, Any]) -> bool:
+    inputs = step.get("with")
+    return (
+        isinstance(inputs, dict)
+        and HARD_CODED_INPUT not in inputs
+        and inputs.get(VERSION_FILE_INPUT) == VERSION_FILE_NAME
+    )
+
+
+def _python_run_steps(name: str, doc: Any) -> list[tuple[str, str, bool]]:
+    """(job id, step label, pinned) for every run step that invokes python.
+
+    pinned is True only when the most recent setup-python step earlier in the
+    same job reads the pin; a later setup-python with a hard-coded version
+    replaces the interpreter, so the last one wins.
+    """
+    found: list[tuple[str, str, bool]] = []
+    jobs = doc.get("jobs") if isinstance(doc, dict) else None
+    for job_id, job in (jobs or {}).items():
+        default_shell = _shell_of(_default_shell(job), _default_shell(doc))
+        steps = job.get("steps") if isinstance(job, dict) else None
+        pinned = False
+        for index, step in enumerate(steps or []):
+            if not isinstance(step, dict):
+                continue
+            if _is_setup_python(step.get("uses")):
+                pinned = _reads_the_pin(step)
+            elif _step_invokes_python(step, default_shell):
+                label = f"step {index} ({step.get('name') or 'run'})"
+                found.append((job_id, label, pinned))
+    return found
+
+
+def _unpinned_python_runs(name: str, doc: Any) -> list[str]:
+    return [
+        f"{name}/{job_id}/{label}: runs python with no earlier setup-python "
+        f"reading {VERSION_FILE_NAME}"
+        for job_id, label, pinned in _python_run_steps(name, doc)
+        if not pinned
+    ]
+
+
+def test_python_running_jobs_are_detected() -> None:
+    # "Did nothing" guard for the detector: on the real workflows it must
+    # still find every job known to run python.
+    found = set()
+    for path in _workflow_files():
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        found.update((path.name, job_id) for job_id, _, _ in _python_run_steps(path.name, doc))
+    assert PYTHON_RUNNING_JOBS <= found, sorted(PYTHON_RUNNING_JOBS - found)
+
+
+@pytest.mark.parametrize("path", _workflow_files(), ids=lambda p: p.name)
+def test_every_python_run_follows_a_pinned_setup_python(path: Path) -> None:
+    # Red today: p9-review.yml (security-review, grumpy-review gate steps)
+    # and board-sync.yml (Plan, Set the card status) call the runner's
+    # python3 with no setup-python step at all.
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert _unpinned_python_runs(path.name, doc) == []
+
+
+def _run(script: str, **extra: Any) -> dict[str, Any]:
+    return {"run": script, **extra}
+
+
+_HARD_CODED_SETUP = {"uses": "actions/setup-python@v5", "with": {HARD_CODED_INPUT: "3.14"}}
+
+# (id, run script, invokes python?) for the run-step detector.
+_RUN_VECTORS: list[tuple[str, str, bool]] = [
+    ("python3-isolated", 'python3 -I .github/board-sync/board_sync.py plan', True),
+    ("python-m", "python -m pytest -v", True),
+    ("quoted-script-arg", 'python3 "$RUNNER_TEMP/check_verdict.py" p9-verdict.json', True),
+    ("absolute-path", "/usr/bin/python3 x.py", True),
+    ("versioned", "python3.14 -V", True),
+    ("env-prefix", "PYTHONHASHSEED=0 python3 x.py", True),
+    ("after-and", "cd src && python -m pytest", True),
+    ("after-semicolon", "true; python3 x.py", True),
+    ("after-pipe", "cat f | python3 -m json.tool", True),
+    ("subshell", "(python3 x.py)", True),
+    ("second-line", "set -euo pipefail\npython3 x.py\n", True),
+    ("continuation", "FOO=1 \\\n  python3 x.py", True),
+    ("bash-c-single-quoted", "bash -c 'python3 x.py'", True),
+    ("echo-command-substitution", 'echo "$(python3 -V)"', True),
+    ("echo-backticks", "echo `python3 -V`", True),
+    ("hash-inside-quotes-not-comment", 'X="a#b" python3 x.py', True),
+    ("if-then", "if true; then python3 x.py; fi", True),
+    ("pip-install", "pip install ruff", False),
+    ("pip-audit", "pip-audit -r src/backend/requirements.txt", False),
+    ("ruff", "ruff check src/backend/app --target-version py314", False),
+    ("cp-py-file", 'cp .github/p9/check_verdict.py "$RUNNER_TEMP/check_verdict.py"', False),
+    ("pip-python-dash-package", "pip install python-dotenv", False),
+    ("apt-python3-dash-package", "sudo apt-get install -y python3-venv", False),
+    ("prefix-word", "mypython3 x", False),
+    ("suffix-word", "pythonista x", False),
+    ("comment-line", "# python3 x.py would be wrong here\ntrue", False),
+    ("trailing-comment", "true  # then python3 x.py", False),
+    ("echo-string", 'echo "Using python3 from the runner"', False),
+    ("printf-string", "printf '%s\\n' python3", False),
+    ("empty", "", False),
+]
+
+
+@pytest.mark.parametrize(
+    "script,expected", [(r, e) for _, r, e in _RUN_VECTORS], ids=[i for i, _, _ in _RUN_VECTORS]
+)
+def test_python_run_detector_vectors(script: str, expected: bool) -> None:
+    assert _run_invokes_python(script) is expected
+
+
+def test_python_run_detector_vectors_have_both_outcomes() -> None:
+    assert {expected for _, _, expected in _RUN_VECTORS} == {True, False}
+
+
+_RUN_PY = _run("python3 x.py", name="Gate")
+_UNPINNED = "w.yml/j/step {i} (Gate): runs python with no earlier setup-python reading .python-version"
+
+# (id, workflow, expected problems) for the job-level ordering checker.
+_ORDER_VECTORS: list[tuple[str, Any, list[str]]] = [
+    ("setup-then-run", _wf(_PINNED, _RUN_PY), []),
+    ("checkout-setup-run", _wf({"uses": "actions/checkout@v4"}, _PINNED, _RUN_PY), []),
+    ("no-python-no-setup", _wf({"uses": "actions/checkout@v4"}, _run("pip install ruff")), []),
+    ("comment-only", _wf(_run("# python3 x.py\ntrue")), []),
+    ("echo-only", _wf(_run('echo "python3 is next"')), []),
+    ("composite-uses-ignored", _wf({"uses": "./.github/actions/py-thing"}), []),
+    ("remote-uses-ignored", _wf({"uses": "owner/python-action@v1", "with": {"x": 1}}), []),
+    ("non-string-run-ignored", _wf({"run": ["python3", "x.py"]}), []),
+    ("non-mapping-step-ignored", _wf("python3 x.py"), []),
+    ("reusable-workflow-job", {"jobs": {"j": {"uses": "./.github/workflows/x.yml"}}}, []),
+    ("not-a-mapping", None, []),
+    ("no-setup", _wf(_RUN_PY), [_UNPINNED.format(i=0)]),
+    ("run-before-setup", _wf(_RUN_PY, _PINNED), [_UNPINNED.format(i=0)]),
+    (
+        "setup-in-other-job",
+        {"jobs": {"a": {"steps": [_PINNED]}, "j": {"steps": [_RUN_PY]}}},
+        [_UNPINNED.format(i=0)],
+    ),
+    ("hard-coded-version", _wf(_HARD_CODED_SETUP, _RUN_PY), [_UNPINNED.format(i=1)]),
+    (
+        "both-inputs",
+        _wf({"uses": "actions/setup-python@v5",
+             "with": {HARD_CODED_INPUT: "3.14", VERSION_FILE_INPUT: VERSION_FILE_NAME}}, _RUN_PY),
+        [_UNPINNED.format(i=1)],
+    ),
+    ("setup-without-with", _wf({"uses": "actions/setup-python@v5"}, _RUN_PY), [_UNPINNED.format(i=1)]),
+    ("later-hard-coded-overrides", _wf(_PINNED, _HARD_CODED_SETUP, _RUN_PY), [_UNPINNED.format(i=2)]),
+    (
+        "each-unpinned-run-listed",
+        _wf(_RUN_PY, _PINNED, _RUN_PY, _HARD_CODED_SETUP, _RUN_PY),
+        [_UNPINNED.format(i=0), _UNPINNED.format(i=4)],
+    ),
+    ("step-shell-python", _wf(_run("print(1)", name="Gate", shell="python")), [_UNPINNED.format(i=0)]),
+    (
+        "job-default-shell-python",
+        {"jobs": {"j": {"defaults": {"run": {"shell": "python3 {0}"}},
+                        "steps": [_run("print(1)", name="Gate")]}}},
+        [_UNPINNED.format(i=0)],
+    ),
+    (
+        "workflow-default-shell-python",
+        {"defaults": {"run": {"shell": "python"}},
+         "jobs": {"j": {"steps": [_run("print(1)", name="Gate")]}}},
+        [_UNPINNED.format(i=0)],
+    ),
+    (
+        "step-shell-bash-overrides-python-default",
+        {"defaults": {"run": {"shell": "python"}},
+         "jobs": {"j": {"steps": [_run("true", name="Gate", shell="bash")]}}},
+        [],
+    ),
+    (
+        "unnamed-step-label",
+        _wf(_run("python3 x.py")),
+        ["w.yml/j/step 0 (run): runs python with no earlier setup-python reading .python-version"],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "doc,expected", [(d, e) for _, d, e in _ORDER_VECTORS], ids=[i for i, _, _ in _ORDER_VECTORS]
+)
+def test_python_run_order_checker_vectors(doc: Any, expected: list[str]) -> None:
+    assert _unpinned_python_runs("w.yml", doc) == expected
+
+
+def test_python_run_order_vectors_have_both_outcomes() -> None:
+    assert {bool(expected) for _, _, expected in _ORDER_VECTORS} == {True, False}
 
 
 # --- acceptance: the pin agrees with every declared floor ---------------------
