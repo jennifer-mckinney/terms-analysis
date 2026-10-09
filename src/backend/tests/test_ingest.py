@@ -655,6 +655,59 @@ def test_connect_failure_falls_back_to_the_next_checked_address(answers, resolve
     assert resolver.calls == ["multi.test"]
 
 
+def test_redirect_reuses_the_address_that_connected_not_the_first_answer(resolver, origin):
+    """The pin is the address that actually connected. First answer refuses
+    every connect, the second connects and redirects to the same host, and a
+    second lookup would rebind to loopback. The redirect hop must go to the
+    second (connected) address, with one lookup and no other address tried."""
+    first, second = PUBLIC_V4, PUBLIC_V4_B
+    resolver.table["multi.test"] = [[first, second], ["127.0.0.1"]]
+    origin.routes[(first, "/start")] = _refuse_connect
+    origin.routes[(first, "/final")] = _refuse_connect
+    origin.routes[(second, "/start")] = _redirect("/final")
+    origin.routes[(second, "/final")] = _text(b"Final policy text.")
+    try:
+        text = _fetch("http://multi.test/start")
+    except (_contract("UrlFetchError"), _contract("UnsafeUrlError")) as exc:
+        pytest.fail(
+            f"redirect hop not sent to the connected address: reason {exc.reason!r}, "
+            f"tried {[(r.url.host, r.url.path) for r in origin.requests]!r}, "
+            f"lookups {resolver.calls!r}"
+        )
+    assert text == "Final policy text."
+    assert [(r.url.host, r.url.path) for r in origin.requests] == [
+        (first, "/start"),
+        (second, "/start"),
+        (second, "/final"),
+    ]
+    assert origin.requests[-1].headers["host"] == "multi.test"
+    assert resolver.calls == ["multi.test"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [httpx.ReadTimeout, httpx.ReadError, httpx.RemoteProtocolError, httpx.WriteError],
+    ids=lambda e: e.__name__,
+)
+def test_only_a_connect_error_falls_back_to_the_next_address(error, resolver, origin):
+    """A failure after the connection exists (read, write, protocol) is not a
+    reason to try another address: the hop fails once, as a clean connect
+    error, and the second checked address is never contacted."""
+    first, second = PUBLIC_V4, PUBLIC_V4_B
+    resolver.table["multi.test"] = [first, second]
+
+    def fail_after_connect(request):
+        raise error("broken stream from 10.9.8.7", request=request)
+
+    origin.routes[(first, "/p")] = fail_after_connect
+    origin.routes[(second, "/p")] = _text(LEAK)
+    exc = _expect("UrlFetchError", {"connect"}, "http://multi.test/p")
+    assert not isinstance(exc, _contract("UnsafeUrlError"))
+    assert [r.url.host for r in origin.requests] == [first]
+    assert resolver.calls == ["multi.test"]
+    _assert_clean_message(exc, "10.9.8.7", "multi.test", "broken stream")
+
+
 def test_connect_failure_on_every_address_is_one_clean_connect_error(resolver, origin):
     """Fallback still fails closed: when every checked address refuses, each
     is tried once, in order, and the outcome is a clean connect error."""
@@ -742,11 +795,16 @@ def test_every_redirect_hop_is_revalidated(status, target, exc_name, reasons, re
 
 
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
-def test_relative_redirect_keeps_original_host_and_pin(status, resolver, origin):
-    resolver.table["example.test"] = [PUBLIC_V4]
-    origin.routes[(PUBLIC_V4, "/start")] = _redirect("/final", status)
+@pytest.mark.parametrize("location", ["/final", "http://example.test/final"], ids=["relative", "absolute-same-host"])
+def test_relative_redirect_keeps_original_host_and_pin(status, location, resolver, origin):
+    """A same-host redirect reuses the pinned address and never re-resolves:
+    the resolver rebinds to loopback on any second lookup (DNS rebinding)."""
+    resolver.table["example.test"] = [[PUBLIC_V4], ["127.0.0.1"]]
+    origin.routes[(PUBLIC_V4, "/start")] = _redirect(location, status)
     origin.routes[(PUBLIC_V4, "/final")] = _text(b"Final policy text.")
     assert _fetch("http://example.test/start") == "Final policy text."
+    assert resolver.calls == ["example.test"]
+    assert [r.url.host for r in origin.requests] == [PUBLIC_V4, PUBLIC_V4]
     final = origin.requests[-1]
     assert (final.url.host, final.url.path, final.headers["host"]) == (PUBLIC_V4, "/final", "example.test")
 
