@@ -12,8 +12,10 @@ name: P9 Review
 # prepared before it runs. Reads are fenced to the workspace and that
 # directory, and /proc and runner credential paths are denied as defence in
 # depth, so the process environment (ANTHROPIC_API_KEY, the job token) cannot
-# be read back. --setting-sources user ignores any .claude/settings.json the
-# PR adds. ANTHROPIC_API_KEY is only the action step's input, never job env.
+# be read back. Checkout keeps no credential (persist-credentials: false), but
+# the action itself writes the job token into the origin URL in .git/config,
+# so the workspace .git directory is denied too. --setting-sources user ignores
+# any .claude/settings.json the PR adds. ANTHROPIC_API_KEY is only the action step's input, never job env.
 # Branch protection is pending: after the first green run the owner makes both
 # jobs (security-review, grumpy-review) required checks on main.
 #
@@ -85,7 +87,7 @@ jobs:
           # Write is scoped through an Edit rule: Claude Code consults Edit(path)
           # rules for every file-writing tool and ignores Write(path) rules
           # (code.claude.com/docs/en/permissions, "Read and Edit").
-          settings: '{"permissions":{"blockReadsOutsideWorkingDirectories":true,"deny":["Read(/proc/**)","Read(//proc/**)","Read(//sys/**)","Read(~/.git-credentials)","Read(~/.config/gh/**)","Read(~/.claude/.credentials.json)","Read(//home/runner/work/_temp/_runner_file_commands/**)"]}}'
+          settings: '{"permissions":{"blockReadsOutsideWorkingDirectories":true,"deny":["Read(/proc/**)","Read(//proc/**)","Read(//sys/**)","Read(~/.git-credentials)","Read(~/.config/gh/**)","Read(~/.claude/.credentials.json)","Read(/${{ runner.temp }}/_runner_file_commands/**)","Read(./.git/**)"]}}'
           claude_args: |
             --max-turns 40
             --setting-sources user
@@ -142,7 +144,7 @@ jobs:
           # Write is scoped through an Edit rule: Claude Code consults Edit(path)
           # rules for every file-writing tool and ignores Write(path) rules
           # (code.claude.com/docs/en/permissions, "Read and Edit").
-          settings: '{"permissions":{"blockReadsOutsideWorkingDirectories":true,"deny":["Read(/proc/**)","Read(//proc/**)","Read(//sys/**)","Read(~/.git-credentials)","Read(~/.config/gh/**)","Read(~/.claude/.credentials.json)","Read(//home/runner/work/_temp/_runner_file_commands/**)"]}}'
+          settings: '{"permissions":{"blockReadsOutsideWorkingDirectories":true,"deny":["Read(/proc/**)","Read(//proc/**)","Read(//sys/**)","Read(~/.git-credentials)","Read(~/.config/gh/**)","Read(~/.claude/.credentials.json)","Read(/${{ runner.temp }}/_runner_file_commands/**)","Read(./.git/**)"]}}'
           claude_args: |
             --max-turns 40
             --setting-sources user

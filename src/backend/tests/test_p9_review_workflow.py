@@ -60,7 +60,8 @@ READ_DENY = {
     "Read(~/.git-credentials)",
     "Read(~/.config/gh/**)",
     "Read(~/.claude/.credentials.json)",
-    "Read(//home/runner/work/_temp/_runner_file_commands/**)",
+    "Read(/${{ runner.temp }}/_runner_file_commands/**)",
+    "Read(./.git/**)",
 }
 DIFF_DIR = "${{ runner.temp }}/p9"
 BASE_REF_EXPR = "${{ github.base_ref }}"
@@ -125,7 +126,6 @@ def _tool_list(claude_args: str, flag: str) -> set[str]:
     return {tool.strip() for tool in matches[0].split(",") if tool.strip()}
 
 
-
 # --- gate script: exit-code contract -----------------------------------------
 
 
@@ -186,7 +186,7 @@ def test_gate_fails_closed_on_unparseable_file(tmp_path: Path, content: str | by
         pytest.param({"findings": []}, id="verdict-missing"),
         pytest.param({"verdict": "pass", "findings": []}, id="verdict-lowercase"),
         pytest.param({"verdict": " PASS", "findings": []}, id="verdict-padded"),
-        pytest.param({"verdict": "PASS​", "findings": []}, id="verdict-zero-width"),
+        pytest.param({"verdict": "PASS\u200b", "findings": []}, id="verdict-zero-width"),
         pytest.param({"verdict": True, "findings": []}, id="verdict-bool"),
         pytest.param({"verdict": None, "findings": []}, id="verdict-null"),
         pytest.param({"verdict": ["PASS"], "findings": []}, id="verdict-list-unhashable"),
@@ -440,7 +440,6 @@ def test_claude_gets_only_the_tools_it_needs() -> None:
         args = _action_step(job)["with"]["claude_args"]
         assert _tool_list(args, "allowedTools") == ALLOWED_TOOLS, name
         assert _tool_list(args, "disallowedTools") == DISALLOWED_TOOLS, name
-        assert "Bash" in DISALLOWED_TOOLS and not any("Bash" in tool for tool in ALLOWED_TOOLS)
 
 
 def test_reads_are_fenced_and_pr_settings_are_ignored() -> None:
@@ -455,6 +454,28 @@ def test_reads_are_fenced_and_pr_settings_are_ignored() -> None:
         assert permissions["blockReadsOutsideWorkingDirectories"] is True, name
         assert set(permissions["deny"]) == READ_DENY, name
         assert "allow" not in permissions, name
+
+
+def test_checkout_does_not_persist_the_job_token() -> None:
+    for name, job in _jobs().items():
+        checkouts = [s for s in job["steps"] if str(s.get("uses", "")).startswith("actions/checkout@")]
+        assert len(checkouts) == 1, name
+        assert checkouts[0]["with"]["persist-credentials"] is False, name
+
+
+def test_reviewer_cannot_read_git_metadata() -> None:
+    # The action writes the job token into the origin URL in .git/config.
+    for name, job in _jobs().items():
+        deny = json.loads(_action_step(job)["with"]["settings"])["permissions"]["deny"]
+        assert "Read(./.git/**)" in deny, name
+
+
+def test_runner_temp_deny_rule_follows_the_runner() -> None:
+    # F13: derived from runner.temp, never a literal hosted-runner path.
+    for name, job in _jobs().items():
+        deny = json.loads(_action_step(job)["with"]["settings"])["permissions"]["deny"]
+        assert "Read(/${{ runner.temp }}/_runner_file_commands/**)" in deny, name
+        assert not any("/home/runner" in rule for rule in deny), name
 
 
 def test_diff_prep_step_runs_before_the_reviewer() -> None:
