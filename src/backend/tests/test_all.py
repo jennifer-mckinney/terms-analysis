@@ -86,11 +86,18 @@ def test_analyze_url_private_ip_returns_400(app_client):
         json={"url": "http://127.0.0.1/evil", "jurisdictions": ["US-CA", "GDPR"]},
     )
     assert response.status_code == 400
-    # The endpoint surfaces the fetcher's own refusal message unchanged.
+    # CodeQL alert #6: the SSRF refusal reason stays server-side; the client
+    # gets the fixed message and a correlation id.
+    body = response.json()
+    assert body["detail"] == "Could not fetch this URL. Try pasting the policy text instead."
+    assert "not allowed" not in response.text
+    assert len(body["error_id"]) == 32
+    # The fetcher still refuses for the typed "address" reason (#258); only its
+    # curated text is withheld at the API boundary (#250).
     with pytest.raises(ValueError) as info:
         asyncio.run(fetch_url_text("http://127.0.0.1/evil"))
     assert getattr(info.value, "reason", None) == "address"
-    assert response.json()["detail"] == str(info.value)
+    assert str(info.value) not in response.text
 
 
 def test_analyze_file_rejects_oversized_upload(app_client):

@@ -10,6 +10,8 @@ Naming: ``test_inference_<function>_<scenario>``.
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 import pytest
 
 from app.schemas import InferResponse
@@ -54,8 +56,12 @@ class TestInferJurisdictionsByTld:
 
     def test_inference_infer_jurisdictions_co_uk_matches_before_uk(self):
         # Longest-suffix rule: .co.uk should hit .co.uk, not fall through to .uk.
-        _, signals = infer_jurisdictions("https://acme.co.uk/privacy", None)
-        assert any(".co.uk" in s for s in signals["tld"])
+        # Compare parsed values, never substrings of a URL (CodeQL alert #7).
+        url = "https://acme.co.uk/privacy"
+        _, signals = infer_jurisdictions(url, None)
+        matched = [signal.split(" ", 1)[0] for signal in signals["tld"]]
+        assert matched == [".co.uk"]
+        assert urlparse(url).hostname.endswith(matched[0])
 
     def test_inference_infer_jurisdictions_unknown_tld_returns_empty(self):
         jurisdictions, _ = infer_jurisdictions("https://example.xyz/privacy", None)
