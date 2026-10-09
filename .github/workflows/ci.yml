@@ -5,9 +5,18 @@ on:
     branches:
       - main
       - 'claude/**'
+      # #91 r8 (security F12): card branches are feat/<gate>-<n>-<slug>
+      # (AGENT-LANES); a pushed card branch must get the server-side
+      # evidence scan before any PR exists.
+      - 'feat/**'
   pull_request:
     branches:
       - main
+
+# Issue #91 round 3 (security CI note): least-privilege token for every job.
+# No job writes to the repo, issues or PRs.
+permissions:
+  contents: read
 
 jobs:
   lint:
@@ -64,6 +73,54 @@ jobs:
         # rounds e.g. 97.58 up to 98 and exits 0 while printing FAIL (#177).
         # src/backend/.coveragerc sets the same precision for local runs.
         # Branch coverage is not gated yet (tracked under G3).
+
+  evidence-scan:
+    # Issue #91 P9 round 2 (security R2-F2(b), grumpy #4(b)): server-side
+    # counterpart of .githooks/pre-commit check 4. Client hooks can be skipped
+    # (--no-verify) or not installed, so CI scans every file under
+    # docs/evidence/ in the checkout and fails on any local machine path.
+    # Round 3 (security CI note): the tip scan alone misses a leak added and
+    # removed inside one PR, which a merge commit would still carry into main
+    # history, so every commit in the PR / push range is scanned as well.
+    name: Evidence leak scan (docs/evidence)
+    runs-on: ubuntu-latest
+    # #250: every job states its own least-privilege token; read-only checkout.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          # Full history: the range scan needs the base commit and every
+          # commit between it and the head.
+          fetch-depth: 0
+
+      - name: Scan docs/evidence/ for local machine paths (tip)
+        run: bash scripts/governance/scan-evidence-leaks.sh "${GITHUB_WORKSPACE}"
+
+      - name: Scan docs/evidence/ lines added by every commit in the range
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            range="${PR_BASE}..${PR_HEAD}"
+          elif [[ -n "${PUSH_BEFORE}" && ! "${PUSH_BEFORE}" =~ ^0+$ ]] \
+              && git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+            range="${PUSH_BEFORE}..${PUSH_AFTER}"
+          elif base="$(git merge-base origin/main "${PUSH_AFTER}" 2>/dev/null)" \
+              && [[ "${base}" != "${PUSH_AFTER}" ]]; then
+            # New branch (before is all zeros): everything not yet on main.
+            range="${base}..${PUSH_AFTER}"
+          else
+            # Push to main with no usable before: scan the whole ancestry.
+            range="${PUSH_AFTER}"
+          fi
+          echo "evidence history scan range: ${range}"
+          bash scripts/governance/scan-evidence-leaks.sh --range "${range}" "${GITHUB_WORKSPACE}"
 
   audit:
     name: Dependency audit (pip-audit)

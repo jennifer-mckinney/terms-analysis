@@ -1,0 +1,151 @@
+# Table-driven leak-scanner vectors (issue #91, grumpy round 5).
+# Columns (TAB-separated): kind<TAB>pattern<TAB>sample<TAB>note
+#   kind     block = the sample MUST be reported by the named pattern
+#            allow = the sample MUST NOT be reported by ANY pattern
+#   pattern  a name from .claude/governance/evidence-leak-regex.txt
+#   sample   literal text, one line, written exactly as it would appear in an
+#            evidence file (encoded and escaped forms included verbatim),
+#            except that each home root is a <<NAME>> token. This file is
+#            tracked and must hold no literal home path (#145 Part A), so
+#            readers expand the sample with expand_vector_tokens() in
+#            scripts/governance/leak_scan.py, the only token table
+#            (VECTOR_TOKENS); an unknown or malformed token is an error.
+# Contract (src/backend/tests/test_leak_scan_vectors.py): every pattern has
+# >= 1 block and >= 1 allow vector; every vector runs through the CLI tree
+# scan, the --range history scan and the pre-commit hook.
+# This file lives outside docs/evidence/, so it is never scanned itself.
+block	home-root	<<USERS>>/someuser/Documents/project/app.py	plain macOS home
+block	home-root	<<HOME>>/someuser/project	plain Linux home
+block	home-root	C:<<USERS>>/someuser/project	Windows, forward slashes
+block	home-root	<<WINUSERS>>\someuser\project	Windows, backslashes (folded to /)
+block	home-root	<<WINUSERSESC>>\\someuser\\x	JSON-escaped Windows path
+block	home-root	/mnt/c<<USERS>>/someuser/x	WSL mount of a Windows home
+block	home-root	%2F<<WORD_USERS>>%2Fsomeuser/x	URL-encoded, upper-case hex
+block	home-root	%2f<<WORD_USERS_LOWER>>%2fsomeuser	URL-encoded, lower-case hex and name
+block	home-root	%2F<<WORD_HOME>>%2Fsomeuser	URL-encoded Linux home
+block	home-root	%252F<<WORD_USERS>>%252Fsomeuser	double URL-encoded
+block	home-root	"p":"\/<<WORD_USERS>>\/someuser\/x"	JSON-escaped slash
+block	home-root	\/<<WORD_HOME>>\/someuser	JSON-escaped Linux home
+block	home-root	\u002f<<WORD_USERS>>\u002fsomeuser	JSON unicode escape
+block	home-root	\x2f<<WORD_HOME>>\x2fsomeuser	hex escape
+block	home-root	<<USERSUPPER>>/SomeUser/x	case variant
+block	home-root	<<USERS>>/some-user/x	dash in the account name
+block	home-root	./<<WORD_USERS>>/someuser/x	relative path, dot before the prefix
+block	home-root	file://<<USERS>>/someuser/x	file URL
+block	home-root	(<<USERS>>/someuser/x)	parenthesised path
+allow	home-root	api%2FUsers%2Fid=7	encoded REST path segment after a word char: allowed (grumpy r6 path boundary)
+allow	home-root	/Users/<user>/project/app.py	scrubbed placeholder
+allow	home-root	/home/<user>/project	scrubbed placeholder
+allow	home-root	%2FUsers%2F<user>	encoded prefix, scrubbed name
+allow	home-root	%2FUsers%2F%3Cuser%3E	encoded placeholder decodes to <user>
+allow	home-root	"\/Users\/<user>\/x"	escaped prefix, scrubbed name
+allow	home-root	api%2FUsers	encoded REST resource with no name segment after it
+allow	home-root	match /Users/[^/<] and /home/)	prose quoting the pattern
+allow	home-root	`/Users/` prefix	quoted prefix
+allow	home-root	https://github.com/users/someuser/projects/7	GitHub Projects v2 user board URL (grumpy r6)
+allow	home-root	https://example.com/home/about	policy page URL with a /home/ segment (grumpy r6)
+allow	home-root	https://example.com/Users/terms	policy page URL with a /Users/ segment (grumpy r6)
+block	home-root	/System/Volumes/Data<<USERS>>/someuser/x	macOS firmlinked data volume (r7)
+block	home-root	/Volumes/Backup<<USERS>>/someuser/x	external or Time Machine volume (r7)
+block	home-root	/Volumes/Macintosh HD/<<WORD_USERS>>/someuser/x	volume name with a space (r7)
+block	home-root	/host_mnt<<USERS>>/someuser/x	Docker Desktop for Mac host mount (r7)
+block	home-root	/run/desktop/mnt/host/c<<USERS>>/someuser	Docker Desktop for Windows host mount (r7)
+block	home-root	/var<<HOME>>/someuser/x	Fedora Atomic / ostree home (r7)
+block	home-root	/export<<HOME>>/someuser	Solaris-style exported home (r7)
+block	home-root	\\wsl.localhost\Ubuntu\<<WORD_HOME>>\someuser	WSL UNC path, dotted host (r7)
+block	home-root	\\wsl$\Ubuntu-22.04\<<WORD_HOME>>\someuser	WSL legacy UNC path (r7)
+block	home-root	D:\Backup\<<WORD_USERS>>\someuser	Windows backup folder under a drive (r7)
+block	home-root	file://localhost<<USERS>>/someuser	file URL with localhost authority (r7)
+block	home-root	http://localhost:8501/?p=<<USERS>>/someuser	path in a localhost query string (r7)
+block	home-root	cwd=<<USERS>>/someuser/x	path after =
+block	home-root	host:<<HOME>>/someuser	path after a colon
+block	home-root	**<<USERS>>/someuser/x**	markdown emphasis around the path (r7)
+block	home-root	see https://localhost/<<WORD_USERS_LOWER>>/someuser	localhost URL is not a public host (r7)
+allow	home-root	https://example.com/en/home/about	URL with /home/ below a first segment (grumpy r7)
+allow	home-root	https://www.example.co.uk:8443/users/terms	URL with subdomain and port (r7)
+allow	home-root	see docs/api/users/7 for the route	relative REST path, no anchor (r7)
+allow	home-root	src/home/page.tsx	relative source path with a home segment (r7)
+block	macos-temp	/private/var/folders/n0/abc123/T/run.npy	macOS temp with /private
+block	macos-temp	/var/folders/n0/abc123/T/run.npy	macOS temp without /private
+block	macos-temp	%2Fvar%2Ffolders%2Fn0%2Fabc	URL-encoded
+block	macos-temp	\/VAR\/Folders\/N0\/x	escaped, case variant
+allow	macos-temp	/private/var/folders/<tmp>/T/x	scrubbed bucket
+allow	macos-temp	the /var/folders/... prefix	prose quoting the prefix
+allow	macos-temp	/var/folders/|pytest-of-|	alternation quoted in prose
+block	pytest-tmp	<tmp>/pytest-of-someuser/pytest-55/test_0	pytest per-user dir
+block	pytest-tmp	PYTEST-OF-SomeUser/pytest-1	case variant
+block	pytest-tmp	pytest%2Dof%2Dsomeuser	URL-encoded dashes
+allow	pytest-tmp	<tmp>/pytest-of-<user>/pytest-55	scrubbed placeholder
+allow	pytest-tmp	pytest-of-... dirs	prose quoting the prefix
+block	dashed-home	see -<<WORD_USERS>>-alice-Documents-proj for the slug	Claude Code project slug
+block	dashed-home	%2D<<WORD_USERS>>%2Dalice%2DDocuments	URL-encoded dashes
+block	dashed-home	-<<WORD_USERS_UPPER>>-Alice-x	case variant
+block	dashed-home	projects/-<<WORD_USERS>>-alice-Documents	project slug after a slash
+allow	dashed-home	-Users-<user>-Documents-x	scrubbed placeholder
+allow	dashed-home	-Users-[A-Za-z0-9_] in the regex	prose quoting the pattern
+allow	dashed-home	nav-users-x	dashed prose: CSS class (grumpy r6)
+allow	dashed-home	end-users-rights	dashed prose: hyphenated words (grumpy r6)
+block	dashed-home	-System-Volumes-Data-<<WORD_USERS>>-someuser-x	dashed slug of a nested home root (r7)
+block	dashed-home	C--<<WORD_USERS>>-someuser-proj	Windows drive slug (C: becomes C-)
+block	dashed-home	-<<WORD_HOME>>-someuser-projects-x	Linux home slug (r7)
+block	dashed-home	-var-<<WORD_HOME>>-someuser-x	dashed slug of /var/home (r7)
+allow	dashed-home	work-from-home-policy	hyphenated prose with home (r7)
+block	claude-tmp	/tmp/claude-503/session/scratchpad	per-uid Claude temp root
+block	claude-tmp	/private/tmp/claude-503/x	under /private
+block	claude-tmp	%2Ftmp%2Fclaude-503	URL-encoded
+block	claude-tmp	/TMP/Claude-503/x	case variant
+allow	claude-tmp	/private/tmp/claude-<uid>/x	scrubbed uid
+allow	claude-tmp	/tmp/claude-[0-9] in the regex	prose quoting the pattern
+block	home-private	<<TILDE>>/Documents/project/src	tilde + Documents
+block	home-private	<<TILDE>>/Library/Mobile Documents/x	tilde + Library
+block	home-private	<<ENVHOME>>/Documents/x	$HOME form
+block	home-private	<<ENVHOMEBR>>/Desktop/x	${HOME} form
+block	home-private	<<TILDE>>%2FDownloads%2Fa.pdf	URL-encoded slashes
+block	home-private	<<TILDE>>\/documents\/x	JSON-escaped, lower case
+block	home-private	<<TILDE>>/DOCUMENTS/x	case variant
+allow	home-private	~/.claude/CLAUDE.md	tilde path, not a private folder
+allow	home-private	~/project/src	tilde path, not a private folder
+allow	home-private	the <<TILDE>>/Documents folder	folder name with no trailing slash
+allow	home-private	(~|$HOME)/(Documents|Desktop)/	prose quoting the pattern
+allow	home-private	<projects>/ta-g0-2/src	scrubbed projects placeholder
+block	agent-worktree	.claude/worktrees/agent-af118a54/src	agent worktree id
+block	agent-worktree	.claude%2Fworktrees%2Fagent-af11	URL-encoded
+block	agent-worktree	.claude\/worktrees\/agent-AF11	escaped, upper-case hex
+block	agent-worktree	.claude\worktrees\agent-0f	Windows backslashes
+allow	agent-worktree	.claude/worktrees/agent-<hex>	scrubbed id
+allow	agent-worktree	agent worktrees: .claude/worktrees/agent-[0-9a-f]	prose quoting the pattern
+allow	agent-worktree	<repo>/.claude/worktrees/	worktree root with no agent id
+block	home-root	http://localhost:8501/<<WORD_USERS>>/someuser/x	localhost with a port, this project's Streamlit UI (r8 grumpy 1)
+block	home-root	http://127.0.0.1:8000/<<WORD_HOME>>/someuser/project/report.html	IP with a port (r8 grumpy 1 / security F6)
+block	home-root	open http://localhost:8888/tree/<<WORD_USERS>>/someuser/proj	Jupyter tree URL with a port (r8 grumpy 1)
+block	home-root	ssh://git@host:22/<<WORD_HOME>>/someuser/repo.git	ssh URL with a port (r8 grumpy 1)
+block	home-root	file://localhost:80/<<WORD_USERS>>/someuser/x	file URL with a port (r8 grumpy 1)
+block	home-root	http://[::1]:8888/tree/<<WORD_USERS>>/someuser	bracketed IPv6 authority with a port (r8 security F6)
+block	home-root	/srv/a:b/<<WORD_HOME>>/someuser	colon inside a path segment (r8 security F6)
+block	home-root	/data/run=1/<<WORD_HOME>>/someuser	equals sign inside a path segment (r8 security F6)
+block	home-root	/Volumes/My,Drive/<<WORD_USERS>>/someuser	comma inside a volume name (r8 security F6)
+block	home-root	.../scratchpad/p9sb/<<WORD_HOME>>/someuser/x	ellipsis-prefixed truncated path still anchors (r8 grumpy 3)
+block	home-root	http://devbox.local/<<WORD_USERS>>/someuser/x	mDNS .local host (r8 grumpy 4)
+block	home-root	https://someusers-mbp.local/<<WORD_USERS>>/someuser/x	mDNS machine name (r8 security F7)
+block	home-root	https://intranet.corp/<<WORD_HOME>>/someuser/secrets	private .corp host (r8 grumpy 4)
+block	home-root	https://host.docker.internal/<<WORD_USERS>>/someuser/x	Docker host alias .internal (r8 security F7)
+block	home-root	http://nas.lan/<<WORD_HOME>>/someuser/x	private .lan host (r8)
+block	home-root	http://router.home.arpa/<<WORD_HOME>>/someuser/x	RFC 8375 home.arpa host (r8)
+block	home-root	http://box.localdomain/<<WORD_USERS>>/someuser/x	localdomain host (r8)
+block	home-root	http://ci.intranet/<<WORD_USERS>>/someuser/x	bare .intranet host (r8)
+block	home-root	http://site.test/<<WORD_USERS>>/someuser/x	RFC 2606 .test host (r8)
+block	home-root	http://site.invalid/<<WORD_USERS>>/someuser/x	RFC 2606 .invalid host (r8)
+block	home-root	http://www.example/<<WORD_USERS>>/someuser/x	RFC 2606 .example TLD (r8)
+block	home-root	http://nas.home/<<WORD_HOME>>/someuser/x	bare .home host (r8)
+block	home-root	C:\<<WORD_USERS>>\Émile\x	Windows profile, accented first letter (r8 security F8)
+block	home-root	C:\<<WORD_USERS>>\Иван\x	Windows profile, Cyrillic name (r8 security F8)
+block	home-root	/<<WORD_HOME>>/ñoño/x	Linux home, non-ASCII name (r8 security F8)
+allow	home-root	$ cat src/home/page.tsx	shell prompt before a relative path (r8 grumpy 3)
+allow	home-root	~ % ls api/Users/7	zsh prompt before a relative path (r8 grumpy 3)
+allow	home-root	(see above). docs/api/Users/7	sentence end before a relative path (r8 grumpy 3)
+allow	home-root	... src/home/page.tsx	ellipsis then a space before a relative path (r8 grumpy 3)
+allow	home-root	see the /Users/… tree	prose ellipsis after the prefix (r8, \xe2 excluded)
+allow	home-root	https://example.com:8443/home/about	public host with a port goes through the exemption (r8)
+block	pytest-tmp	pytest-of-émile/pytest-3	non-ASCII pytest account name (r8 security F8)
+block	dashed-home	-<<WORD_USERS>>-émile-proj	non-ASCII account name in a slug (r8 security F8)
+allow	dashed-home	-Users-…-proj	prose ellipsis in a slug (r8)
