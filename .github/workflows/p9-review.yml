@@ -10,7 +10,7 @@ name: P9 Review
 # Grep, Glob, writes to p9-verdict.json only, and the inline PR-comment MCP
 # tool. No Bash, so it sees the change through a diff and a changed-file list
 # prepared before it runs. Reads are fenced to the workspace and that
-# directory, and /proc and runner credential paths are denied as defence in
+# directory, and /proc, /sys and runner credential paths are denied as defence in
 # depth, so the process environment (ANTHROPIC_API_KEY, the job token) cannot
 # be read back. Checkout keeps no credential (persist-credentials: false), but
 # the action itself writes the job token into the origin URL in .git/config,
@@ -60,6 +60,7 @@ jobs:
 
       # The reviewer has no shell, so what changed is written to files it can
       # read. The base branch comes through env, never inline in the script.
+      # The review unit is the net diff; commits.txt is context only.
       - name: Prepare PR diff
         env:
           BASE_REF: ${{ github.base_ref }}
@@ -67,6 +68,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/p9"
           git diff "origin/$BASE_REF...HEAD" > "$RUNNER_TEMP/p9/pr.diff"
           git diff --name-only "origin/$BASE_REF...HEAD" > "$RUNNER_TEMP/p9/changed-files.txt"
+          git log --oneline "origin/$BASE_REF..HEAD" > "$RUNNER_TEMP/p9/commits.txt"
 
       - name: Security review
         uses: anthropics/claude-code-action@2dca132ff0e0c4094ce6048b422c6915a071210b # v1
@@ -82,12 +84,18 @@ jobs:
             The PR is checked out in the current working directory.
             First read ${{ runner.temp }}/p9/changed-files.txt and
             ${{ runner.temp }}/p9/pr.diff: they are what this PR changes.
+            Review the net diff. ${{ runner.temp }}/p9/commits.txt lists
+            the PR's commits for context only.
             Then read .github/p9/security-engineer.md and follow it exactly,
             including its verdict contract.
           # Write is scoped through an Edit rule: Claude Code consults Edit(path)
           # rules for every file-writing tool and ignores Write(path) rules
           # (code.claude.com/docs/en/permissions, "Read and Edit").
-          settings: '{"permissions":{"blockReadsOutsideWorkingDirectories":true,"deny":["Read(/proc/**)","Read(//proc/**)","Read(//sys/**)","Read(~/.git-credentials)","Read(~/.config/gh/**)","Read(~/.claude/.credentials.json)","Read(/${{ runner.temp }}/_runner_file_commands/**)","Read(./.git/**)"]}}'
+          # Read path patterns follow the same doc: "//path" is absolute,
+          # "~/path" is home, "./path" is the working directory, and a single
+          # "/path" is relative to the settings file, so it is never used here.
+          # runner.temp is absolute, so "/${{ runner.temp }}" renders as "//...".
+          settings: '{"permissions":{"blockReadsOutsideWorkingDirectories":true,"deny":["Read(//proc/**)","Read(//sys/**)","Read(~/.git-credentials)","Read(~/.config/gh/**)","Read(~/.claude/.credentials.json)","Read(/${{ runner.temp }}/_runner_file_commands/**)","Read(./.git/**)"]}}'
           claude_args: |
             --max-turns 40
             --setting-sources user
@@ -124,6 +132,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/p9"
           git diff "origin/$BASE_REF...HEAD" > "$RUNNER_TEMP/p9/pr.diff"
           git diff --name-only "origin/$BASE_REF...HEAD" > "$RUNNER_TEMP/p9/changed-files.txt"
+          git log --oneline "origin/$BASE_REF..HEAD" > "$RUNNER_TEMP/p9/commits.txt"
 
       - name: Code-quality review
         uses: anthropics/claude-code-action@2dca132ff0e0c4094ce6048b422c6915a071210b # v1
@@ -139,12 +148,18 @@ jobs:
             The PR is checked out in the current working directory.
             First read ${{ runner.temp }}/p9/changed-files.txt and
             ${{ runner.temp }}/p9/pr.diff: they are what this PR changes.
+            Review the net diff. ${{ runner.temp }}/p9/commits.txt lists
+            the PR's commits for context only.
             Then read .github/p9/grumpy-developer.md and follow it exactly,
             including its verdict contract.
           # Write is scoped through an Edit rule: Claude Code consults Edit(path)
           # rules for every file-writing tool and ignores Write(path) rules
           # (code.claude.com/docs/en/permissions, "Read and Edit").
-          settings: '{"permissions":{"blockReadsOutsideWorkingDirectories":true,"deny":["Read(/proc/**)","Read(//proc/**)","Read(//sys/**)","Read(~/.git-credentials)","Read(~/.config/gh/**)","Read(~/.claude/.credentials.json)","Read(/${{ runner.temp }}/_runner_file_commands/**)","Read(./.git/**)"]}}'
+          # Read path patterns follow the same doc: "//path" is absolute,
+          # "~/path" is home, "./path" is the working directory, and a single
+          # "/path" is relative to the settings file, so it is never used here.
+          # runner.temp is absolute, so "/${{ runner.temp }}" renders as "//...".
+          settings: '{"permissions":{"blockReadsOutsideWorkingDirectories":true,"deny":["Read(//proc/**)","Read(//sys/**)","Read(~/.git-credentials)","Read(~/.config/gh/**)","Read(~/.claude/.credentials.json)","Read(/${{ runner.temp }}/_runner_file_commands/**)","Read(./.git/**)"]}}'
           claude_args: |
             --max-turns 40
             --setting-sources user

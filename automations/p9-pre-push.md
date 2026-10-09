@@ -21,13 +21,18 @@ Workflow: `.github/workflows/p9-review.yml`.
   2. deletes any `p9-verdict.json` committed in the PR and copies
      `.github/p9/check_verdict.py` to the runner's temp directory, before the
      reviewer can touch the tree;
-  3. writes `git diff origin/<base>...HEAD` to `$RUNNER_TEMP/p9/pr.diff` and
-     the changed-file list to `$RUNNER_TEMP/p9/changed-files.txt` (the base
-     branch passes through `env`, not inline);
+  3. writes `git diff origin/<base>...HEAD` to `$RUNNER_TEMP/p9/pr.diff`,
+     the changed-file list to `$RUNNER_TEMP/p9/changed-files.txt` and
+     `git log --oneline origin/<base>..HEAD` to `$RUNNER_TEMP/p9/commits.txt`
+     (the base branch passes through `env`, not inline);
   4. runs `anthropics/claude-code-action` (pinned by commit SHA) with a prompt
-     that has it read those two files first, then its brief,
+     that has it read the changed-file list and the diff first, then its brief,
      `.github/p9/security-engineer.md` or `.github/p9/grumpy-developer.md`;
   5. runs the copied gate on `p9-verdict.json`.
+
+  The review unit is the PR's net diff, not its individual commits;
+  `commits.txt` is context only (commit-history shape is an accepted item
+  under the no-rebase policy).
 - **Bounds:** `timeout-minutes` per job, `--max-turns` for the reviewer, and a
   `concurrency` group per PR that cancels the run for a superseded commit.
 - **Tools:** an exact `--allowedTools` allowlist: `Read`, `Grep`, `Glob`,
@@ -39,14 +44,19 @@ Workflow: `.github/workflows/p9-review.yml`.
   rules (Claude Code permissions docs, "Read and Edit").
 - **Read deny rules:** the action's `settings` input turns on
   `permissions.blockReadsOutsideWorkingDirectories` (working directories: the
-  checkout and `$RUNNER_TEMP/p9`) and sets exactly these `Read` deny rules:
-  - `Read(/proc/**)`, `Read(//proc/**)` and `Read(//sys/**)`: the process
+  checkout and `$RUNNER_TEMP/p9`) and sets exactly these `Read` deny rules.
+  Path patterns follow the Claude Code permissions docs
+  (code.claude.com/docs/en/permissions): `//path` is absolute, `~/path` is
+  home, `./path` is the working directory, and a single `/path` is relative
+  to the settings file, so no rule uses a single leading slash.
+  - `Read(//proc/**)` and `Read(//sys/**)`: the process
     environment (`ANTHROPIC_API_KEY`, the job token) cannot be read back;
   - `Read(~/.git-credentials)`, `Read(~/.config/gh/**)` and
     `Read(~/.claude/.credentials.json)`: runner credential files;
   - `Read(/${{ runner.temp }}/_runner_file_commands/**)`: the runner's
     step-command files, derived from `runner.temp` rather than a hard-coded
-    hosted-runner path;
+    hosted-runner path (`runner.temp` is absolute, so the rule renders as
+    `//...`);
   - `Read(./.git/**)`: the checkout keeps no credential
     (`persist-credentials: false`), but claude-code-action itself writes the
     job token into the `origin` URL in `.git/config`, so the reviewer may not

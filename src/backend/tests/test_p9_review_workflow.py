@@ -55,8 +55,9 @@ ALLOWED_TOOLS = {"Read", "Grep", "Glob", "Edit(./p9-verdict.json)", COMMENT_TOOL
 DISALLOWED_TOOLS = {"Bash", "WebFetch", "WebSearch"}
 # Exact deny set. The runner-temp rule is derived from runner.temp (F13), and
 # ./.git is denied because the action writes the job token into .git/config.
+# Path prefixes per code.claude.com/docs/en/permissions: "//" absolute, "~/"
+# home, "./" working directory; a single "/" is settings-file-relative (dead).
 READ_DENY = {
-    "Read(/proc/**)",
     "Read(//proc/**)",
     "Read(//sys/**)",
     "Read(~/.git-credentials)",
@@ -66,6 +67,9 @@ READ_DENY = {
     "Read(./.git/**)",
 }
 DIFF_DIR = "${{ runner.temp }}/p9"
+RUNNER_TEMP_EXPR = "${{ runner.temp }}"
+READ_PATH_PREFIXES = ("//", "~/", "./")
+AUTOMATION_DOC = REPO_ROOT / "automations" / "p9-pre-push.md"
 BASE_REF_EXPR = "${{ github.base_ref }}"
 JOB_PERMISSIONS = {"contents": "read", "pull-requests": "write"}
 PASS_DOC = {"verdict": "PASS", "findings": []}
@@ -458,6 +462,21 @@ def test_reads_are_fenced_and_pr_settings_are_ignored() -> None:
         assert "allow" not in permissions, name
 
 
+def test_every_read_deny_path_renders_with_a_meaningful_prefix() -> None:
+    # runner.temp is an absolute path on the runner, so render it as one.
+    for rule in READ_DENY:
+        assert rule.startswith("Read(") and rule.endswith(")"), rule
+        rendered = rule[len("Read(") : -1].replace(RUNNER_TEMP_EXPR, "/home/runner/work/_temp")
+        assert rendered.startswith(READ_PATH_PREFIXES), rule
+        assert not rendered.startswith("///"), rule
+
+
+def test_automation_doc_lists_exactly_the_read_deny_rules() -> None:
+    text = AUTOMATION_DOC.read_text(encoding="utf-8")
+    section = text.split("- **Read deny rules:**", 1)[1].split("\n- **", 1)[0]
+    assert set(re.findall(r"`(Read\([^`]*\))`", section)) == READ_DENY
+
+
 def test_checkout_does_not_persist_the_job_token() -> None:
     for name, job in _jobs().items():
         checkouts = [s for s in job["steps"] if str(s.get("uses", "")).startswith("actions/checkout@")]
@@ -483,6 +502,7 @@ def test_each_job_prompts_with_its_vendored_brief() -> None:
         prompt = _action_step(job)["with"]["prompt"]
         assert brief.relative_to(REPO_ROOT).as_posix() in prompt, name
         assert f"First read {DIFF_DIR}/changed-files.txt and\n{DIFF_DIR}/pr.diff" in prompt, name
+        assert f"Review the net diff. {DIFF_DIR}/commits.txt lists\nthe PR's commits for context only." in prompt
         text = brief.read_text(encoding="utf-8")
         assert COMMENT_TOOL in text and "p9-verdict.json" in text, brief.name
         assert "gh pr" not in text, brief.name
@@ -493,6 +513,13 @@ def test_each_job_prompts_with_its_vendored_brief() -> None:
         assert "## Accepted / tracked items: do not re-report" in text, brief.name
         assert all(card in text for card in ("#216", "#215", "rebase")), brief.name
         assert "/Users/" not in text and "/home/" not in text, brief.name
+        # The review unit is the PR's net diff; no per-commit asks (#214).
+        scope = text.split("## Scope", 1)[1].split("\n## ", 1)[0]
+        assert "Review the net\n  diff (base to head)" in scope, brief.name
+        assert "`commits.txt` there lists the PR's commits for context only." in tools, brief.name
+        lens = text.split("\n## Accepted / tracked items", 1)[0]
+        for ask in ("single-purpose", "git bisect", "commit message"):
+            assert ask not in lens, (brief.name, ask)
 
 
 # --- workflow steps, run for real with a fake reviewer -----------------------
@@ -610,16 +637,18 @@ def test_prepare_step_writes_the_pr_diff_for_the_reviewer(tmp_path: Path, name: 
     seen: list[str] = []
 
     def read_inputs(ws: Path) -> None:
-        for rel in ("pr.diff", "changed-files.txt"):
+        for rel in ("pr.diff", "changed-files.txt", "commits.txt"):
             seen.append((tmp_path / "runner-temp" / "p9" / rel).read_text(encoding="utf-8"))
         _writes(PASS_DOC)(ws)
 
     proc = _run_job(tmp_path, _jobs()[name], read_inputs)
     assert proc.returncode == EXIT_PASS, proc.stderr
-    diff, changed = seen
+    diff, changed, commits = seen
     assert "+++ b/app/changed.py" in diff
     assert ".github/p9/check_verdict.py" not in diff, "the base commit must not be in the diff"
     assert changed == "app/changed.py\n"
+    # Only the PR's own commit, one --oneline row: "<sha> pr".
+    assert re.fullmatch(r"[0-9a-f]{7,40} pr\n", commits), commits
 
 
 @_needs_git
