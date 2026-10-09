@@ -1,7 +1,7 @@
 # ADR 0002: The weekly wiring audit may send repository source to the Message Batches API
 
 - **Status:** Proposed (accepted when this PR is merged by the owner; decision card #267)
-- **Date:** 2026-10-10
+- **Date:** 2026-10-09
 - **Decided by:** owner, via #267
 - **Governs:** `.claude/CLAUDE.md` hard requirements HR1 (open source only), HR2 (no investor-lawsuit vendors), HR3 (IRP Grade A or higher), HR4 (local-only data, no external API calls) and HR6 (no OpenAI, local-only LLM inference), as scoped by ADR 0001
 - **Companion:** legal-corpus-ingester ADR-016 records the same decision for that repo's constraints C3, C4 and C7
@@ -13,7 +13,7 @@ Card #224 adds a weekly, GitHub-hosted audit that asks a Claude model whether ea
 
 The audit uses the Anthropic Message Batches API (`POST /v1/messages/batches`), not `claude-code-action`, so ADR 0001's exemption does not cover it. Read literally, HR1-HR4 and HR6 would bar it for the same reasons they would have barred the CI review jobs: a VC-funded LLM vendor, an external API call, LLM inference that is not local.
 
-Design and threat model: `docs/evidence/2026-10-10-224-design.md`, `docs/evidence/2026-10-10-224-attack-sketch.md`, `docs/research/2026-10-10-224-batch-api.md` (untracked evidence; summarised in #224 and #267).
+Design and threat model: `docs/evidence/2026-10-10-224-design.md`, `docs/evidence/2026-10-10-224-attack-sketch.md`, `docs/research/2026-10-10-224-batch-api.md` (written 2026-10-09 under the next-session file names; untracked evidence, summarised in #224 and #267).
 
 ## Decision
 
