@@ -22,13 +22,14 @@ the request body is encoded by the same code that raises in production.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
 import re
 import sys
 import unicodedata
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 import pytest
@@ -36,7 +37,7 @@ import pytest
 from app.services import analyzer as analyzer_module
 from app.services import localai as localai_module
 from app.services.analyzer import analyze_text
-from app.services.localai import LocalAIClient
+from app.services.localai import _FINGERPRINT_HEX_CHARS, LocalAIClient
 
 _LOGGER_NAME = "uvicorn.error"
 _DOC = "We sell personal information and use automated decision-making."
@@ -440,18 +441,28 @@ _BODY_FILLER = "BODYFILL"
 # Matches the levelname that starts every record line of caplog.text.
 _RECORD_LINE = re.compile(r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL) ")
 
+
+
+@functools.lru_cache(maxsize=None)
+def _unicode_scan() -> Tuple[Tuple[str, ...], str]:
+    """One pass over every non-surrogate code point, cached for the module:
+    the single code points str.splitlines() breaks on, and the Cf set."""
+    breaks: List[str] = []
+    cf: List[str] = []
+    for cp in range(sys.maxunicode + 1):
+        if not 0xD800 <= cp <= 0xDFFF:
+            char = chr(cp)
+            if len(f"a{char}b".splitlines()) == 2:
+                breaks.append(char)
+            if unicodedata.category(char) == "Cf":
+                cf.append(char)
+    return tuple(breaks), "".join(cf)
+
+
 # Generated, not listed: every code point str.splitlines() breaks on, plus
 # CRLF, NUL, and every Cf (format: bidi, zero-width, BOM) character at once.
-_LINE_BREAKS = ["\r\n"] + [
-    chr(cp) for cp in range(sys.maxunicode + 1)
-    if 0xD800 > cp or cp > 0xDFFF
-    if len(f"a{chr(cp)}b".splitlines()) == 2
-]
-_CF_CHARS = "".join(
-    chr(cp) for cp in range(sys.maxunicode + 1)
-    if 0xD800 > cp or cp > 0xDFFF
-    if unicodedata.category(chr(cp)) == "Cf"
-)
+_LINE_BREAKS = ["\r\n", *_unicode_scan()[0]]
+_CF_CHARS = _unicode_scan()[1]
 _SEPARATORS: Dict[str, str] = {
     **{f"break-U+{ord(s[-1]):04X}-{len(s)}": s for s in _LINE_BREAKS},
     "nul": "\x00",
@@ -466,9 +477,19 @@ def _hostile_body(separator: str = "\n", prefix: bytes = b"") -> bytes:
     return prefix + text.encode("utf-8")
 
 
+# The status line's reason phrase is server-controlled too, and httpx quotes
+# it in str(HTTPStatusError) (h11 allows any visible ASCII in it).
+_HOSTILE_REASON = f"Busy {_BODY_SENTINEL} {_FORGED_MARK}".encode("ascii")
+
+
 def _error_response(status: int, body: bytes) -> Callable[[httpx.Request], httpx.Response]:
     def _respond(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status, content=body, headers={"content-type": "text/plain"})
+        return httpx.Response(
+            status,
+            content=body,
+            headers={"content-type": "text/plain"},
+            extensions={"reason_phrase": _HOSTILE_REASON},
+        )
 
     return _respond
 
@@ -493,20 +514,21 @@ def _assert_no_body_text(caplog, body: bytes) -> None:
 
 
 def _assert_fingerprint(caplog, status: int, body: bytes) -> None:
-    """The one warning carries the status and the body's length; any
-    hex fingerprint in it is an honest SHA-256 prefix, never the full hash."""
+    """The one warning carries the status, ``body_bytes=<byte count>`` (bytes,
+    not decoded characters) and ``sha256=<the real digest's prefix>`` of
+    exactly ``_FINGERPRINT_HEX_CHARS`` hex chars; never the full hash."""
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert len(warnings) == 1
     message = warnings[0].getMessage()
-    assert message.startswith(f"LocalAI HTTP {status}")
-    numbers = set(re.findall(r"(?<![0-9A-Za-z])\d+(?![0-9A-Za-z])", message))
-    lengths = {str(len(body)), str(len(body.decode("utf-8", errors="replace")))}
-    assert numbers & lengths, f"no body length in {message!a}"
+    assert re.search(rf"(?<![0-9])HTTP {status}(?![0-9])", message), message[:200]
+    assert re.findall(r"body_bytes=(\d+)", message) == [str(len(body))], message[:200]
     digest = hashlib.sha256(body).hexdigest()
+    fields = re.findall(r"sha256=([0-9a-f]+)", message)
+    assert fields == [digest[:_FINGERPRINT_HEX_CHARS]], message[:200]
+    assert digest not in message
     for run in re.findall(r"[0-9a-f]{8,}", message):
-        if re.search(r"[a-f]", run):
-            assert len(run) < len(digest)
-            assert digest.startswith(run)
+        if digest.startswith(run):
+            assert len(run) == _FINGERPRINT_HEX_CHARS
     assert _fallback_records(caplog) == []
 
 
@@ -537,7 +559,9 @@ def test_http_error_separator_table_is_generated_and_complete():
     assert {"\n", "\r", "\x85", " ", " "} <= singles
     assert "\r\n" in _LINE_BREAKS
     assert {"‮", "​", "﻿"} <= set(_CF_CHARS)
-    print(f"generated separators: {len(_SEPARATORS)}")
+    # The multibyte shape only bites if bytes and characters disagree.
+    multibyte = _BODY_SHAPES["multibyte"]
+    assert len(multibyte) != len(multibyte.decode("utf-8"))
 
 
 _BODY_SHAPES: Dict[str, bytes] = {
@@ -545,6 +569,8 @@ _BODY_SHAPES: Dict[str, bytes] = {
     "huge-2mb-sentinel-last": (_BODY_FILLER * (2 * 1024 * 1024 // len(_BODY_FILLER))).encode()
     + _hostile_body(),
     "empty": b"",
+    # Byte count differs from char count: 2-byte e-acute and a 4-byte emoji.
+    "multibyte": ("é" * 100 + "\U0001F600").encode("utf-8"),
 }
 
 
@@ -608,3 +634,70 @@ def test_http_error_surfaces_no_body_to_the_caller(monkeypatch, localai_http, ca
         f.category for f in baseline.payload.findings
     }
     assert _BODY_SENTINEL not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Issue #194 / #285: embed() logs exactly like the chat path
+# ---------------------------------------------------------------------------
+# Same untrusted response, same rule: status + body_bytes + sha256 prefix on
+# an HTTP status error, the exception type name only on a transport error;
+# no body text, no reason phrase, no exc_info.
+
+
+def _embed() -> Optional[List[float]]:
+    return asyncio.run(LocalAIClient().embed("Article 17 erasure"))
+
+
+@pytest.mark.parametrize("status", _ERROR_STATUSES)
+def test_embed_http_error_log_has_status_and_fingerprint_not_body(localai_http, caplog, status):
+    body = _hostile_body()
+    localai_http(_error_response(status, body))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _embed() is None
+    _assert_fingerprint(caplog, status, body)
+    _assert_no_body_text(caplog, body)
+
+
+@pytest.mark.parametrize("name", list(_BODY_SHAPES))
+def test_embed_http_error_log_body_shapes(localai_http, caplog, name):
+    body = _BODY_SHAPES[name]
+    localai_http(_error_response(503, body))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _embed() is None
+    _assert_fingerprint(caplog, 503, body)
+    _assert_no_body_text(caplog, body)
+
+
+@pytest.mark.parametrize(
+    "exc_type", [httpx.RemoteProtocolError, httpx.DecodingError], ids=lambda t: t.__name__
+)
+def test_embed_transport_error_log_quotes_no_server_bytes(localai_http, caplog, exc_type):
+    body = _hostile_body()
+    localai_http(_raise(exc_type(f"illegal status line: {body!r}\n{_FORGED_LINE}")))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _embed() is None
+    _assert_no_body_text(caplog, body)
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert exc_type.__name__ in warnings[0].getMessage()
+
+
+def test_embed_malformed_200_logs_no_body_text(localai_http, caplog):
+    # A 200 whose JSON has the wrong shape: whatever embed() logs for it
+    # carries no body text (guard; green today).
+    raw = json.dumps({"data": f"{_BODY_SENTINEL} {_BODY_FILLER}\n{_FORGED_LINE}"})
+    localai_http(lambda request: httpx.Response(200, content=raw.encode()))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _embed() is None
+    _assert_no_body_text(caplog, raw.encode())
+    assert len([r for r in caplog.records if r.levelno >= logging.WARNING]) == 1
+
+
+def test_embed_success_returns_vector_and_logs_nothing(localai_http, caplog):
+    # Positive control: a good response still yields the vector, silently.
+    vector = [0.25, -0.5, 1.0]
+    sent = localai_http(lambda request: httpx.Response(200, json={"data": [{"embedding": vector}]}))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _embed() == vector
+    assert len(sent) == 1 and sent[0].url.path.endswith("/embeddings")
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
