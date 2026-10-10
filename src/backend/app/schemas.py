@@ -147,6 +147,29 @@ ContextChip = Literal[
     "just_curious",      # "Just curious"
 ]
 
+# Issue #195: why an analysis does or does not carry an LLM answer. One value
+# per outcome of the LLM step, so a LocalAI outage, a misbehaving model and
+# our own code falling back on every call are told apart:
+#   ok                        an answer arrived and passed ``LLMAnswer``
+#   fallback_llm_unreachable  no HTTP response (httpx TransportError, incl.
+#                             every timeout): LocalAI is down or unreachable
+#   fallback_llm_invalid      a 2xx response whose answer failed parsing or
+#                             ``LLMAnswer`` validation
+#   fallback_llm_error        anything else inside the HR5 boundary: a non-2xx
+#                             reply, model selection, prompt build, request
+#                             encoding, an unforeseen exception
+#   disabled                  the LLM step was not run (quick mode)
+#   unknown                   rows stored before this field existed; a fresh
+#                             analysis never reports it
+LLMStatus = Literal[
+    "ok",
+    "fallback_llm_unreachable",
+    "fallback_llm_invalid",
+    "fallback_llm_error",
+    "disabled",
+    "unknown",
+]
+
 
 # Re-export from canonical home for backwards-compatibility
 from .exceptions import CorpusMismatchError as CorpusMismatchError  # noqa: F401
@@ -590,6 +613,21 @@ class AnalysisPayload(BaseModel):
             "floor is set, when nothing was retrieved, or when the analysis is "
             "ungrounded. Clients must use this field, not legal_grounding, "
             "before presenting an analysis as grounded in law."
+        ),
+    )
+    # Issue #195: additive, with a default so rows stored before the field
+    # existed still load (as "unknown", never as "ok").
+    llm_status: LLMStatus = Field(
+        default="unknown",
+        description=(
+            "Outcome of the LLM step: 'ok' (a validated answer was used), "
+            "'fallback_llm_unreachable' (LocalAI gave no HTTP response), "
+            "'fallback_llm_invalid' (a 2xx answer failed parsing or validation), "
+            "'fallback_llm_error' (any other failure, e.g. a non-2xx reply or an "
+            "internal error), 'disabled' (quick mode, no LLM call). Every "
+            "fallback value means rules-only findings with reduced confidence "
+            "(HR5). 'unknown' only appears on analyses stored before this field "
+            "existed."
         ),
     )
     legal_context: List[LegalCitation] = Field(
