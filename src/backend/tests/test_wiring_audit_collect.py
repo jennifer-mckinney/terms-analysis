@@ -495,6 +495,31 @@ def _good(**change: Any) -> str:
     return json.dumps({"module": ALPHA, "findings": [f]})
 
 
+_DROP = object()
+
+
+def _usage(**change: Any) -> Callable[[Sim], None]:
+    # Round 4 usage rule: a SUCCEEDED result must carry a valid `usage` (input_tokens and
+    # output_tokens non-negative ints; cache fields, when present, too). `_DROP` removes a key;
+    # usage=... replaces the whole object.
+    def line(c: str, sim: Sim) -> dict[str, Any]:
+        out = _succeeded(c, sim.default_text(c))
+        msg = out["result"]["message"]
+        if "usage" in change:
+            if change["usage"] is _DROP:
+                del msg["usage"]
+            else:
+                msg["usage"] = change["usage"]
+            return out
+        for key, value in change.items():
+            if value is _DROP:
+                msg["usage"].pop(key, None)
+            else:
+                msg["usage"][key] = value
+        return out
+    return lambda sim: _set_line(sim, _alpha, lambda c: line(c, sim))
+
+
 FAILURES: list[tuple[str, Callable[[Sim], None], str]] = [
     ("errored-request", _errored("errored"), "PARTIAL"),
     ("expired-request", _errored("expired"), "PARTIAL"),
@@ -516,6 +541,18 @@ FAILURES: list[tuple[str, Callable[[Sim], None], str]] = [
     ("severity-wrong-type", _bad_text(_good(severity=3)), "SCHEMA"),
     ("canary-missing", _no_canary, "CANARY_MISSING"),
     ("canary-wrong-kind", _canary_wrong_kind, "CANARY_MISSING"),
+    # Round 4 usage rule: a succeeded result without valid usage is a SCHEMA failure naming
+    # the request (never API_ERROR: the API call itself worked), and nothing is filed.
+    ("usage-missing", _usage(usage=_DROP), "SCHEMA"),
+    ("usage-null", _usage(usage=None), "SCHEMA"),
+    ("usage-not-object", _usage(usage="lots"), "SCHEMA"),
+    ("usage-input-missing", _usage(input_tokens=_DROP), "SCHEMA"),
+    ("usage-output-missing", _usage(output_tokens=_DROP), "SCHEMA"),
+    ("usage-input-negative", _usage(input_tokens=-1), "SCHEMA"),
+    ("usage-output-bool", _usage(output_tokens=True), "SCHEMA"),
+    ("usage-input-float", _usage(input_tokens=1.5), "SCHEMA"),
+    ("usage-output-string", _usage(output_tokens="10"), "SCHEMA"),
+    ("usage-cache-read-negative", _usage(cache_read_input_tokens=-1), "SCHEMA"),
 ]
 
 
@@ -534,6 +571,18 @@ def test_each_failure_mode_has_its_own_exit_files_nothing_and_deletes(
     assert len(sim.deletes()) == 1  # [C8] deleted on the failure path too
     if name in {"PARTIAL", "MISSING_OR_DUP", "TRUNCATED_OR_REFUSED", "SCHEMA"}:
         assert prep.ids[ALPHA] in out or "not-submitted" in out  # names the request
+
+
+def test_usage_without_cache_fields_is_valid(tmp_path: Path) -> None:
+    # Positive control for the usage rule: the cache counters are optional; input and output
+    # alone are a valid usage, and the run files as normal.
+    prep = _prepare(tmp_path, card_mode="cards")
+    sim = Sim(prep)
+    sim.module_output(BETA, [_finding(kind="unwired_entry_point", severity="HIGH", symbol="beta_main")])
+    _usage(cache_read_input_tokens=_DROP, cache_creation_input_tokens=_DROP)(sim)
+    collect, rc, out = _collect(sim)
+    assert rc == exit_code(collect, "OK"), out[-800:]
+    assert len(sim.issue_posts()) == 1 and len(sim.deletes()) == 1
 
 
 def test_batch_not_ended_is_cancelled_polled_deleted_and_fails(tmp_path: Path) -> None:
