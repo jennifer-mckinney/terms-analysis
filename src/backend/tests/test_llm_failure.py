@@ -682,15 +682,31 @@ def test_embed_transport_error_log_quotes_no_server_bytes(localai_http, caplog, 
     assert exc_type.__name__ in warnings[0].getMessage()
 
 
-def test_embed_malformed_200_logs_no_body_text(localai_http, caplog):
-    # A 200 whose JSON has the wrong shape: whatever embed() logs for it
-    # carries no body text (guard; green today).
+class _BodyQuotingParseError(ValueError):
+    """A parse error whose message quotes the response body, as many
+    decoders do; stands in for any non-HTTP exception carrying server text."""
+
+
+def _json_quoting_body(self: httpx.Response, **kwargs: Any) -> Any:
+    raise _BodyQuotingParseError(f"cannot parse: {self.text}")
+
+
+@pytest.mark.parametrize("quoting_parser", [False, True], ids=["wrong-shape", "parse-error-quotes-body"])
+def test_embed_malformed_200_logs_type_name_only(monkeypatch, localai_http, caplog, quoting_parser):
+    # A 200 that embed() cannot use falls to its catch-all branch, which logs
+    # the exception type name only, never the exception text.
     raw = json.dumps({"data": f"{_BODY_SENTINEL} {_BODY_FILLER}\n{_FORGED_LINE}"})
+    expected_type = "TypeError"  # data["data"][0] is a str; indexing it by "embedding" raises
+    if quoting_parser:
+        monkeypatch.setattr(httpx.Response, "json", _json_quoting_body)
+        expected_type = _BodyQuotingParseError.__name__
     localai_http(lambda request: httpx.Response(200, content=raw.encode()))
     with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
         assert _embed() is None
     _assert_no_body_text(caplog, raw.encode())
-    assert len([r for r in caplog.records if r.levelno >= logging.WARNING]) == 1
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert expected_type in warnings[0].getMessage()
 
 
 def test_embed_success_returns_vector_and_logs_nothing(localai_http, caplog):
