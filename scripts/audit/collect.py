@@ -251,12 +251,13 @@ def usage_cost(results: list[dict[str, Any]], cfg: dict[str, Any]) -> tuple[floa
               "cache_creation_input_tokens": 0}
     for line in results:
         usage = _message(line).get("usage")
-        if not isinstance(usage, dict):
-            continue
+        if not isinstance(usage, dict) or not {"input_tokens", "output_tokens"} <= usage.keys():
+            raise client.ApiFailure("anthropic result has no valid usage")
         for key in totals:
             value = usage.get(key, 0)
-            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                totals[key] += value
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise client.ApiFailure(f"anthropic result has invalid {key}")
+            totals[key] += value
     prices = cfg["prices_usd_per_mtok"]
     cost = (totals["input_tokens"] * prices["input"] + totals["output_tokens"] * prices["output"]
             + totals["cache_read_input_tokens"] * prices["cache_read"]
