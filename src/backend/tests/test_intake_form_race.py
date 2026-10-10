@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import get_args
+from typing import Iterator, get_args
 
 import pytest
 from fastapi.testclient import TestClient
@@ -107,8 +107,11 @@ def test_intake_form_captures_chip_state_on_submit() -> None:
 
 
 @pytest.fixture()
-def client() -> TestClient:
-    return TestClient(app)
+def client() -> Iterator[TestClient]:
+    # #133: the local opt-in exempts loopback peers only, and the limiter is built
+    # in lifespan, so the client presents a loopback address inside ``with``.
+    with TestClient(app, client=("127.0.0.1", 50000)) as c:
+        yield c
 
 
 @pytest.mark.parametrize("chip", get_args(ContextChip))

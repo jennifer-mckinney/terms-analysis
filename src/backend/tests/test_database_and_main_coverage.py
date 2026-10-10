@@ -820,8 +820,16 @@ class TestLifespanWithWatchlist:
 
         async def run_lifespan():
             with patch("app.main.init_db"):
-                with patch("app.main.settings") as mock_settings:
-                    mock_settings.watchlist_refresh_seconds = 60
+                # #133: real settings, not a MagicMock, so the limiter the lifespan
+                # builds from them sees validated values.
+                import dataclasses
+
+                from app.config import settings as _real
+
+                with patch(
+                    "app.main.settings",
+                    dataclasses.replace(_real, watchlist_refresh_seconds=60),
+                ):
                     # Replace _watchlist_loop_async with a cancellable coroutine function
                     with patch("app.main._watchlist_loop_async", fake_watchlist_loop):
                         async with lifespan(fastapi_app):

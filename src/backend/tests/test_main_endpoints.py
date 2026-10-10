@@ -1265,32 +1265,58 @@ class TestSecurityBatchEndpointValidation:
 
 
 class TestSecurityApiKeyAuth:
-    """_verify_api_key: when API_KEY is set, wrong/missing key must return 401."""
+    """The global key check (#133 rulings 2-4): outside the local opt-in, a missing or
+    wrong key is 401; the right key passes; an empty key only serves the local
+    loopback opt-in. Uses real validated Settings, not a MagicMock, so a config
+    the app would refuse cannot slip through here."""
 
-    def test_security_api_key_wrong_key_returns_401(self, app_client):
-        with patch("app.main.settings") as mock_settings:
-            mock_settings.api_key = "correct-key"
-            response = app_client.get("/health", headers={"X-API-Key": "wrong-key"})
+    @staticmethod
+    def _use(monkeypatch, **overrides):
+        import dataclasses
+        import importlib
+        import secrets
+
+        from app import config, main
+
+        have = {f.name for f in dataclasses.fields(config.Settings)}
+        if "deploy_env" not in have or "api_key_min_length" not in have:
+            pytest.fail(
+                "Settings has no deploy_env / api_key_min_length field (#133 ruling 2).",
+                pytrace=False,
+            )
+        if overrides.pop("generate_key", False):
+            n = config.settings.api_key_min_length
+            overrides["api_key"] = secrets.token_hex(n)[:n]
+        new = dataclasses.replace(config.settings, **overrides)
+        monkeypatch.setattr(config, "settings", new)
+        monkeypatch.setattr(main, "settings", new)
+        security = importlib.import_module("app.security")
+        if hasattr(security, "settings"):
+            monkeypatch.setattr(security, "settings", new)
+        return new
+
+    def test_security_api_key_wrong_key_returns_401(self, app_client, monkeypatch):
+        s = self._use(monkeypatch, deploy_env="railway", generate_key=True)
+        response = app_client.get("/analyses", headers={"X-API-Key": s.api_key[:-1]})
         assert response.status_code == 401
-        assert "Invalid" in response.json()["detail"]
+        assert response.json() == {"detail": "Invalid or missing API key"}
 
-    def test_security_api_key_missing_key_returns_401(self, app_client):
-        with patch("app.main.settings") as mock_settings:
-            mock_settings.api_key = "correct-key"
-            response = app_client.get("/health")
+    def test_security_api_key_missing_key_returns_401(self, app_client, monkeypatch):
+        self._use(monkeypatch, deploy_env="railway", generate_key=True)
+        response = app_client.get("/analyses")
         assert response.status_code == 401
 
-    def test_security_api_key_correct_key_passes(self, app_client):
-        with patch("app.main.settings") as mock_settings:
-            mock_settings.api_key = "correct-key"
-            response = app_client.get("/health", headers={"X-API-Key": "correct-key"})
+    def test_security_api_key_correct_key_passes(self, app_client, monkeypatch):
+        s = self._use(monkeypatch, deploy_env="railway", generate_key=True)
+        response = app_client.get("/analyses", headers={"X-API-Key": s.api_key})
         assert response.status_code == 200
 
-    def test_security_api_key_empty_string_disables_auth(self, app_client):
-        with patch("app.main.settings") as mock_settings:
-            mock_settings.api_key = ""
-            response = app_client.get("/health")
-        assert response.status_code == 200
+    def test_security_api_key_empty_string_serves_local_loopback_only(self, app_client, monkeypatch):
+        # The conftest client is a loopback peer; DEPLOY_ENV=local + loopback bind.
+        self._use(monkeypatch, deploy_env="local", api_key="", bind_host="127.0.0.1")
+        assert app_client.get("/analyses").status_code == 200
+        with pytest.raises(ValueError, match=r"(?i)api_key"):
+            self._use(monkeypatch, deploy_env="railway", api_key="")
 
 
 # ===========================================================================
