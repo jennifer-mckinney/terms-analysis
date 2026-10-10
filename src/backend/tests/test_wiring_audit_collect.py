@@ -301,20 +301,53 @@ def test_partial_batch_cost_counts_only_successful_requests(tmp_path: Path, kind
     assert len(sim.deletes()) == 1
 
 
-@pytest.mark.parametrize("usage", [
-    None, [], {}, {"input_tokens": 0}, {"output_tokens": 0},
-    *[{**USAGE, key: value} for key in USAGE for value in (-1, True, 1.5, "1", None)],
-])
-def test_successful_request_with_invalid_usage_fails_closed(tmp_path: Path, usage: Any) -> None:
+_REQUIRED_USAGE = ("input_tokens", "output_tokens")
+_CACHE_USAGE = ("cache_read_input_tokens", "cache_creation_input_tokens")
+
+
+def _usage_rows() -> list[tuple[str, Any, str]]:
+    # (id, usage object, outcome). Round 4 rulings: invalid usage on a SUCCEEDED result is
+    # SCHEMA (the API call worked; the result breaks the contract), never API_ERROR. A null
+    # cache counter is treated as absent: OK. Input and output are required and never null.
+    rows: list[tuple[str, Any, str]] = [
+        ("null", None, "SCHEMA"), ("list", [], "SCHEMA"), ("empty", {}, "SCHEMA"),
+        ("input-only", {"input_tokens": 0}, "SCHEMA"), ("output-only", {"output_tokens": 0}, "SCHEMA"),
+    ]
+    for key in (*_REQUIRED_USAGE, *_CACHE_USAGE):
+        for label, value in (("negative", -1), ("bool", True), ("float", 1.5), ("string", "1"), ("null", None)):
+            ok = label == "null" and key in _CACHE_USAGE
+            rows.append((f"{key}-{label}", {**USAGE, key: value}, "OK" if ok else "SCHEMA"))
+    return rows
+
+
+USAGE_ROWS = _usage_rows()
+
+
+def test_usage_rows_cover_every_counter_and_both_outcomes() -> None:
+    # Table contract: every counter of the shipped USAGE fixture is exercised, with at least
+    # one OK and one SCHEMA row overall.
+    assert set(USAGE) == {*_REQUIRED_USAGE, *_CACHE_USAGE}
+    assert {r[2] for r in USAGE_ROWS} == {"OK", "SCHEMA"}
+
+
+@pytest.mark.parametrize(("case", "usage", "outcome"), USAGE_ROWS, ids=[r[0] for r in USAGE_ROWS])
+def test_successful_request_with_invalid_usage_fails_closed(tmp_path: Path, case: str, usage: Any,
+                                                             outcome: str) -> None:
     prep = _prepare(tmp_path, card_mode="cards")
     sim = Sim(prep)
+    sim.module_output(BETA, [_finding(kind="unwired_entry_point", severity="HIGH", symbol="beta_main")])
     line = _succeeded(prep.ids[ALPHA], sim.default_text(prep.ids[ALPHA]))
     line["result"]["message"]["usage"] = usage
     _set_line(sim, _alpha, lambda c: line)
     collect, rc, out = _collect(sim)
-    assert rc == exit_code(collect, "API_ERROR"), out[-800:]
-    assert sim.issue_posts() == []
+    assert rc == exit_code(collect, outcome), (case, out[-800:])
     assert len(sim.deletes()) == 1
+    assert "Traceback" not in out
+    if outcome == "SCHEMA":
+        assert "::error title=wiring-audit::SCHEMA" in out and prep.ids[ALPHA] in out  # names the request
+        assert sim.issue_posts() == []
+    else:
+        assert len(sim.issue_posts()) == 1  # positive control: a null cache counter files normally
 
 
 def test_cards_mode_files_one_issue_per_finding(tmp_path: Path) -> None:
