@@ -218,27 +218,16 @@ class LocalAIClient:
             # boundary, so analyze_text only ever sees a validated answer.
             answer = LLMAnswer.model_validate(json.loads(content))
             return answer.model_dump()
-        except httpx.HTTPStatusError as exc:
-            # A reply arrived but not a 2xx: LocalAI is up, the call is wrong.
-            self.fallback_reason = "fallback_llm_error"
-            body = exc.response.text
-            logger.warning(
-                "LocalAI HTTP %s: %s",
-                exc.response.status_code,
-                body[:300].replace("\n", "\\n"),
-            )
-            return None
         except httpx.HTTPError as exc:
             # Issue #195: only a TransportError means no response came back
-            # (connect error, any timeout, dropped connection). Other httpx
-            # errors (decoding, redirects, bad URL) are not an outage.
+            # (connect error, any timeout, dropped connection). A non-2xx
+            # status (LocalAI is up, the call is wrong) and other httpx errors
+            # (decoding, redirects, bad URL) are not an outage.
             self.fallback_reason = (
                 "fallback_llm_unreachable"
                 if isinstance(exc, httpx.TransportError)
                 else "fallback_llm_error"
             )
-            logger.warning("LocalAI HTTP error: %s", exc)
-        except httpx.HTTPError as exc:
             # Issue #194: the error body is untrusted (it can echo prompt,
             # document or legal-passage text); log status/length/fingerprint
             # or the type name only.
