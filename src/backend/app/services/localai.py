@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+import os
+import traceback
+from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
 import httpx
 
 from ..config import settings
+from ..schemas import LLMAnswer
 from .prompts import SYSTEM_PROMPT, build_user_prompt
 
 logger = logging.getLogger("uvicorn.error")
@@ -20,6 +24,33 @@ except ImportError:
     logger.warning(
         "langdetect not installed — language routing disabled; all documents → Apertus"
     )
+
+
+def _traceback_fingerprint(exc: BaseException) -> Tuple[str, str]:
+    """Content-free description of where ``exc`` was raised.
+
+    Issue #91 round 3 (grumpy #2 reconciled with security's no-document-text-
+    in-logs rule): a bare ``exc_info=True`` would log the exception message,
+    which can quote document text or a legal passage. This returns only the
+    exception type names and the ``file:function:line`` frames of the whole
+    cause/context chain (basenames, so no local directory layout either), plus
+    a short stable SHA-256 of that string so repeats of the same bug group
+    together in logs. No message, no source line, no locals.
+    """
+    parts: List[str] = []
+    seen: set = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        frames = ">".join(
+            f"{os.path.basename(f.filename)}:{f.name}:{f.lineno}"
+            for f in traceback.extract_tb(current.__traceback__)
+        )
+        parts.append(f"{type(current).__name__}@{frames or '-'}")
+        current = current.__cause__ or current.__context__
+    chain = " <- ".join(parts)
+    digest = hashlib.sha256(chain.encode("utf-8")).hexdigest()[:12]
+    return chain, digest
 
 
 def _detect_language(text: str) -> Optional[str]:
@@ -101,28 +132,39 @@ class LocalAIClient:
         rule_findings: List[dict],
         legal_context: Optional[List[dict]] = None,
     ) -> Optional[Dict[str, Any]]:
-        model = _select_model(numbered_text)
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": build_user_prompt(
-                    numbered_text=numbered_text,
-                    jurisdictions=jurisdictions,
-                    rule_findings=rule_findings,
-                    legal_context=legal_context,
-                ),
-            },
-        ]
-        payload = {
-            "model": model,
-            "messages": messages,
-            "temperature": 0.1,
-            "max_tokens": 1200,
-        }
-        endpoint = f"{self._base_url}/chat/completions"
-        logger.info("LocalAI request: endpoint=%s model=%s", endpoint, model)
+        # Issue #91 round 12 (security F2, HR5): ONE boundary around the whole
+        # LLM step: model selection, prompt build, request encoding, the HTTP
+        # call and response parsing, including validation of the answer
+        # against ``schemas.LLMAnswer`` (F2 round, security M1). A lone
+        # surrogate in the legal context or the document used to raise
+        # UnicodeEncodeError while httpx encoded the body, which no handler
+        # listed, so analyze_text failed instead of degrading. Any Exception
+        # now returns None (rules-only); a list of types can't be complete.
+        # CancelledError and other BaseExceptions still propagate, so
+        # cancellation and shutdown keep working.
+        # ``stage`` names where the failure happened in the fallback log.
+        stage = "model selection"
         try:
+            model = _select_model(numbered_text)
+            stage = "prompt build"
+            user_prompt = build_user_prompt(
+                numbered_text=numbered_text,
+                jurisdictions=jurisdictions,
+                rule_findings=rule_findings,
+                legal_context=legal_context,
+            )
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.1,
+                "max_tokens": 1200,
+            }
+            endpoint = f"{self._base_url}/chat/completions"
+            stage = "request"
+            logger.info("LocalAI request: endpoint=%s model=%s", endpoint, model)
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 response = await client.post(endpoint, json=payload)
                 logger.info(
@@ -131,16 +173,13 @@ class LocalAIClient:
                     len(response.content),
                 )
                 response.raise_for_status()
-                try:
-                    response_data = response.json()
-                except ValueError as exc:
-                    logger.warning("LocalAI response JSON decode failed: %s", exc)
-                    return None
-                try:
-                    content = response_data["choices"][0]["message"]["content"]
-                except (KeyError, IndexError, TypeError) as exc:
-                    logger.warning("LocalAI response missing content: %s", exc)
-                    return None
+            stage = "response parse"
+            content = response.json()["choices"][0]["message"]["content"]
+            # One model checks the whole answer (object, field types, finite
+            # confidence, valid UTF-8). A mismatch raises here, inside the
+            # boundary, so analyze_text only ever sees a validated answer.
+            answer = LLMAnswer.model_validate(json.loads(content))
+            return answer.model_dump()
         except httpx.HTTPStatusError as exc:
             body = exc.response.text
             logger.warning(
@@ -152,14 +191,18 @@ class LocalAIClient:
         except httpx.HTTPError as exc:
             logger.warning("LocalAI HTTP error: %s", exc)
             return None
-
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError as exc:
+        except Exception as exc:
+            # Round 3: log the cause (type + content-free frame chain + hash)
+            # so a deterministic bug is diagnosable, never the message, which
+            # can quote document or corpus text (or hold a lone surrogate).
+            chain, digest = _traceback_fingerprint(exc)
             logger.warning(
-                "LocalAI content not JSON (len=%s): %s",
-                len(content) if isinstance(content, str) else 0,
-                exc,
+                "LocalAI %s failed (%s, fingerprint=%s, frames=%s); "
+                "falling back to rules-only",
+                stage,
+                type(exc).__name__,
+                digest,
+                chain,
             )
             return None
 

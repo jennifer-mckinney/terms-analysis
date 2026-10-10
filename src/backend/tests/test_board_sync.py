@@ -78,7 +78,8 @@ FORK_GUARD = (
     "github.event_name == 'issues' || "
     "github.event.pull_request.head.repo.full_name == github.repository"
 )
-ACTION_REPOS = {"actions/checkout", "actions/add-to-project"}
+# setup-python reads .python-version for the board_sync.py steps (#215).
+ACTION_REPOS = {"actions/checkout", "actions/setup-python", "actions/add-to-project"}
 TEST_REPO = "example-owner/example-repo"
 RUN_TIMEOUT = 60
 

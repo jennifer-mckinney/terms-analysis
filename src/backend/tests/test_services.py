@@ -1118,7 +1118,9 @@ class TestLocalAIClientAnalyze:
         assert result is not None
         assert "findings" in result
 
-    def test_localai_analyze_http_status_error_returns_none(self):
+    def test_localai_analyze_http_status_error_returns_none(self, caplog):
+        import logging
+
         import httpx
         from app.services.localai import LocalAIClient
         client = LocalAIClient()
@@ -1135,11 +1137,19 @@ class TestLocalAIClientAnalyze:
             )
             mock_cls.return_value = mock_http
 
-            result = asyncio.run(client.analyze("text", ["GDPR"], []))
+            with caplog.at_level(logging.WARNING, logger="uvicorn.error"):
+                result = asyncio.run(client.analyze("text", ["GDPR"], []))
 
         assert result is None
+        # The kept HTTPStatusError handler logged the status, not the generic
+        # fallback boundary (grumpy F2-round LOW).
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(m.startswith("LocalAI HTTP 503") for m in messages)
+        assert not any("falling back to rules-only" in m for m in messages)
 
-    def test_localai_analyze_http_error_returns_none(self):
+    def test_localai_analyze_http_error_returns_none(self, caplog):
+        import logging
+
         import httpx
         from app.services.localai import LocalAIClient
         client = LocalAIClient()
@@ -1150,9 +1160,15 @@ class TestLocalAIClientAnalyze:
             mock_http.post.side_effect = httpx.ConnectError("Connection refused")
             mock_cls.return_value = mock_http
 
-            result = asyncio.run(client.analyze("text", ["GDPR"], []))
+            with caplog.at_level(logging.WARNING, logger="uvicorn.error"):
+                result = asyncio.run(client.analyze("text", ["GDPR"], []))
 
         assert result is None
+        # The kept httpx.HTTPError handler logged it, not the generic
+        # fallback boundary (grumpy F2-round LOW).
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(m.startswith("LocalAI HTTP error") for m in messages)
+        assert not any("falling back to rules-only" in m for m in messages)
 
     def test_localai_analyze_json_decode_error_returns_none(self):
         from app.services.localai import LocalAIClient
