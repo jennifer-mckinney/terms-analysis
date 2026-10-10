@@ -127,6 +127,7 @@
   "poll_interval_seconds": 15,
   "cancel_timeout_seconds": 600,
   "stale_handoff_days": 8,
+  "lookback_days": 29,
   "subprocess_timeout_seconds": 120,
   "max_subprocess_output_bytes": 16777216
 }

@@ -221,6 +221,7 @@ _CHECKS: dict[str, Callable[[Any], bool]] = {
     "poll_interval_seconds": _positive_number,
     "cancel_timeout_seconds": _positive_int,
     "stale_handoff_days": _positive_int,
+    "lookback_days": _positive_int,
     "subprocess_timeout_seconds": _positive_number,
     "max_subprocess_output_bytes": _positive_int,
 }
@@ -271,6 +272,9 @@ def _cross_checks(cfg: dict[str, Any]) -> None:
     # Three model-written fields per card must leave room for the fixed template.
     if cfg["max_field_chars"] * 4 > cfg["max_issue_body_chars"]:
         raise ConfigError("config key 'max_field_chars' is too large for 'max_issue_body_chars'")
+    if cfg["lookback_days"] < cfg["stale_handoff_days"]:
+        raise ConfigError("config key 'lookback_days' must be at least 'stale_handoff_days', so a stale "
+                          "hand-off is listed and refused loudly instead of never seen")
     if cfg["poll_interval_seconds"] > cfg["cancel_timeout_seconds"]:
         raise ConfigError("config key 'poll_interval_seconds' exceeds 'cancel_timeout_seconds'")
 

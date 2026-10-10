@@ -246,18 +246,30 @@ def parse_output(message: dict[str, Any], cfg: dict[str, Any]) -> list[dict[str,
     return findings
 
 
+_USAGE_REQUIRED = ("input_tokens", "output_tokens")
+_USAGE_OPTIONAL = ("cache_read_input_tokens", "cache_creation_input_tokens")
+
+
+def _count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def valid_usage(usage: Any) -> bool:
+    """A succeeded result's usage: input and output counters required, cache counters optional."""
+    return (isinstance(usage, dict)
+            and all(_count(usage.get(k)) for k in _USAGE_REQUIRED)
+            and all(usage.get(k) is None or _count(usage[k]) for k in _USAGE_OPTIONAL))
+
+
 def usage_cost(results: list[dict[str, Any]], cfg: dict[str, Any]) -> tuple[float, dict[str, int]]:
     totals = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0,
               "cache_creation_input_tokens": 0}
     for line in results:
         usage = _message(line).get("usage")
-        if not isinstance(usage, dict) or not {"input_tokens", "output_tokens"} <= usage.keys():
-            raise client.ApiFailure("anthropic result has no valid usage")
+        if line["result"].get("type") != "succeeded" or not valid_usage(usage):
+            continue  # errored/expired/canceled carry no usage; check_results judges the rest
         for key in totals:
-            value = usage.get(key, 0)
-            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-                raise client.ApiFailure(f"anthropic result has invalid {key}")
-            totals[key] += value
+            totals[key] += usage.get(key) or 0
     prices = cfg["prices_usd_per_mtok"]
     cost = (totals["input_tokens"] * prices["input"] + totals["output_tokens"] * prices["output"]
             + totals["cache_read_input_tokens"] * prices["cache_read"]
@@ -295,6 +307,11 @@ def check_results(art: Artifact, batch: dict[str, Any], results: list[dict[str, 
     if stopped:
         detail = ", ".join(f"{client.safe_token(c)} ({r})" for c, r in stopped[:10])
         raise Failure("TRUNCATED_OR_REFUSED", f"stop_reason other than end_turn: {detail}")
+    # Every line is succeeded here (PARTIAL above), so every line must carry a usage.
+    bad_usage = sorted(line["custom_id"] for line in results if not valid_usage(_message(line).get("usage")))
+    if bad_usage:
+        raise Failure("SCHEMA", f"{_ids(bad_usage)}: succeeded result without a valid usage "
+                      "(input_tokens and output_tokens must be non-negative integers)")
     findings: dict[str, list[dict[str, str]]] = {}
     for line in sorted(results, key=lambda x: x["custom_id"]):
         try:
@@ -420,6 +437,15 @@ def github_api(http: Any, cfg: dict[str, Any], token: str) -> Any:
     return client.Api(http, cfg["github_api_url"], headers, cfg, "github")
 
 
+_WORKFLOW_BOT = "github-actions[bot]"
+
+
+def _bot_authored(item: dict[str, Any]) -> bool:
+    """Markers count only in issues a bot opened, so a human cannot suppress a finding by pasting one."""
+    user = item.get("user")
+    return isinstance(user, dict) and (user.get("login") == _WORKFLOW_BOT or user.get("type") == "Bot")
+
+
 def open_issue_keys(gh: Any, slug: str, cfg: dict[str, Any]) -> set[str]:
     keys: set[str] = set()
     labels = urllib.parse.quote(",".join(cfg["labels"]), safe="")
@@ -430,7 +456,8 @@ def open_issue_keys(gh: Any, slug: str, cfg: dict[str, Any]) -> set[str]:
         if not isinstance(items, list):
             raise client.ApiFailure("github issue list is not a list")
         for item in items:
-            if isinstance(item, dict) and "pull_request" not in item and isinstance(item.get("body"), str):
+            if (isinstance(item, dict) and "pull_request" not in item and _bot_authored(item)
+                    and isinstance(item.get("body"), str)):
                 keys.update(_MARKER.findall(item["body"]))
         if len(items) < size:
             return keys
@@ -589,8 +616,8 @@ def main(argv: list[str] | None = None, *, http: Any = None, env: dict[str, str]
     if not _REPO_SLUG.fullmatch(slug):
         return rep.error("CONFIG", "GITHUB_REPOSITORY is not set to owner/name")
     if not args.artifact:
-        return rep.error("NO_HANDOFF", "no submit hand-off to collect: no successful submit run since the "
-                         "last successful collect; nothing was checked or filed")
+        return rep.error("NO_HANDOFF", f"no trusted successful submit run in the last {cfg['lookback_days']} "
+                         "days; nothing was checked or filed")
     http = http or client.urllib_transport(cfg["http_timeout_seconds"], cfg["max_response_bytes"])
     api, gh = client.anthropic_api(http, cfg, key), github_api(http, cfg, token)
     limit = dt.timedelta(days=cfg["stale_handoff_days"])
@@ -605,12 +632,27 @@ def main(argv: list[str] | None = None, *, http: Any = None, env: dict[str, str]
             if utc_now() - art.created_at > limit:
                 code = rep.error("HANDOFF_STALE", f"hand-off for batch {art.batch_id} was written at "
                                  f"{art.created_at:%Y-%m-%dT%H:%M:%SZ}, more than {cfg['stale_handoff_days']} "
-                                 "days ago; it was not collected and no request was made for it. If the "
-                                 "batch still exists, delete it by hand so its prompts leave retention")
+                                 "days ago; it is not checked or filed. Its batch is deleted so its prompts "
+                                 "leave retention")
+                delete_stale(api, art.batch_id, rep)
             else:
                 code = Collector(cfg, art, api, gh, slug, redactor, rep).run()
         codes.append(code)
     return run_exit(codes, rep)
+
+
+def delete_stale(api: Any, batch_id: str, rep: Any) -> None:
+    """Condition 8 for a stale hand-off: delete its batch; a 404 means it is already gone."""
+    try:
+        client.delete_batch(api, batch_id)
+    except client.ApiFailure as exc:
+        if exc.status == 404:
+            rep.log(f"stale batch {batch_id} was already deleted (HTTP 404)")
+        else:
+            rep.error("DELETE_FAILED", f"stale batch {batch_id} was not deleted ({exc}); delete it by "
+                      "hand so its prompts do not stay in retention")
+    else:
+        rep.log(f"stale batch {batch_id} deleted")
 
 
 def run_exit(codes: list[int], rep: Any) -> int:
