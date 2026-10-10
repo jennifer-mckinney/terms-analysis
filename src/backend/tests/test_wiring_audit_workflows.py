@@ -378,9 +378,10 @@ STEP_ENV = {
 HANDOFF_PATH = re.compile(r"/(\d+)/wiring-audit-batch\.json$")
 
 
-def _lookback_seconds(days: int | None = None) -> int:
-    # Round 4 ruling 1: the window is stale_handoff_days, read from the shipped config (F13).
-    days = real_config()["stale_handoff_days"] if days is None else days
+def _lookback_seconds(days: int | None = None, key: str = "stale_handoff_days") -> int:
+    # Round 4 (refined): the step lists by `lookback_days`; collect.py judges by
+    # `stale_handoff_days`. Both are read from the shipped config, never restated (F13).
+    days = real_config()[key] if days is None else days
     assert isinstance(days, int) and not isinstance(days, bool) and days > 0, days
     return days * 86400
 
@@ -390,7 +391,8 @@ def _ago(seconds: float) -> str:
 
 
 def _day(n: int, hour: int = 4) -> str:
-    # Point n (0-9) inside the lookback window, oldest first; `hour` adds minutes for ordering.
+    # Point n (0-9) inside the stale limit (so inside any valid lookback), oldest first;
+    # `hour` adds minutes for ordering.
     return _ago(_lookback_seconds() * (1 - (n + 1) / 12) - (hour - 4) * 60)
 
 
@@ -529,49 +531,67 @@ def test_a_handoff_whose_download_failed_is_listed_again_by_the_next_run(tmp_pat
     assert _collect_lookups(tmp_path / "n") == [] and _collect_lookups(tmp_path / "n1") == []
 
 
-@pytest.mark.parametrize("override", [None, 2], ids=["shipped-days", "config-override-2"])
-def test_the_lookback_is_stale_handoff_days_from_the_config(tmp_path: Path, override: int | None) -> None:
-    # Ruling 1, F13: the window is read from config.json in the step, never restated. One hour
-    # outside it is not listed (the collector would refuse it as HANDOFF_STALE); one hour
-    # inside is. The override proves the shipped value is not hard-coded in the step.
+def _set_config(co: _Checkout, **values: Any) -> None:
+    # Edit the checkout's config.json, which is what the step reads; a value of
+    # KeyError removes the key.
+    cfg_file = co.work / "scripts" / "audit" / "config.json"
+    cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+    for key, value in values.items():
+        if value is KeyError:
+            cfg.pop(key, None)
+        else:
+            cfg[key] = value
+    cfg_file.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("override", [None, "stale+2"], ids=["shipped-lookback", "config-override"])
+def test_the_listing_window_is_lookback_days_from_the_config(tmp_path: Path, override: str | None) -> None:
+    # Round 4 (refined) ruling 1: the step lists every trusted successful submit run whose
+    # createdAt is within lookback_days (the vendor's result retention). Only a run older than
+    # that is never listed. A run between stale_handoff_days and lookback_days IS listed, so
+    # collect.py refuses it loudly as HANDOFF_STALE instead of it vanishing.
+    # Ruling 3: the window is on createdAt; a run created outside it but updated inside
+    # (a late re-run attempt) is not listed. The override proves the value is not hard-coded.
     co = _Checkout(tmp_path)
-    if override is not None:
-        assert override < real_config()["stale_handoff_days"]
-        cfg_file = co.work / "scripts" / "audit" / "config.json"
-        cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
-        cfg["stale_handoff_days"] = override
-        cfg_file.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
-    window = _lookback_seconds(override)
+    stale = real_config()["stale_handoff_days"]
+    if override is None:
+        days = real_config()["lookback_days"]
+    else:
+        days = stale + 2
+        assert days < real_config()["lookback_days"]
+        _set_config(co, lookback_days=days)
+    window, stale_window = _lookback_seconds(days), _lookback_seconds(stale)
+    assert stale_window + 3600 < window - 3600
     submit_runs = [
-        _run(10, co.a, _ago(window + 3600)),  # older than the lookback
-        _run(20, co.a, _ago(window - 3600)),  # just inside
+        _run(10, co.a, _ago(window + 3600)),                       # older than the lookback
+        _run(12, co.a, _ago(window + 3600), updated=_ago(3600)),   # created outside, updated inside
+        _run(15, co.b, _ago(stale_window + 3600)),                 # stale but in reach: listed
+        _run(20, co.a, _ago(window - 3600)),                       # just inside the lookback
         _run(30, co.b, _ago(3600)),
     ]
-    proc, ids = _run_download(tmp_path / "run", co, [_run(700, co.a, _ago(window - 600))], submit_runs)
+    proc, ids = _run_download(tmp_path / "run", co, [_run(700, co.a, _ago(1800))], submit_runs)
     assert proc.returncode == 0, proc.stdout[-800:] + proc.stderr[-800:]
-    assert ids == [20, 30], ids
+    assert ids == [20, 15, 30], ids
     assert _collect_lookups(tmp_path / "run") == []
 
 
+def _stale_minus_one() -> int:
+    return real_config()["stale_handoff_days"] - 1
+
+
 BAD_LOOKBACK = [
-    ("zero", 0), ("negative", -1), ("fraction", 7.5), ("string", "8"), ("null", None), ("bool", True),
-    ("missing", KeyError),
+    ("zero", 0), ("negative", -1), ("float", 29.5), ("string", "29"), ("null", None), ("bool", True),
+    ("missing", KeyError), ("shorter-than-stale-limit", _stale_minus_one),
 ]
 
 
 @pytest.mark.parametrize(("case", "value"), BAD_LOOKBACK, ids=[c[0] for c in BAD_LOOKBACK])
 def test_a_bad_lookback_in_the_config_fails_the_step_closed(tmp_path: Path, case: str, value: Any) -> None:
-    # F13/F3: what the config loader rejects (stale_handoff_days must be a positive int), the
-    # step rejects too, before it downloads anything. A trusted collect run is present, so no
-    # code path may skip reading the value.
+    # F13/F3: what the config loader rejects (lookback_days a positive int, not below
+    # stale_handoff_days), the step rejects too, before it downloads anything. A trusted
+    # collect run is present, so no code path may skip reading the value.
     co = _Checkout(tmp_path)
-    cfg_file = co.work / "scripts" / "audit" / "config.json"
-    cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
-    if value is KeyError:
-        del cfg["stale_handoff_days"]
-    else:
-        cfg["stale_handoff_days"] = value
-    cfg_file.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    _set_config(co, lookback_days=value() if callable(value) and value is not KeyError else value)
     proc, ids = _run_download(tmp_path / "run", co, [_run(700, co.a, _day(1))], [_run(20, co.a, _day(3))])
     out = proc.stdout + proc.stderr
     assert proc.returncode != 0, (case, out[-800:])

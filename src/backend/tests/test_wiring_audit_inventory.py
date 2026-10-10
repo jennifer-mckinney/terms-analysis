@@ -68,6 +68,7 @@ REQUIRED_KEYS = (
     "personal_path_patterns",
     "cancel_timeout_seconds",
     "stale_handoff_days",  # PR #282 ruling 1: a hand-off older than this is refused
+    "lookback_days",  # PR #282 round 4: the collect step's listing window (vendor result retention)
 )
 
 # Exit-code numbers the design gate fixed (s.2 budget + result contract).
@@ -214,6 +215,27 @@ def test_shipped_stale_handoff_days_covers_the_submit_to_collect_gap() -> None:
     week = 7 * 24 * 3600
     gap = (_cron_offset_seconds(cfg["schedule"]["collect"]) - _cron_offset_seconds(cfg["schedule"]["submit"])) % week
     assert days * 24 * 3600 > gap
+    # Round 4 (refined): the listing window reaches at least as far as the stale limit, so a
+    # stale hand-off is listed and refused loudly instead of silently never seen.
+    lookback = cfg["lookback_days"]
+    assert isinstance(lookback, int) and not isinstance(lookback, bool) and lookback >= days
+
+
+@pytest.mark.parametrize(("delta", "ok"), [(-1, False), (0, True), (1, True)],
+                         ids=["below-stale-limit", "equal", "above"])
+def test_config_loader_rejects_a_lookback_shorter_than_the_stale_limit(tmp_path: Path, delta: int, ok: bool) -> None:
+    # Round 4 (refined), F3: the cross-check lives in the one loader; the boundary itself loads.
+    config = require("config")
+    raw = real_config()
+    raw["lookback_days"] = raw["stale_handoff_days"] + delta
+    path = tmp_path / "c.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    if ok:
+        assert config.load_config(path)["lookback_days"] == raw["lookback_days"]
+    else:
+        with pytest.raises(config.ConfigError) as info:
+            config.load_config(path)
+        assert "lookback_days" in str(info.value)
 
 
 def test_shipped_config_price_review_date_is_iso() -> None:
@@ -296,6 +318,12 @@ BAD_VALUES = [
     ("stale_handoff_days", True),
     ("stale_handoff_days", 1.5),
     ("stale_handoff_days", None),
+    ("lookback_days", 0),
+    ("lookback_days", -1),
+    ("lookback_days", "29"),
+    ("lookback_days", True),
+    ("lookback_days", 29.5),
+    ("lookback_days", None),
 ]
 
 

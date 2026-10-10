@@ -22,8 +22,10 @@ The contract these tests pin for the code under ``scripts/audit/``
   uncollected submit run, oldest first (newest last); each hand-off goes
   through the whole result contract and its batch is deleted. No
   ``--artifact`` at all is ``NO_HANDOFF``; a hand-off whose ``created_at``
-  is older than ``stale_handoff_days`` is ``HANDOFF_STALE`` and gets no
-  request (PR #282 review, ruling 1).
+  is older than ``stale_handoff_days`` is ``HANDOFF_STALE``: it is not
+  checked or filed, but its batch DELETE is still attempted (a 404 there is
+  logged; any other failure is ``DELETE_FAILED``). The collect step lists
+  hand-offs created within ``lookback_days`` (PR #282 review, round 4).
 * The hand-off artifact carries ``created_at``: RFC 3339 UTC with a ``Z``
   suffix (``2026-10-05T02:00:00Z``, the Batches API's own format), written
   by submit and validated by collect (F3). Missing, malformed, naive or

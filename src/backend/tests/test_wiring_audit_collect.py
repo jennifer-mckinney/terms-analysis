@@ -51,6 +51,7 @@ from tests.wiring_audit_support import (
     lines_outside_fences,
     longest_run,
     marker,
+    real_config,
     request_text,
     require,
     route_submit,
@@ -799,17 +800,42 @@ def _stale_days(prep: Prepared) -> int:
     return days
 
 
+STALE_DELETE = [
+    # (case, DELETE status) -- round 4 (refined) ruling 2
+    ("deleted", 200),
+    ("already-gone-404", 404),
+    ("delete-refused-403", 403),
+    ("delete-server-error-500", 500),
+]
+
+
 @pytest.mark.parametrize("override", [None, 2], ids=["shipped-days", "config-override-2"])
-def test_stale_handoff_is_refused_without_any_request(tmp_path: Path, clock: Any, override: int | None) -> None:
+@pytest.mark.parametrize(("case", "status"), STALE_DELETE, ids=[c[0] for c in STALE_DELETE])
+def test_stale_handoff_is_refused_but_its_batch_is_still_deleted(tmp_path: Path, clock: Any, override: int | None,
+                                                                  case: str, status: int) -> None:
+    # Round 4 (refined) ruling 2, condition 8: a stale hand-off is not checked or filed, but
+    # its batch DELETE is still attempted so the prompts leave retention. A 404 there is
+    # fine (logged, not an error); any other failure is reported as DELETE_FAILED. The run
+    # still exits HANDOFF_STALE (the verdict outranks the delete, as on every other path).
     now = _real_clock(clock)
     prep = _prepare(tmp_path) if override is None else _prepare(tmp_path, stale_handoff_days=override)
     sim = Sim(prep)
     _three_findings(sim)
+    if status != 200:
+        body = {"type": "error", "error": {"type": "not_found_error" if status == 404 else "api_error", "message": "x"}}
+        sim.fake.route("DELETE", BATCH, lambda c: (status, jbytes(body)))
     stale = _handoff(prep, "run-0900", created_at=_stamp(now - _stale_days(prep) * 86400 - 3600))
     collect, rc, out = _collect(sim, artifacts=[stale])
-    assert rc == exit_code(collect, "HANDOFF_STALE"), out[-800:]
+    assert rc == exit_code(collect, "HANDOFF_STALE"), (case, out[-800:])
     assert "::error title=wiring-audit::HANDOFF_STALE" in out and BATCH_ID in out
-    assert sim.fake.calls == []  # not re-collected: no retrieve, no results, no delete, nothing filed
+    # Not re-collected: no retrieve, no results, nothing filed; only the batch DELETE.
+    assert {(c.method, c.path) for c in sim.fake.calls} == {("DELETE", f"/v1/messages/batches/{BATCH_ID}")}, case
+    if status in (200, 404):
+        assert len(sim.deletes()) == 1, case
+        assert "::error title=wiring-audit::DELETE_FAILED" not in out, case
+    else:
+        assert "::error title=wiring-audit::DELETE_FAILED" in out, case
+    assert sim.issue_posts() == []
     assert "Traceback" not in out
 
 
@@ -836,23 +862,27 @@ def test_stale_handoff_does_not_stop_the_fresh_one(tmp_path: Path, clock: Any) -
     fresh = _handoff(prep, "run-1000")
     collect, rc, out = _collect(sim, artifacts=[stale, fresh])
     assert rc == exit_code(collect, "HANDOFF_STALE"), out[-800:]
-    assert not [c for c in sim.fake.calls if SECOND_BATCH_ID in c.url]  # no request for the stale batch
-    assert [c.path for c in sim.deletes()] == [f"/v1/messages/batches/{BATCH_ID}"]
+    # Ruling 2 (refined): the only request for the stale batch is its DELETE.
+    assert [(c.method, c.path) for c in sim.fake.calls if SECOND_BATCH_ID in c.url] == [
+        ("DELETE", f"/v1/messages/batches/{SECOND_BATCH_ID}")]
+    assert sorted(c.path for c in sim.deletes()) == sorted(
+        f"/v1/messages/batches/{b}" for b in (BATCH_ID, SECOND_BATCH_ID))
     assert len(sim.issue_posts()) == 1
 
 
-@pytest.mark.parametrize("override", [None, 3], ids=["shipped-days", "config-override-3"])
+@pytest.mark.parametrize("override", [None, 2], ids=["shipped-days", "config-override-stale+2"])
 def test_no_handoff_is_a_loud_failure_not_success(tmp_path: Path, override: int | None) -> None:
     # Ruling 1, F5: zero uncollected hand-offs is "did nothing", never exit 0.
-    # Round 4 ruling 3 (F8): the message describes the real window, stale_handoff_days from
-    # the config, not the old "since the last successful collect".
-    prep = _prepare(tmp_path) if override is None else _prepare(tmp_path, stale_handoff_days=override)
+    # Round 4 ruling 3 (F8), refined: the message describes the real listing window,
+    # lookback_days from the config, not the old "since the last successful collect".
+    prep = (_prepare(tmp_path) if override is None
+            else _prepare(tmp_path, lookback_days=real_config()["stale_handoff_days"] + override))
     sim = Sim(prep)
     collect, rc, out = _collect(sim, artifacts=[])
     assert rc == exit_code(collect, "NO_HANDOFF"), out[-800:]
     assert rc != exit_code(collect, "OK")
     assert "::error title=wiring-audit::NO_HANDOFF" in out
-    days = _stale_days(prep)
+    days = prep.cfg["lookback_days"]
     assert f"no trusted successful submit run in the last {days} days" in out, out[-800:]
     assert "since the last successful collect" not in out
     assert sim.fake.calls == [] and "Traceback" not in out
