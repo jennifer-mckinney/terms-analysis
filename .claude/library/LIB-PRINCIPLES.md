@@ -116,7 +116,7 @@ review_agents:
 gate: owner decision 2026-10-09 (supersedes the 2026-07-03/04 zero-tolerance directives) — security-engineer AND grumpy-developer findings of severity CRITICAL / HIGH / MEDIUM fail the review (`BLOCKING_SEVERITIES` in `.github/p9/check_verdict.py`); LOW / NIT findings do not block, but are still posted as inline PR comments and printed by the gate as non-blocking so an agent can file them as cards; resolve blocking findings by fix-Coder + new push (the loop-pattern below); only the owner can waive, and does so at merge time
 security_findings_threshold: owner decision 2026-10-09 — security-engineer CRITICAL / HIGH / MEDIUM findings are fix-now items; LOW goes to a card. MEDIUM stays blocking, which keeps the lesson of the 2026-07-03 directive (two MEDIUMs would have shipped as follow-ups under the gate before it)
 because: local pytest + orchestrator spot-check is not sufficient for merged code; two independent adversarial reviewers catch what dispatch Coders and orchestrator miss; especially load-bearing after multi-agent sessions where domain boundaries were crossed
-enforcement: CI (terms-analysis#191, replan 2026-10-09). `.github/workflows/p9-review.yml` runs jobs `security-review` and `grumpy-review` on `pull_request` to `main`; each runs `anthropics/claude-code-action` with the vendored brief in `.github/p9/` and an exact tool allowlist (no Bash; Write scoped to `p9-verdict.json`), comments inline on findings and writes `p9-verdict.json`; `.github/p9/check_verdict.py` fails the job on any CRITICAL / HIGH / MEDIUM finding, a FAIL with no findings, or a missing or off-contract verdict, and passes when every finding is LOW or NIT. Branch protection pending: the owner makes both jobs required checks on `main` (as of 2026-10-09 the required contexts are still Lint, Test and Dependency audit only). Blocking threshold and loop: `.claude/CLAUDE.md` G4, G9, G10
+enforcement: CI (terms-analysis#191, replan 2026-10-09). `.github/workflows/p9-review.yml` runs jobs `security-review` and `grumpy-review` on `pull_request` to `main`; each runs `anthropics/claude-code-action` with the vendored brief in `.github/p9/` and an exact tool allowlist (no Bash; Write scoped to `p9-verdict.json`), comments inline on findings and writes `p9-verdict.json`; `.github/p9/check_verdict.py` fails the job on any CRITICAL / HIGH / MEDIUM finding, a FAIL with no findings, or a missing or off-contract verdict, and passes when every finding is LOW or NIT. Branch protection pending: the owner makes both jobs required checks on `main` (as of 2026-10-09 the required contexts are still Lint, Test and Dependency audit only). Blocking threshold and loop: G4, G9, G10 in `## project-process` below
 retired: the local `.githooks/pre-push` signoff gate, `.git/reviews/<sha>.signoff.json` and `enforce-p9-review.yml` (2026-10-09, owner: "follow standard cicd practices")
 loop_pattern: (amendment 2026-07-04, moved to CI 2026-10-09) every PR runs this fixed-point loop until convergence
   1. Coder(s) implement the change and push the feature branch; the PR to `main` triggers both review jobs
@@ -128,6 +128,40 @@ whack_a_mole_avoidance: when a name-based deny-list / exact-match rule keeps gro
 loop_failure_mode: if the loop does NOT converge after 3-4 rounds on the same axis, PAUSE and ask user whether to keep patching or switch to a structural fix. Silent iteration is a Coder-role violation.
 retro_anchor: codified 2026-07-03 (security zero-tolerance), extended 2026-07-04 (grumpy zero-tolerance + loop_pattern + whack_a_mole guidance), moved from a local pre-push hook to CI jobs 2026-10-09 (#191), blocking threshold set to CRITICAL / HIGH / MEDIUM 2026-10-09 (owner decision)
 xref: [[P8]] [[LIB-TEST]]
+
+## project-process
+Moved verbatim from `.claude/CLAUDE.md` on 2026-10-10 (context diet, plan W1.5). In the moved text, "this file" means `.claude/CLAUDE.md`.
+
+### git-and-review
+
+- G1 prefixes: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `style:`, `chore:`. Subject under 72 characters. Reference the issue. Rules: `.claude/rules/code-style.md`.
+- G2 agents never work on `main`. Each lane has its own worktree, `../ta-<card>` or `../lci-<card>`, and a branch cut on GitHub from main and pushed before work starts.
+- G3 merge commits only. No rebase, no force-push, no `--no-verify`.
+- G4 pipeline per card: design gate (new mechanisms only) → `test-author` (red commit) → `coder` → push + PR → CI reviews → fix rounds → ready → owner merges. After each merge the lead merges main into dependent branches.
+- G5 `coder` and `test-author` always run on their defined model (opus), never Sonnet. Sonnet is for the PM and board work only.
+- G6 fixes change existing files only (R1). New mechanisms become new cards. No hard-coded values (F13).
+- G7 bot commits on our branches are owner-ruled; the default is to absorb them with `merge -s ours`.
+- G8 push: agents push feature branches freely and open PRs (owner authorisations A1, A3). Never `main`. No local signoff exists any more.
+- G9 "ready to merge #N" requires CI green on the exact `headRefOid`, `mergeStateStatus` CLEAN, and every review thread resolved after checking it against the code (reply with the fixing sha or the card number). Merging is owner-only.
+- G10 blocking threshold (owner, 2026-10-09): CRITICAL, HIGH and MEDIUM block and are fixed; LOW and NIT are filed as P3 cards and their threads resolved. Copilot threads are judged the same way. Security findings that touch secrets or access are always fixed.
+- G11 standard CI/CD over custom machinery: GitHub-hosted Actions, required checks, vendor-documented patterns. Check the docs and decide; don't build bespoke gates.
+- G12 validate by disk: an agent report is not evidence. Read `git log`, `git show --stat`, test output and `gh pr view` before repeating a claim.
+
+### p9-governance
+
+- P9 (LIB-PRINCIPLES): independent security and code-quality review before code reaches main. Since 2026-10-09 it runs in CI (`p9-review.yml`, claude-code-action on Opus, read-only tool allowlist, deny rules for `/proc`, `.git` and credentials). Reviews cost API credit; a `billing_error` shows as `is_error:true`, $0, under 1 s.
+- Retired on 2026-10-09 (#214): the local pre-push hard gate, `.git/reviews/*.signoff.json`, owner push scripts and evidence comments. `automations/p9-pre-push.md` stays as the verdict-contract reference the CI jobs use (cited by `docs/P9_ENFORCEMENT_GUIDE.md` and `docs/DEV_SETUP.md`).
+- Required checks on `main` as of 2026-10-09: `Lint (ruff)`, `Test (pytest + coverage)`, `Dependency audit (pip-audit)`. `security-review`, `grumpy-review` and `Evidence leak scan (docs/evidence)` are NOT required yet (owner action; a red review does not block the merge button until then). `main` requires conversation resolution, so an unresolved thread blocks the merge.
+- Round cap: a third review FAIL on a card goes to the owner (re-scope, or ship LOW/NIT with cards). Stop at the cap and wait for an explicit go; no automatic main re-syncs or thread-hygiene passes after every merge (owner, 2026-10-10). One PM thread pass per PR at the end, each GitHub write as its own command.
+- Resume: fast-forward local `main` at session start (`git fetch origin && git merge --ff-only origin/main`, through an agent); a stale `main` feeds the session-start hook an old copy of this file.
+
+### governance-monitoring
+
+IDs here are M1-M3 so they never collide with the git-and-review G-rules above. The old SO1-SO16 session-outcome anchors are gone; cite git history or `docs/reports/` instead.
+
+- M1 injection: `~/.claude/scripts/verify-injection.sh`, which reads `~/.claude/session-start.log`.
+- M2 content: `.claude/_governance-manifest.json` tracks this file, LIB-PRINCIPLES and `required-gitignore.txt`; the owner's global CLAUDE.md and PEAS live in the untracked `.claude/_governance-manifest.local.json` (#200). Run `verify-hashes.sh`. Regenerate only with owner intent, as part of a reviewed PR.
+- M3 periodic "is it wired" pass. Reviews catch diffs, not absences, so grep for callers of every public entry point and watch for success paths that can't tell "nothing to do" from "not wired". Automating this is #224.
 
 ## enforcement-summary
 today: review-based; no hook or linter enforces any of P1-P8
