@@ -105,6 +105,7 @@ rule: `check_frequency` in seconds, constrained to `[300, 604800]` (5 min to 7 d
   "findings": [...], "summary": "...",
   "legal_grounding": true,
   "legal_grounding_authoritative": false,
+  "llm_status": "ok",
   "legal_context": [
     {"jurisdiction": "GDPR", "law": "gdpr", "section": "Article 17 — Right to erasure",
      "status": "placeholder", "score": 0.0328}
@@ -122,6 +123,12 @@ rule: `legal_context` (List[LegalCitation], default `[]`) = KB passages supplied
 schema: `LegalCitation` = `{jurisdiction?: str, law?: str, section?: str, status?: str, score?: float}`; `status` is always stripped + lower-cased (`"placeholder"` = synthetic, non-authoritative text); `score` is the RRF fusion score (rank-based, not a probability)
 because: the shipped corpus is entirely `# Status: PLACEHOLDER`, so "retrieval ran" and "grounded in law" must be separate signals
 back_compat: rows stored before these fields existed load with the false / `[]` defaults
+
+### API7: llm-status (issue #195)
+rule: `llm_status` (`schemas.LLMStatus`, default `"unknown"`) = outcome of the LLM step: `ok` (a validated `LLMAnswer` was used) | `fallback_llm_unreachable` (httpx `TransportError`, incl. timeouts) | `fallback_llm_invalid` (a 2xx answer failed parsing or `LLMAnswer`) | `fallback_llm_error` (non-2xx, model selection, prompt build, encoding, unforeseen exception) | `disabled` (quick mode). Every `fallback_*` value means HR5 rules-only findings with reduced confidence and `review_required` from the settings threshold. `"unknown"` appears only on rows stored before #195; a fresh analysis never emits it
+rule: the value is a fixed token: never exception text, never set by the model's answer, never derived from a client attribute; `ok` comes only from a returned, validated answer
+because: operators and the UI must tell a LocalAI outage from an always-fallback bug (G0-2 F2-S2) from a normal run
+back_compat: additive; one new field with a default, nothing else on the payload changed
 
 ### DiffResult
 ```json

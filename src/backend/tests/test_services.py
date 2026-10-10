@@ -1125,9 +1125,13 @@ class TestLocalAIClientAnalyze:
         from app.services.localai import LocalAIClient
         client = LocalAIClient()
 
+        # Issue #194: the body is untrusted and may echo document text; a
+        # sentinel and an injected log line in it must never be logged.
+        body = "Service Unavailable SENTINEL194SVC\nCRITICAL FORGED194SVC"
         mock_response = MagicMock()
         mock_response.status_code = 503
-        mock_response.text = "Service Unavailable"
+        mock_response.text = body
+        mock_response.content = body.encode()
 
         with patch("httpx.AsyncClient") as mock_cls:
             mock_http = AsyncMock()
@@ -1146,6 +1150,8 @@ class TestLocalAIClientAnalyze:
         messages = [r.getMessage() for r in caplog.records]
         assert any(m.startswith("LocalAI HTTP 503") for m in messages)
         assert not any("falling back to rules-only" in m for m in messages)
+        assert "SENTINEL194SVC" not in caplog.text
+        assert "FORGED194SVC" not in caplog.text
 
     def test_localai_analyze_http_error_returns_none(self, caplog):
         import logging

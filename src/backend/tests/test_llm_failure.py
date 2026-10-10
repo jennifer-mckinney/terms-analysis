@@ -22,17 +22,28 @@ the request body is encoded by the same code that raises in production.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, get_args
+import functools
+import hashlib
+import json
+import logging
+import re
+import sys
+import unicodedata
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 import pytest
 
+from app import schemas
+from app.schemas import AnalysisPayload
 from app.services import analyzer as analyzer_module
 from app.services import localai as localai_module
 from app.services.analyzer import analyze_text
-from app.services.localai import LocalAIClient
+from app.services.localai import _FINGERPRINT_HEX_CHARS, LocalAIClient
 
 _LOGGER_NAME = "uvicorn.error"
 _DOC = "We sell personal information and use automated decision-making."
@@ -419,3 +430,505 @@ def test_analyze_cancellation_propagates(localai_http):
     localai_http(_raise(asyncio.CancelledError()))
     with pytest.raises(asyncio.CancelledError):
         _analyze()
+
+
+# ---------------------------------------------------------------------------
+# Issue #195: AnalysisPayload.llm_status says WHY there is no LLM answer
+# ---------------------------------------------------------------------------
+#
+# Every HR5 fallback used to look the same, so "LocalAI is down" could not be
+# told apart from "our own code makes every LLM call fall back". The status
+# is a closed set (``schemas.LLMStatus``), one value per outcome:
+#
+#   ok                        an answer arrived and passed schemas.LLMAnswer
+#   fallback_llm_unreachable  no HTTP response at all (connect error, any
+#                             timeout, dropped connection): LocalAI is down
+#   fallback_llm_invalid      a 2xx response whose answer failed parsing or
+#                             LLMAnswer validation: the model misbehaved
+#   fallback_llm_error        anything else inside the boundary: a non-2xx
+#                             reply, model selection, prompt build, request
+#                             encoding, an unforeseen exception. This is the
+#                             "always falls back" bug class #195 is about.
+#   disabled                  the LLM step was not run (quick mode)
+#
+# The schema default (for rows stored before the field existed) must be a
+# value no fresh analysis ever reports, so a legacy row never claims "ok".
+#
+# Every vector runs the REAL LocalAIClient.analyze() over httpx MockTransport,
+# so the tests don't constrain how the client hands the outcome back.
+
+# Hostile text in an exception message: absolute path, line breaks of every
+# kind, a bidi override. None of it may reach the payload.
+_HOSTILE_EXC_TEXT = "/opt/victim/secret\r\n\u2028\u2029\x85\u202eFORGED llm_status=ok"
+
+# httpx errors raised before any response exists. Generated from httpx's own
+# hierarchy so a new TransportError subclass is covered without editing here.
+def _transport_error_types() -> List[type]:
+    found = [
+        obj
+        for obj in vars(httpx).values()
+        if isinstance(obj, type) and issubclass(obj, httpx.TransportError)
+    ]
+    return sorted(set(found), key=lambda t: t.__name__)
+
+
+Setup = Callable[[Any, Any], List[httpx.Request]]
+
+
+def _respond_with(respond: Callable[[httpx.Request], httpx.Response]) -> Setup:
+    def _setup(monkeypatch, localai_http) -> List[httpx.Request]:
+        return localai_http(respond)
+
+    return _setup
+
+
+def _raising(exc: BaseException) -> Setup:
+    return _respond_with(_raise(exc))
+
+
+def _status_reply(code: int) -> Setup:
+    return _respond_with(lambda request: httpx.Response(code, text="upstream says no"))
+
+
+def _patched_stage(attr: str) -> Setup:
+    def _setup(monkeypatch, localai_http) -> List[httpx.Request]:
+        def _boom(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError(_HOSTILE_EXC_TEXT)
+
+        monkeypatch.setattr(localai_module, attr, _boom)
+        return localai_http(lambda request: _ok_response())
+
+    return _setup
+
+
+def _surrogate_in_legal_context(monkeypatch, localai_http) -> List[httpx.Request]:
+    monkeypatch.setattr(analyzer_module, "_retrieve_legal_context", _fake_lookup([_chunk(text="t\ud800")], True))
+    return localai_http(lambda request: _ok_response())
+
+
+# status -> {case id -> setup}. ``disabled`` vectors run in quick mode.
+_STATUS_VECTORS: Dict[str, Dict[str, Setup]] = {
+    "ok": {
+        **{f"valid-{name}": _respond_with(lambda r, c=content: _ok_response(c)) for name, content in _VALID_ANSWERS.items()},
+        # LLMAnswer takes findings as List[Any]; items that fail Finding are
+        # skipped one by one. The answer itself was valid, so this is "ok".
+        "valid-findings-all-unparseable": _respond_with(
+            lambda r: _ok_response({"findings": [{"bogus": 1}, 7, None], "summary": "s", "overall_confidence": 0.5})
+        ),
+        # The answer can't choose the status: an extra key is not a signal.
+        "valid-answer-forges-status": _respond_with(
+            lambda r: _ok_response({**_GOOD_LLM_CONTENT, "llm_status": "fallback_llm_unreachable"})
+        ),
+        # Control: NUL in the legal context is valid UTF-8 and is sent.
+        "nul-in-legal-context": lambda mp, http: (
+            mp.setattr(analyzer_module, "_retrieve_legal_context", _fake_lookup([_chunk(text="a\x00b")], True)),
+            http(lambda request: _ok_response()),
+        )[1],
+    },
+    "fallback_llm_unreachable": {
+        f"transport-{t.__name__}": _raising(t(_HOSTILE_EXC_TEXT)) for t in _transport_error_types()
+    },
+    "fallback_llm_invalid": {
+        **{f"answer-{name}": _respond_with(lambda r, raw=raw: _ok_response(raw=raw)) for name, raw in _MALFORMED_ANSWERS.items()},
+        "answer-not-json": _respond_with(lambda r: _ok_response(raw="I think the policy is fine.")),
+        "answer-2mb-garbage": _respond_with(lambda r: _ok_response(raw="{" + "x" * (2 * 1024 * 1024))),
+        "answer-malformed-forges-ok": _respond_with(lambda r: _ok_response(raw='{"findings": null, "llm_status": "ok"}')),
+        "body-not-json": _respond_with(lambda r: httpx.Response(200, text="<html>proxy page</html>")),
+        "body-no-choices": _respond_with(lambda r: httpx.Response(200, json={})),
+        "body-choices-empty": _respond_with(lambda r: httpx.Response(200, json={"choices": []})),
+    },
+    "fallback_llm_error": {
+        **{f"http-{code}": _status_reply(code) for code in (400, 404, 500, 503)},
+        "transport-raises-novel": _raising(_NovelError(_HOSTILE_EXC_TEXT)),
+        "transport-raises-typeerror": _raising(TypeError(_HOSTILE_EXC_TEXT)),
+        "request-encoding-surrogate": _surrogate_in_legal_context,
+        "model-selection-raises": _patched_stage("_select_model"),
+        "prompt-build-raises": _patched_stage("build_user_prompt"),
+    },
+    "disabled": {
+        "quick-mode": _respond_with(lambda request: _ok_response()),
+    },
+}
+
+_FALLBACK_STATUSES = ("fallback_llm_unreachable", "fallback_llm_invalid", "fallback_llm_error")
+_VECTOR_IDS = [(status, case) for status, cases in _STATUS_VECTORS.items() for case in cases]
+
+
+def _run_vector(monkeypatch, localai_http, status: str, case: str):
+    monkeypatch.setattr(analyzer_module, "_retrieve_legal_context", _fake_lookup([_chunk()], True))
+    sent = _STATUS_VECTORS[status][case](monkeypatch, localai_http)
+    mode = "quick" if status == "disabled" else "full"
+    result = asyncio.run(analyze_text(_DOC, _JURISDICTIONS, mode=mode))
+    return result.payload, sent
+
+
+def test_llm_status_vectors_cover_every_emitted_status():
+    # Contract (F10): every value of the schema Literal except the legacy
+    # default has at least one vector here, and every vector names a real
+    # value. A new status without a test, or a test for a removed status,
+    # fails here.
+    statuses = set(get_args(schemas.LLMStatus))
+    legacy_default = AnalysisPayload.model_fields["llm_status"].default
+    assert legacy_default in statuses, "the default must itself be a valid LLMStatus"
+    assert legacy_default not in _STATUS_VECTORS, (
+        "the legacy default must differ from every status a fresh analysis reports"
+    )
+    assert set(_STATUS_VECTORS) | {legacy_default} == statuses
+    assert all(_STATUS_VECTORS[s] for s in _STATUS_VECTORS)
+    # httpx really has transport errors to generate from (no empty family).
+    assert len(_STATUS_VECTORS["fallback_llm_unreachable"]) >= 8
+    print(f"llm_status vectors: {len(_VECTOR_IDS)}")
+
+
+@pytest.mark.parametrize("status,case", _VECTOR_IDS, ids=[f"{s}:{c}" for s, c in _VECTOR_IDS])
+def test_llm_status_names_the_llm_outcome(monkeypatch, localai_http, status, case):
+    payload, sent = _run_vector(monkeypatch, localai_http, status, case)
+    assert payload.llm_status == status
+    assert payload.model_dump()["llm_status"] == status
+    # The status is a fixed token: no exception text reaches the payload.
+    assert "victim" not in payload.model_dump_json(exclude={"legal_context"})
+    if status == "disabled":
+        assert sent == [], "quick mode must not call the LLM"
+    elif case.startswith(("transport-", "http-", "valid-", "answer-", "body-")):
+        assert len(sent) == 1, "the vector must reach the HTTP layer to mean what it says"
+
+
+@pytest.mark.parametrize(
+    "status,case",
+    [(s, c) for s, c in _VECTOR_IDS if s in _FALLBACK_STATUSES],
+    ids=[f"{s}:{c}" for s, c in _VECTOR_IDS if s in _FALLBACK_STATUSES],
+)
+def test_llm_status_fallback_agrees_with_hr5_confidence_reduction(monkeypatch, localai_http, status, case):
+    # HR5: a fallback status and the rules-only result always come together:
+    # the same findings and the same reduced confidence as the documented
+    # rules-only path, no summary, and review_required driven by the
+    # configured threshold (read from the analyzer's settings, never restated).
+    baseline = _rules_only_baseline(monkeypatch)
+    payload, _ = _run_vector(monkeypatch, localai_http, status, case)
+    assert payload.llm_status == status
+    assert payload.summary is None
+    assert payload.confidence == pytest.approx(baseline.payload.confidence)
+    assert {f.category for f in payload.findings} == {f.category for f in baseline.payload.findings}
+    assert payload.review_required is (payload.confidence < analyzer_module.settings.review_threshold)
+    assert payload.status == ("needs_review" if payload.review_required else "completed")
+
+
+def test_llm_status_fallback_with_threshold_above_confidence_needs_review(monkeypatch, localai_http):
+    # Override the threshold through config so the fallback must be reviewed.
+    baseline = _rules_only_baseline(monkeypatch)
+    threshold = min(1.0, baseline.payload.confidence + 0.01)
+    monkeypatch.setattr(analyzer_module, "settings", dataclasses.replace(analyzer_module.settings, review_threshold=threshold))
+    payload, _ = _run_vector(monkeypatch, localai_http, "fallback_llm_unreachable", "transport-ConnectError")
+    assert payload.llm_status == "fallback_llm_unreachable"
+    assert payload.review_required is True
+    assert payload.status == "needs_review"
+
+
+def test_llm_status_ok_is_not_the_rules_only_result(monkeypatch, localai_http):
+    # Positive control for the agreement test: an ok answer with a summary is
+    # not given the rules-only confidence reduction.
+    baseline = _rules_only_baseline(monkeypatch)
+    payload, _ = _run_vector(monkeypatch, localai_http, "ok", "valid-full")
+    assert payload.llm_status == "ok"
+    assert payload.summary == _VALID_ANSWERS["full"]["summary"]
+    assert payload.confidence != pytest.approx(baseline.payload.confidence)
+
+
+def test_llm_status_set_on_every_batch_document(monkeypatch, localai_http):
+    monkeypatch.setattr(analyzer_module, "_retrieve_legal_context", _fake_lookup([], False))
+    localai_http(_raise(httpx.ConnectError(_HOSTILE_EXC_TEXT)))
+    docs = [(_DOC, "a", None, None), (_DOC, "b", None, None)]
+    payloads, _ = asyncio.run(analyzer_module.analyze_batch_documents(docs, None, _JURISDICTIONS))
+    assert [p.llm_status for p in payloads] == ["fallback_llm_unreachable"] * len(docs)
+    quick, _ = asyncio.run(analyzer_module.analyze_batch_documents(docs, None, _JURISDICTIONS, mode="quick"))
+    assert [p.llm_status for p in quick] == ["disabled"] * len(docs)
+# Issue #194: an error response body never reaches the logs
+# ---------------------------------------------------------------------------
+# The LocalAI response body is untrusted: it can echo the prompt, the
+# document or a legal passage. On an HTTP error the log carries the status
+# and a content-free fingerprint of the body (its length; at most a SHA-256
+# prefix) so an operator can still correlate repeats, and nothing else.
+
+_BODY_SENTINEL = "SENTINEL194BODYqz7"
+_FORGED_MARK = "FORGED194LINE"
+_FORGED_LINE = f"CRITICAL uvicorn.error {_FORGED_MARK} admin login ok"
+_BODY_FILLER = "BODYFILL"
+# Matches the levelname that starts every record line of caplog.text.
+_RECORD_LINE = re.compile(r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL) ")
+
+
+
+@functools.lru_cache(maxsize=None)
+def _unicode_scan() -> Tuple[Tuple[str, ...], str]:
+    """One pass over every non-surrogate code point, cached for the module:
+    the single code points str.splitlines() breaks on, and the Cf set."""
+    breaks: List[str] = []
+    cf: List[str] = []
+    for cp in range(sys.maxunicode + 1):
+        if not 0xD800 <= cp <= 0xDFFF:
+            char = chr(cp)
+            if len(f"a{char}b".splitlines()) == 2:
+                breaks.append(char)
+            if unicodedata.category(char) == "Cf":
+                cf.append(char)
+    return tuple(breaks), "".join(cf)
+
+
+# Generated, not listed: every code point str.splitlines() breaks on, plus
+# CRLF, NUL, and every Cf (format: bidi, zero-width, BOM) character at once.
+_LINE_BREAKS = ["\r\n", *_unicode_scan()[0]]
+_CF_CHARS = _unicode_scan()[1]
+_SEPARATORS: Dict[str, str] = {
+    **{f"break-U+{ord(s[-1]):04X}-{len(s)}": s for s in _LINE_BREAKS},
+    "nul": "\x00",
+    "all-cf": _CF_CHARS,
+}
+
+_ERROR_STATUSES = [400, 401, 403, 404, 413, 422, 429, 500, 502, 503, 504]
+
+
+def _hostile_body(separator: str = "\n", prefix: bytes = b"") -> bytes:
+    text = f"model echoed: {_BODY_SENTINEL} {_BODY_FILLER}{separator}{_FORGED_LINE}"
+    return prefix + text.encode("utf-8")
+
+
+# The status line's reason phrase is server-controlled too, and httpx quotes
+# it in str(HTTPStatusError) (h11 allows any visible ASCII in it).
+_HOSTILE_REASON = f"Busy {_BODY_SENTINEL} {_FORGED_MARK}".encode("ascii")
+
+
+def _error_response(status: int, body: bytes) -> Callable[[httpx.Request], httpx.Response]:
+    def _respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status,
+            content=body,
+            headers={"content-type": "text/plain"},
+            extensions={"reason_phrase": _HOSTILE_REASON},
+        )
+
+    return _respond
+
+
+def _assert_no_body_text(caplog, body: bytes) -> None:
+    """No part of ``body`` is in any captured log output, formatted or raw."""
+    text = caplog.text
+    for token in (_BODY_SENTINEL, _FORGED_MARK, _BODY_FILLER):
+        assert token not in text
+    # No forged record: every physical line (by every line-break rule
+    # str.splitlines() knows) is a real record line.
+    for line in text.splitlines():
+        assert _RECORD_LINE.match(line), f"forged log line: {line[:80]!a}"
+    # No raw NUL / Cf bytes from the body reach the log.
+    assert "\x00" not in text
+    assert not set(text) & set(_CF_CHARS)
+    for record in caplog.records:
+        # Structured handlers serialise msg and args; tracebacks quote locals.
+        assert _BODY_SENTINEL not in repr(record.msg)
+        assert _BODY_SENTINEL not in repr(record.args)
+        assert record.exc_info is None
+
+
+def _assert_fingerprint(caplog, status: int, body: bytes) -> None:
+    """The one warning carries the status, ``body_bytes=<byte count>`` (bytes,
+    not decoded characters) and ``sha256=<the real digest's prefix>`` of
+    exactly ``_FINGERPRINT_HEX_CHARS`` hex chars; never the full hash."""
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert re.search(rf"(?<![0-9])HTTP {status}(?![0-9])", message), message[:200]
+    assert re.findall(r"body_bytes=(\d+)", message) == [str(len(body))], message[:200]
+    digest = hashlib.sha256(body).hexdigest()
+    fields = re.findall(r"sha256=([0-9a-f]+)", message)
+    assert fields == [digest[:_FINGERPRINT_HEX_CHARS]], message[:200]
+    assert digest not in message
+    for run in re.findall(r"[0-9a-f]{8,}", message):
+        if digest.startswith(run):
+            assert len(run) == _FINGERPRINT_HEX_CHARS
+    assert _fallback_records(caplog) == []
+
+
+@pytest.mark.parametrize("status", _ERROR_STATUSES)
+def test_http_error_log_has_status_and_fingerprint_not_body(localai_http, caplog, status):
+    body = _hostile_body()
+    localai_http(_error_response(status, body))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _analyze() is None
+    _assert_no_body_text(caplog, body)
+    _assert_fingerprint(caplog, status, body)
+
+
+@pytest.mark.parametrize("name", list(_SEPARATORS))
+def test_http_error_log_no_forged_line_for_any_separator(localai_http, caplog, name):
+    body = _hostile_body(_SEPARATORS[name])
+    localai_http(_error_response(500, body))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _analyze() is None
+    _assert_no_body_text(caplog, body)
+    _assert_fingerprint(caplog, 500, body)
+
+
+def test_http_error_separator_table_is_generated_and_complete():
+    # Contract: the generated table holds every splitlines() break (single
+    # code points plus CRLF), NUL and the Cf set; spot-check known members.
+    singles = {s for s in _LINE_BREAKS if len(s) == 1}
+    assert {"\n", "\r", "\x85", " ", " "} <= singles
+    assert "\r\n" in _LINE_BREAKS
+    assert {"‮", "​", "﻿"} <= set(_CF_CHARS)
+    # The multibyte shape only bites if bytes and characters disagree.
+    multibyte = _BODY_SHAPES["multibyte"]
+    assert len(multibyte) != len(multibyte.decode("utf-8"))
+
+
+_BODY_SHAPES: Dict[str, bytes] = {
+    "invalid-utf8": _hostile_body(prefix=b"\xff\xfe\xc3("),
+    "huge-2mb-sentinel-last": (_BODY_FILLER * (2 * 1024 * 1024 // len(_BODY_FILLER))).encode()
+    + _hostile_body(),
+    "empty": b"",
+    # Byte count differs from char count: 2-byte e-acute and a 4-byte emoji.
+    "multibyte": ("é" * 100 + "\U0001F600").encode("utf-8"),
+}
+
+
+@pytest.mark.parametrize("name", list(_BODY_SHAPES))
+def test_http_error_log_body_shapes(localai_http, caplog, name):
+    body = _BODY_SHAPES[name]
+    localai_http(_error_response(503, body))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _analyze() is None
+    _assert_no_body_text(caplog, body)
+    _assert_fingerprint(caplog, 503, body)
+
+
+def test_generic_fallback_logs_no_body_text(localai_http, caplog):
+    # A 200 whose answer fails schema validation: pydantic's error message
+    # quotes the input value, so only the type may reach the log.
+    raw = json.dumps({"findings": [], "summary": {"x": f"{_BODY_SENTINEL}\n{_FORGED_LINE}"}})
+    localai_http(lambda request: _ok_response(raw=raw))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _analyze() is None
+    _assert_no_body_text(caplog, raw.encode())
+    assert len(_fallback_records(caplog)) == 1
+
+
+def test_generic_fallback_non_json_body_logs_no_body_text(localai_http, caplog):
+    body = _hostile_body()
+    localai_http(lambda request: httpx.Response(200, content=body))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _analyze() is None
+    _assert_no_body_text(caplog, body)
+    assert len(_fallback_records(caplog)) == 1
+
+
+@pytest.mark.parametrize(
+    "exc_type", [httpx.RemoteProtocolError, httpx.DecodingError], ids=lambda t: t.__name__
+)
+def test_transport_error_log_quotes_no_server_bytes(localai_http, caplog, exc_type):
+    # h11 quotes the server's raw status line in its error ("illegal status
+    # line: b'...'"), so an httpx.HTTPError message is server-controlled too.
+    body = _hostile_body()
+    localai_http(_raise(exc_type(f"illegal status line: {body!r}\n{_FORGED_LINE}")))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _analyze() is None
+    _assert_no_body_text(caplog, body)
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert exc_type.__name__ in warnings[0].getMessage()
+
+
+def test_http_error_surfaces_no_body_to_the_caller(monkeypatch, localai_http, caplog):
+    # analyze() returns None (no exception, no text); the API payload built
+    # by analyze_text from that fallback carries no body text either.
+    baseline = _rules_only_baseline(monkeypatch)
+    localai_http(_error_response(500, _hostile_body()))
+    monkeypatch.setattr(analyzer_module, "_retrieve_legal_context", _fake_lookup([_chunk()], True))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        result = asyncio.run(analyze_text(_DOC, _JURISDICTIONS))
+    serialised = result.payload.model_dump_json()
+    assert _BODY_SENTINEL not in serialised and _FORGED_MARK not in serialised
+    assert {f.category for f in result.payload.findings} == {
+        f.category for f in baseline.payload.findings
+    }
+    assert _BODY_SENTINEL not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Issue #194 / #285: embed() logs exactly like the chat path
+# ---------------------------------------------------------------------------
+# Same untrusted response, same rule: status + body_bytes + sha256 prefix on
+# an HTTP status error, the exception type name only on a transport error;
+# no body text, no reason phrase, no exc_info.
+
+
+def _embed() -> Optional[List[float]]:
+    return asyncio.run(LocalAIClient().embed("Article 17 erasure"))
+
+
+@pytest.mark.parametrize("status", _ERROR_STATUSES)
+def test_embed_http_error_log_has_status_and_fingerprint_not_body(localai_http, caplog, status):
+    body = _hostile_body()
+    localai_http(_error_response(status, body))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _embed() is None
+    _assert_fingerprint(caplog, status, body)
+    _assert_no_body_text(caplog, body)
+
+
+@pytest.mark.parametrize("name", list(_BODY_SHAPES))
+def test_embed_http_error_log_body_shapes(localai_http, caplog, name):
+    body = _BODY_SHAPES[name]
+    localai_http(_error_response(503, body))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _embed() is None
+    _assert_fingerprint(caplog, 503, body)
+    _assert_no_body_text(caplog, body)
+
+
+@pytest.mark.parametrize(
+    "exc_type", [httpx.RemoteProtocolError, httpx.DecodingError], ids=lambda t: t.__name__
+)
+def test_embed_transport_error_log_quotes_no_server_bytes(localai_http, caplog, exc_type):
+    body = _hostile_body()
+    localai_http(_raise(exc_type(f"illegal status line: {body!r}\n{_FORGED_LINE}")))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _embed() is None
+    _assert_no_body_text(caplog, body)
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert exc_type.__name__ in warnings[0].getMessage()
+
+
+class _BodyQuotingParseError(ValueError):
+    """A parse error whose message quotes the response body, as many
+    decoders do; stands in for any non-HTTP exception carrying server text."""
+
+
+def _json_quoting_body(self: httpx.Response, **kwargs: Any) -> Any:
+    raise _BodyQuotingParseError(f"cannot parse: {self.text}")
+
+
+@pytest.mark.parametrize("quoting_parser", [False, True], ids=["wrong-shape", "parse-error-quotes-body"])
+def test_embed_malformed_200_logs_type_name_only(monkeypatch, localai_http, caplog, quoting_parser):
+    # A 200 that embed() cannot use falls to its catch-all branch, which logs
+    # the exception type name only, never the exception text.
+    raw = json.dumps({"data": f"{_BODY_SENTINEL} {_BODY_FILLER}\n{_FORGED_LINE}"})
+    expected_type = "TypeError"  # data["data"][0] is a str; indexing it by "embedding" raises
+    if quoting_parser:
+        monkeypatch.setattr(httpx.Response, "json", _json_quoting_body)
+        expected_type = _BodyQuotingParseError.__name__
+    localai_http(lambda request: httpx.Response(200, content=raw.encode()))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _embed() is None
+    _assert_no_body_text(caplog, raw.encode())
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert expected_type in warnings[0].getMessage()
+
+
+def test_embed_success_returns_vector_and_logs_nothing(localai_http, caplog):
+    # Positive control: a good response still yields the vector, silently.
+    vector = [0.25, -0.5, 1.0]
+    sent = localai_http(lambda request: httpx.Response(200, json={"data": [{"embedding": vector}]}))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _embed() == vector
+    assert len(sent) == 1 and sent[0].url.path.endswith("/embeddings")
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []

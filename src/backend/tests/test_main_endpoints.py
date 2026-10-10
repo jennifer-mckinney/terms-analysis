@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
+import httpx
 import pytest
 
 from app.models import (
@@ -40,6 +41,7 @@ from app.models import (
     WatchlistItem,
 )
 from app.schemas import AnalysisPayload
+from app.services import analyzer as analyzer_module
 from app.services.analyzer import AnalysisResult
 
 
@@ -1617,3 +1619,90 @@ class TestPr34MustFixRegressions:
             json={"url": "javascript:alert(1)"},
         )
         assert response.status_code in (400, 422)
+
+
+# ---------------------------------------------------------------------------
+# Issue #195: llm_status reaches the API response and survives storage
+# ---------------------------------------------------------------------------
+
+_LLM_DOC = "We sell personal information and use automated decision-making."
+# Exception text the client must never see (CWE-209): a path, line breaks of
+# every kind and a bidi override.
+_LLM_HOSTILE = "/opt/victim/secret\r\n\u2028\u202eFORGED"
+
+
+@pytest.fixture
+def llm_transport(monkeypatch):
+    """Send LocalAIClient's httpx traffic to ``respond``; no legal-KB lookup."""
+    async def _no_kb(query, client, jurisdictions):
+        return [], False
+
+    monkeypatch.setattr(analyzer_module, "_retrieve_legal_context", _no_kb)
+    real_client = httpx.AsyncClient
+    sent: list = []
+
+    def _install(respond):
+        def _factory(*args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(lambda request: (sent.append(request), respond(request))[1])
+            return real_client(*args, **kwargs)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _factory)
+        return sent
+
+    return _install
+
+
+def _raise_connect(request):
+    raise httpx.ConnectError(_LLM_HOSTILE, request=request)
+
+
+def test_main_analyze_localai_down_reports_unreachable_and_persists(app_client, llm_transport):
+    sent = llm_transport(_raise_connect)
+    resp = app_client.post("/analyze", json={"text": _LLM_DOC, "jurisdictions": ["GDPR"]})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(sent) == 1
+    assert body["llm_status"] == "fallback_llm_unreachable"
+    # HR5 agreement on the wire: no LLM summary, rules-only findings.
+    assert body["summary"] is None
+    assert body["findings"]
+    assert "victim" not in resp.text and "FORGED" not in resp.text
+    stored = app_client.get(f"/analyses/{body['id']}")
+    assert stored.status_code == 200
+    assert stored.json()["llm_status"] == "fallback_llm_unreachable"
+
+
+def test_main_analyze_invalid_answer_reports_invalid(app_client, llm_transport):
+    llm_transport(lambda request: httpx.Response(200, json={"choices": [{"message": {"content": '{"findings": null, "llm_status": "ok"}'}}]}))
+    resp = app_client.post("/analyze", json={"text": _LLM_DOC, "jurisdictions": ["GDPR"]})
+    assert resp.status_code == 200
+    assert resp.json()["llm_status"] == "fallback_llm_invalid"
+
+
+def test_main_analyze_ok_answer_reports_ok(app_client, llm_transport):
+    content = json.dumps({"summary": "fine", "overall_confidence": 0.9, "findings": []})
+    llm_transport(lambda request: httpx.Response(200, json={"choices": [{"message": {"content": content}}]}))
+    resp = app_client.post("/analyze", json={"text": _LLM_DOC, "jurisdictions": ["GDPR"]})
+    assert resp.status_code == 200
+    assert resp.json()["llm_status"] == "ok"
+
+
+def test_main_analyze_quick_mode_reports_disabled(app_client, llm_transport):
+    sent = llm_transport(_raise_connect)
+    resp = app_client.post("/analyze", json={"text": _LLM_DOC, "jurisdictions": ["GDPR"], "mode": "quick"})
+    assert resp.status_code == 200
+    assert sent == []
+    assert resp.json()["llm_status"] == "disabled"
+
+
+def test_main_get_analysis_legacy_row_without_llm_status_loads(app_client, db_session):
+    row = _insert_analysis(db_session)
+    legacy = json.loads(row.result_json)
+    legacy.pop("llm_status", None)
+    row.result_json = json.dumps(legacy)
+    db_session.commit()
+    resp = app_client.get(f"/analyses/{row.id}")
+    assert resp.status_code == 200
+    default = AnalysisPayload.model_fields["llm_status"].default
+    assert resp.json()["llm_status"] == default
+    assert default != "ok"
