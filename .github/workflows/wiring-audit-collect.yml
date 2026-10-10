@@ -1,8 +1,8 @@
 name: Wiring audit (collect)
 
 # Weekly "is it wired" audit, step 2 of 2 (card #224, ADR 0002). A day after
-# wiring-audit-submit.yml, downloads that workflow's batch hand-off from its
-# latest successful run on the default branch, checks the batch against the
+# wiring-audit-submit.yml, downloads the batch hand-off of every submit run it
+# has not collected yet (default branch, oldest first), checks each batch against the
 # result contract (ended, every request present once and succeeded, end_turn,
 # schema-valid output, the canary's defect reported), files the findings as
 # issues through the REST API, logs the actual cost, and deletes the batch on
@@ -57,30 +57,52 @@ jobs:
         with:
           python-version-file: .python-version
 
-      # Attack sketch T10: the hand-off comes only from a successful run of the
+      # Attack sketch T10: hand-offs come only from successful runs of the
       # submit workflow on the default branch, never from another workflow's
-      # artifact of the same name.
-      - name: Download the hand-off from the latest successful submit run
+      # artifact. Every such run that finished after the last successful
+      # collect run started is taken (not only the newest), oldest first; with
+      # no earlier collect run, every one inside stale_handoff_days. The list
+      # of downloaded files is the only thing passed to the next step.
+      - name: Download every uncollected submit hand-off
         env:
           GH_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow wiring-audit-submit.yml \
-            --branch "$DEFAULT_BRANCH" --status success --limit 1 --json databaseId \
-            --jq '.[0].databaseId // empty')"
-          if ! [[ "$run_id" =~ ^[0-9]+$ ]]; then
-            echo "::error title=wiring-audit::ARTIFACT_INVALID: no successful wiring-audit-submit.yml run on the default branch to collect."
-            exit 1
+          dest="$RUNNER_TEMP/wiring-audit"
+          mkdir -p "$dest"
+          : > "$dest/handoffs.txt"
+          since="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow wiring-audit-collect.yml \
+            --branch "$DEFAULT_BRANCH" --status success --limit 1 --json createdAt \
+            --jq '.[0].createdAt // empty')"
+          if [ -z "$since" ]; then
+            days="$(jq -r '.stale_handoff_days' scripts/audit/config.json)"
+            [[ "$days" =~ ^[0-9]+$ ]] || { echo "::error title=wiring-audit::CONFIG: stale_handoff_days is not a whole number"; exit 1; }
+            since="$(date -u -d "-${days} days" +%Y-%m-%dT%H:%M:%SZ)"
           fi
-          echo "wiring-audit: collecting the hand-off of submit run ${run_id}"
-          gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name wiring-audit-batch \
-            --dir "$RUNNER_TEMP/wiring-audit"
+          [[ "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$ ]] || { echo "::error title=wiring-audit::CONFIG: unexpected run timestamp"; exit 1; }
+          echo "wiring-audit: collecting submit runs that finished after ${since}"
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow wiring-audit-submit.yml \
+            --branch "$DEFAULT_BRANCH" --status success --limit 100 --json databaseId,createdAt,updatedAt \
+            | jq -r --arg since "$since" 'sort_by(.createdAt) | .[] | select(.updatedAt > $since) | .databaseId' \
+            > "$dest/runs.txt"
+          while IFS= read -r run_id; do
+            [[ "$run_id" =~ ^[0-9]+$ ]] || { echo "::error title=wiring-audit::ARTIFACT_INVALID: unexpected run id"; exit 1; }
+            gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "wiring-audit-batch-${run_id}" \
+              --dir "$dest/$run_id"
+            echo "$dest/$run_id/wiring-audit-batch.json" >> "$dest/handoffs.txt"
+          done < "$dest/runs.txt"
+          echo "wiring-audit: $(wc -l < "$dest/handoffs.txt") hand-off(s) to collect"
 
-      - name: Check the batch, file findings and delete the batch
+      # No hand-off still runs the collector, which then fails with NO_HANDOFF.
+      - name: Check each batch, file findings and delete each batch
         env:
           WIRING_AUDIT_API_KEY: ${{ secrets.WIRING_AUDIT_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: >-
-          python3 -I scripts/audit/collect.py --config scripts/audit/config.json
-          --artifact "$RUNNER_TEMP/wiring-audit/wiring-audit-batch.json"
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r handoff; do
+            args+=(--artifact "$handoff")
+          done < "$RUNNER_TEMP/wiring-audit/handoffs.txt"
+          python3 -I scripts/audit/collect.py --config scripts/audit/config.json "${args[@]}"
