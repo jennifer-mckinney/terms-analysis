@@ -54,6 +54,9 @@ PYTHON_RUNNING_JOBS = frozenset(
         ("p9-review.yml", "security-review"),
         ("p9-review.yml", "grumpy-review"),
         ("board-sync.yml", "board-sync"),
+        # #224 (cards to follow from #277): both wiring-audit jobs run python3 -I scripts/audit/*.py.
+        ("wiring-audit-submit.yml", "submit"),
+        ("wiring-audit-collect.yml", "collect"),
     }
 )
 

@@ -20,11 +20,14 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
 
 # Jobs that genuinely need a write scope, and why.
-# p9-review posts the review verdict as a PR comment.
+# p9-review posts the review verdict as a PR comment; wiring-audit-collect
+# files the audit's findings as issues.
 _ALLOWED_WRITES = frozenset(
     {
         ("p9-review.yml", "security-review", "pull-requests"),
         ("p9-review.yml", "grumpy-review", "pull-requests"),
+        # The weekly wiring audit files its findings as issues (#224, ADR 0002 C3).
+        ("wiring-audit-collect.yml", "collect", "issues"),
     }
 )
 _LEVELS = frozenset({"read", "write", "none"})

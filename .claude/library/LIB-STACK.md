@@ -8,7 +8,7 @@ xref: [[.claude/CLAUDE.md#hard-requirements]] [[LIB-LEGAL]] [[LIB-TEST]]
 ### S1: policy
 rule: all deps MUST be open source (Apache 2.0/MIT/BSD), no investor lawsuits, IRP Grade A+
 xref: [[LIB-LEGAL]] [[.claude/CLAUDE.md#HR1]]
-scope: product runtime/data path; dev-time CI tooling below is exempt per docs/adr/0001-dependency-rules-scope-ci-review-tooling.md
+scope: product runtime/data path; dev-time CI tooling below is exempt per docs/adr/0001-dependency-rules-scope-ci-review-tooling.md (CI review jobs) and docs/adr/0002-wiring-audit-batch-api-exemption.md (the weekly wiring audit)
 
 ## ci-tooling
 
@@ -17,6 +17,7 @@ GitHub Actions used by `.github/workflows/*.yml` (from `grep -h "uses:" .github/
 | Action | Pin | Used in | Note |
 |---|---|---|---|
 | `anthropics/claude-code-action` | SHA `2dca132ff0e0c4094ce6048b422c6915a071210b` (v1) | `p9-review.yml` | CI review jobs; exempt under ADR 0001 |
+| Anthropic Message Batches API (stdlib `urllib` client, no SDK) | `scripts/audit/config.json` pins the model id and batch prices | `wiring-audit-submit.yml`, `wiring-audit-collect.yml` (`scripts/audit/`) | Weekly wiring audit (#224); exempt under ADR 0002 while its nine conditions hold |
 | `actions/checkout` | SHA `d23441a48e516b6c34aea4fa41551a30e30af803` (v6) | `p9-review.yml` | GitHub-owned |
 | `actions/checkout` | tag `v4` | `ci.yml`, `gitignore-enforcement.yml` | GitHub-owned; tag pin, SHA pin tracked separately |
 | `actions/setup-python` | tag `v5` | `ci.yml` | GitHub-owned; tag pin, SHA pin tracked separately |

@@ -1,0 +1,83 @@
+name: Wiring audit (submit)
+
+# Weekly "is it wired" audit, step 1 of 2 (card #224, ADR 0002). Builds one
+# request per audited file plus the canary, leak-scans every payload, checks
+# the worst-case cost against the budget, and submits a Message Batches job.
+# The collect workflow (wiring-audit-collect.yml) reads the batch a day later.
+# Code and the config it reads: scripts/audit/ (config.json holds every
+# tunable, including the cron below, which a test pins to it).
+#
+# Conditions this file carries (ADR 0002): GitHub-hosted runner; triggers are
+# schedule and workflow_dispatch only; the job runs only on the default branch
+# and only in the wiring-audit environment, whose deployment-branch policy
+# limits the key to that branch; every action is pinned to a full commit SHA;
+# least privilege; the dedicated WIRING_AUDIT_API_KEY is step-scoped and a
+# missing key fails the run loudly.
+
+on:
+  schedule:
+    - cron: "0 2 * * 1"
+  workflow_dispatch:
+
+# Nothing by default; the job grants only what it uses.
+permissions: {}
+
+# Runs queue rather than cancel: a cancelled submit could orphan a batch.
+concurrency:
+  group: wiring-audit-submit
+  cancel-in-progress: false
+
+jobs:
+  submit:
+    name: submit
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    environment: wiring-audit
+    # Longer than the 600 s cancel timeout in config.json, so a cleanup can finish.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Require the wiring-audit API key
+        env:
+          WIRING_AUDIT_API_KEY: ${{ secrets.WIRING_AUDIT_API_KEY }}
+        run: |
+          if [ -z "${WIRING_AUDIT_API_KEY//[[:space:]]/}" ]; then
+            echo "::error title=wiring-audit::MISSING_SECRET: the WIRING_AUDIT_API_KEY secret is not set in the wiring-audit environment. Add the dedicated audit key there (ADR 0002 condition 4)."
+            exit 1
+          fi
+          echo "wiring-audit: WIRING_AUDIT_API_KEY is set"
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version-file: .python-version
+
+      - name: Build, scan, budget and submit the batch
+        env:
+          WIRING_AUDIT_API_KEY: ${{ secrets.WIRING_AUDIT_API_KEY }}
+        run: >-
+          python3 -I scripts/audit/submit.py --repo . --config scripts/audit/config.json
+          --artifact "$RUNNER_TEMP/wiring-audit/wiring-audit-batch.json"
+
+      - name: Upload the batch hand-off for the collect workflow
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # One artifact per submit run, so collect can take every run it has not collected yet.
+          name: wiring-audit-batch-${{ github.run_id }}
+          path: ${{ runner.temp }}/wiring-audit/wiring-audit-batch.json
+          if-no-files-found: error
+
+      # ADR 0002 condition 8: if any step after the create fails (or the run is
+      # cancelled), cancel, poll and delete the recorded batch so it is never
+      # orphaned outside the collect job's view.
+      - name: Cancel and delete the batch after a failure
+        if: failure() || cancelled()
+        env:
+          WIRING_AUDIT_API_KEY: ${{ secrets.WIRING_AUDIT_API_KEY }}
+        run: >-
+          python3 -I scripts/audit/submit.py --cleanup --config scripts/audit/config.json
+          --artifact "$RUNNER_TEMP/wiring-audit/wiring-audit-batch.json"
