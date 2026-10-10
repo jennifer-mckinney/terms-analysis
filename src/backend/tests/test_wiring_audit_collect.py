@@ -308,19 +308,46 @@ def test_severity_threshold_comes_from_config(tmp_path: Path) -> None:
     assert marker(_key(BETA, "unwired_entry_point", "beta_main")) in posts[0]["body"]
 
 
-def test_dedupe_key_is_stable_and_skips_open_issues_and_repeats(tmp_path: Path) -> None:
+# Round 4 ruling 2: a dedupe marker counts only in an issue opened by a bot (the workflow's
+# github-actions[bot], or any user.type "Bot"). A marker pasted by a human into a labelled
+# issue must not suppress a real finding. (case, issue "user" value or _NO_USER, deduped?)
+_NO_USER = object()
+ISSUE_AUTHORS = [
+    ("github-actions-bot", {"login": "github-actions[bot]", "type": "Bot"}, True),
+    ("github-actions-login-only", {"login": "github-actions[bot]"}, True),
+    ("another-bot-type", {"login": "some-app[bot]", "type": "Bot"}, True),
+    ("human-user", {"login": "octo-human", "type": "User"}, False),
+    ("human-claims-bot-login-lookalike", {"login": "github-\u0430ctions[bot]", "type": "User"}, False),
+    ("human-type-not-a-string", {"login": "octo-human", "type": ["Bot"]}, False),
+    ("user-missing", _NO_USER, False),
+    ("user-null", None, False),
+    ("user-not-an-object", "github-actions[bot]", False),
+]
+
+
+@pytest.mark.parametrize(("case", "user", "deduped"), ISSUE_AUTHORS, ids=[a[0] for a in ISSUE_AUTHORS])
+def test_dedupe_key_is_stable_and_skips_open_issues_and_repeats(tmp_path: Path, case: str, user: Any,
+                                                                 deduped: bool) -> None:
     prep = _prepare(tmp_path, card_mode="cards")
     sim = Sim(prep)
     alpha = _finding(severity="MEDIUM", symbol="alpha_fn")
     sim.module_output(ALPHA, [alpha, dict(alpha, evidence="reworded by the model")])
     sim.module_output(BETA, [_finding(kind="unwired_entry_point", severity="HIGH", symbol="beta_main")])
-    sim.existing_issues = [{"number": 7, "state": "open", "title": "old",
-                            "body": "x\n" + marker(_key(ALPHA, "zero_caller_public", "alpha_fn")) + "\n"}]
+    issue: dict[str, Any] = {"number": 7, "state": "open", "title": "old",
+                             "body": "x\n" + marker(_key(ALPHA, "zero_caller_public", "alpha_fn")) + "\n"}
+    if user is not _NO_USER:
+        issue["user"] = user
+    sim.existing_issues = [issue]
     collect, rc, out = _collect(sim)
     assert rc == exit_code(collect, "OK"), out[-800:]
-    posts = sim.issue_posts()
-    assert len(posts) == 1
-    assert marker(_key(BETA, "unwired_entry_point", "beta_main")) in posts[0]["body"]
+    assert "Traceback" not in out
+    bodies = [p["body"] for p in sim.issue_posts()]
+    assert sum(marker(_key(BETA, "unwired_entry_point", "beta_main")) in b for b in bodies) == 1
+    # The model's repeat of alpha_fn is filed at most once (in-run dedupe), and not at all
+    # when a bot-authored open issue already carries its marker.
+    alpha_posts = sum(marker(_key(ALPHA, "zero_caller_public", "alpha_fn")) in b for b in bodies)
+    assert alpha_posts == (0 if deduped else 1), (case, alpha_posts)
+    assert len(bodies) == (1 if deduped else 2), (case, len(bodies))
 
 
 def test_cards_per_run_are_capped_by_config(tmp_path: Path) -> None:
@@ -729,7 +756,9 @@ def _route_per_batch(sim: Sim, results_for: dict[str, Callable[[], list[dict[str
         return 200, ("\n".join(json.dumps(x) for x in lines) + "\n").encode("utf-8")
 
     def issues(call: Call) -> tuple[int, bytes]:
-        posted = [{"number": 100 + i, "state": "open", "title": p["title"], "body": p["body"]}
+        # Issues this run filed come back authored by the workflow's bot, as GitHub reports them.
+        posted = [{"number": 100 + i, "state": "open", "title": p["title"], "body": p["body"],
+                   "user": {"login": "github-actions[bot]", "type": "Bot"}}
                   for i, p in enumerate(sim.issue_posts())]
         return 200, jbytes(sim.existing_issues + posted)
 
@@ -812,14 +841,20 @@ def test_stale_handoff_does_not_stop_the_fresh_one(tmp_path: Path, clock: Any) -
     assert len(sim.issue_posts()) == 1
 
 
-def test_no_handoff_is_a_loud_failure_not_success(tmp_path: Path) -> None:
+@pytest.mark.parametrize("override", [None, 3], ids=["shipped-days", "config-override-3"])
+def test_no_handoff_is_a_loud_failure_not_success(tmp_path: Path, override: int | None) -> None:
     # Ruling 1, F5: zero uncollected hand-offs is "did nothing", never exit 0.
-    prep = _prepare(tmp_path)
+    # Round 4 ruling 3 (F8): the message describes the real window, stale_handoff_days from
+    # the config, not the old "since the last successful collect".
+    prep = _prepare(tmp_path) if override is None else _prepare(tmp_path, stale_handoff_days=override)
     sim = Sim(prep)
     collect, rc, out = _collect(sim, artifacts=[])
     assert rc == exit_code(collect, "NO_HANDOFF"), out[-800:]
     assert rc != exit_code(collect, "OK")
     assert "::error title=wiring-audit::NO_HANDOFF" in out
+    days = _stale_days(prep)
+    assert f"no trusted successful submit run in the last {days} days" in out, out[-800:]
+    assert "since the last successful collect" not in out
     assert sim.fake.calls == [] and "Traceback" not in out
 
 

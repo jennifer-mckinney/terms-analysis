@@ -13,6 +13,7 @@ missing-secret step is executed under bash.
 from __future__ import annotations
 
 import ast
+import datetime as dt
 import json
 import os
 import re
@@ -268,7 +269,6 @@ def test_artifact_handoff_is_wired_between_the_workflows() -> None:
 
 def test_collect_takes_every_uncollected_submit_run_not_only_the_newest() -> None:
     # Ruling 1 (PR #282): `gh run list --limit 1` orphaned every older batch.
-    # A lookup of the last collect run may use --limit 1; the submit-run lookup may not.
     runs = "\n".join(str(s.get("run", "")) for s in _job("collect")["steps"]).replace("\\\n", " ")
     lookups = [line for line in runs.splitlines() if "gh run list" in line and "wiring-audit-submit.yml" in line]
     assert lookups, "collect no longer looks up the submit workflow's runs"
@@ -311,10 +311,23 @@ while i < len(argv):
 def fail(msg, rc=1):
     sys.stderr.write("fake gh: " + msg + "\n")
     sys.exit(rc)
+def created_ok(created, query):
+    # GitHub search date qualifiers: >=, >, <=, <, a..b, with a date or a UTC timestamp.
+    def cmp(op, value):
+        key = created if "T" in value else created[:10]
+        return {">=": key >= value, ">": key > value, "<=": key <= value, "<": key < value, "=": key == value}[op]
+    if ".." in query:
+        lo, hi = query.split("..", 1)
+        return (lo == "*" or cmp(">=", lo)) and (hi == "*" or cmp("<=", hi))
+    for op in (">=", "<=", ">", "<"):
+        if query.startswith(op):
+            return cmp(op, query[len(op):])
+    return cmp("=", query)
 if opts.get("--repo", [os.environ["GITHUB_REPOSITORY"]])[-1] != os.environ["GITHUB_REPOSITORY"]:
     fail("wrong --repo", 4)
 if pos[:2] == ["run", "list"]:
-    allowed = {"--repo", "--workflow", "--branch", "--status", "--event", "--limit", "--json", "--jq", "--commit"}
+    allowed = {"--repo", "--workflow", "--branch", "--status", "--event", "--limit", "--json", "--jq", "--commit",
+               "--created"}
     if set(opts) - allowed:
         fail("unsupported option " + ",".join(sorted(set(opts) - allowed)), 3)
     runs = list(state["runs"].get(opts.get("--workflow", [""])[-1], []))
@@ -324,6 +337,8 @@ if pos[:2] == ["run", "list"]:
     if "--status" in opts:
         want = opts["--status"][-1]
         runs = [r for r in runs if (r["status"] if want in STATUSES else r["conclusion"]) == want]
+    if "--created" in opts:
+        runs = [r for r in runs if created_ok(r["createdAt"], opts["--created"][-1])]
     runs.sort(key=lambda r: r["createdAt"], reverse=True)
     runs = runs[: int(opts.get("--limit", ["20"])[-1])]
     if "--json" not in opts:
@@ -363,8 +378,20 @@ STEP_ENV = {
 HANDOFF_PATH = re.compile(r"/(\d+)/wiring-audit-batch\.json$")
 
 
+def _lookback_seconds(days: int | None = None) -> int:
+    # Round 4 ruling 1: the window is stale_handoff_days, read from the shipped config (F13).
+    days = real_config()["stale_handoff_days"] if days is None else days
+    assert isinstance(days, int) and not isinstance(days, bool) and days > 0, days
+    return days * 86400
+
+
+def _ago(seconds: float) -> str:
+    return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _day(n: int, hour: int = 4) -> str:
-    return f"2026-09-{10 + n:02d}T{hour:02d}:00:00Z"
+    # Point n (0-9) inside the lookback window, oldest first; `hour` adds minutes for ordering.
+    return _ago(_lookback_seconds() * (1 - (n + 1) / 12) - (hour - 4) * 60)
 
 
 def _run(run_id: int, sha: str, created: str, *, updated: str | None = None, event: str = "schedule",
@@ -418,6 +445,7 @@ class _Checkout:
 def _run_download(tmp: Path, co: _Checkout, collect_runs: list[dict[str, Any]], submit_runs: list[dict[str, Any]],
                   fail_downloads: tuple[int, ...] = ()) -> tuple[subprocess.CompletedProcess[str], list[int]]:
     step = _download_step()
+    tmp.mkdir(exist_ok=True)
     bin_dir = tmp / "bin"
     bin_dir.mkdir()
     gh = bin_dir / "gh"
@@ -452,25 +480,104 @@ def _run_download(tmp: Path, co: _Checkout, collect_runs: list[dict[str, Any]], 
     return proc, ids
 
 
+def _gh_calls(tmp: Path) -> list[list[str]]:
+    log = tmp / "gh-calls.jsonl"
+    return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] if log.is_file() else []
+
+
+def _collect_lookups(tmp: Path) -> list[list[str]]:
+    # Any gh call that names the collect workflow, in any spelling of the option.
+    return [call for call in _gh_calls(tmp) if any(COLLECT_FILE in arg for arg in call)]
+
+
 @pytest.mark.parametrize("conclusion", ["failure", "cancelled", "timed_out", "success"])
-def test_since_is_the_last_completed_collect_run_of_any_conclusion(tmp_path: Path, conclusion: str) -> None:
-    # Finding 1 (HIGH): a collect that failed after deleting its batches never moved `since`,
-    # so every later run re-downloaded those hand-offs (404, then HANDOFF_STALE) and stayed red.
-    # The newest collect run is this one, still in progress: it must not count either.
+def test_every_trusted_submit_in_the_lookback_is_listed_whatever_the_last_collect_did(
+        tmp_path: Path, conclusion: str) -> None:
+    # Round 4 ruling 1 (MEDIUM): a `since` taken from the last completed collect dropped every
+    # hand-off that collect failed to reach (MISSING_SECRET, DOWNLOAD_FAILED, cancelled, ...).
+    # No `since` at all: every trusted successful submit run in the lookback is listed, oldest
+    # first, and the 404 -> ALREADY_COLLECTED path dedupes the ones already collected.
     co = _Checkout(tmp_path)
     collect_runs = [
         _run(900, co.b, _day(9), status="in_progress"),  # the running collect itself
-        _run(800, co.b, _day(5), conclusion=conclusion),
+        _run(800, co.b, _day(5), conclusion=conclusion),  # run N: ended before collecting 20
         _run(700, co.a, _day(1)),
     ]
     submit_runs = [
-        _run(10, co.a, _day(0), updated=_day(0, 5)),   # before both collects
-        _run(20, co.a, _day(3), updated=_day(3, 5)),   # handled by collect 800
-        _run(30, co.a, _day(7), updated=_day(7, 5)),   # new since collect 800
+        _run(10, co.a, _day(0), updated=_day(0, 5)),
+        _run(20, co.a, _day(3), updated=_day(3, 5)),   # never collected: run N failed first
+        _run(30, co.a, _day(7), updated=_day(7, 5)),
     ]
-    proc, ids = _run_download(tmp_path, co, collect_runs, submit_runs)
+    proc, ids = _run_download(tmp_path / "n1", co, collect_runs, submit_runs)
     assert proc.returncode == 0, proc.stdout[-800:] + proc.stderr[-800:]
+    assert ids == [10, 20, 30], ids
+    assert _collect_lookups(tmp_path / "n1") == []  # no collect-run lookup at all
+
+
+def test_a_handoff_whose_download_failed_is_listed_again_by_the_next_run(tmp_path: Path) -> None:
+    # Ruling 1: run N fails to download submit 20; run N+1 (after N completed as a failure)
+    # lists 20 again, so the failure is retried instead of being skipped forever.
+    co = _Checkout(tmp_path)
+    submit_runs = [_run(20, co.a, _day(3)), _run(30, co.b, _day(4))]
+    proc, ids = _run_download(tmp_path / "n", co, [_run(700, co.a, _day(1))], submit_runs, fail_downloads=(20,))
+    assert proc.returncode == 1, proc.stdout[-800:] + proc.stderr[-800:]
     assert ids == [30], ids
+    run_n = _run(800, co.b, _day(6), conclusion="failure")
+    proc, ids = _run_download(tmp_path / "n1", co, [run_n, _run(700, co.a, _day(1))], submit_runs)
+    assert proc.returncode == 0, proc.stdout[-800:] + proc.stderr[-800:]
+    assert ids == [20, 30], ids
+    assert _collect_lookups(tmp_path / "n") == [] and _collect_lookups(tmp_path / "n1") == []
+
+
+@pytest.mark.parametrize("override", [None, 2], ids=["shipped-days", "config-override-2"])
+def test_the_lookback_is_stale_handoff_days_from_the_config(tmp_path: Path, override: int | None) -> None:
+    # Ruling 1, F13: the window is read from config.json in the step, never restated. One hour
+    # outside it is not listed (the collector would refuse it as HANDOFF_STALE); one hour
+    # inside is. The override proves the shipped value is not hard-coded in the step.
+    co = _Checkout(tmp_path)
+    if override is not None:
+        assert override < real_config()["stale_handoff_days"]
+        cfg_file = co.work / "scripts" / "audit" / "config.json"
+        cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+        cfg["stale_handoff_days"] = override
+        cfg_file.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    window = _lookback_seconds(override)
+    submit_runs = [
+        _run(10, co.a, _ago(window + 3600)),  # older than the lookback
+        _run(20, co.a, _ago(window - 3600)),  # just inside
+        _run(30, co.b, _ago(3600)),
+    ]
+    proc, ids = _run_download(tmp_path / "run", co, [_run(700, co.a, _ago(window - 600))], submit_runs)
+    assert proc.returncode == 0, proc.stdout[-800:] + proc.stderr[-800:]
+    assert ids == [20, 30], ids
+    assert _collect_lookups(tmp_path / "run") == []
+
+
+BAD_LOOKBACK = [
+    ("zero", 0), ("negative", -1), ("fraction", 7.5), ("string", "8"), ("null", None), ("bool", True),
+    ("missing", KeyError),
+]
+
+
+@pytest.mark.parametrize(("case", "value"), BAD_LOOKBACK, ids=[c[0] for c in BAD_LOOKBACK])
+def test_a_bad_lookback_in_the_config_fails_the_step_closed(tmp_path: Path, case: str, value: Any) -> None:
+    # F13/F3: what the config loader rejects (stale_handoff_days must be a positive int), the
+    # step rejects too, before it downloads anything. A trusted collect run is present, so no
+    # code path may skip reading the value.
+    co = _Checkout(tmp_path)
+    cfg_file = co.work / "scripts" / "audit" / "config.json"
+    cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+    if value is KeyError:
+        del cfg["stale_handoff_days"]
+    else:
+        cfg["stale_handoff_days"] = value
+    cfg_file.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    proc, ids = _run_download(tmp_path / "run", co, [_run(700, co.a, _day(1))], [_run(20, co.a, _day(3))])
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, (case, out[-800:])
+    assert "::error title=wiring-audit::CONFIG" in out, (case, out[-800:])
+    assert ids == [], (case, ids)
+    assert not [c for c in _gh_calls(tmp_path / "run") if c[:2] == ["run", "download"]], case
 
 
 def _trusted_collect(co: _Checkout) -> list[dict[str, Any]]:
@@ -503,33 +610,6 @@ def test_only_trusted_submit_runs_are_collected(tmp_path: Path, case: str, chang
     assert ids == ([30, 40] if collected else [30]), (case, ids)
 
 
-COLLECT_TRUST = [
-    ("pull-request-collect", {"event": "pull_request"}),
-    ("fork-commit-collect", {"sha": "c"}),
-]
-
-
-@pytest.mark.parametrize(("case", "change"), COLLECT_TRUST, ids=[c[0] for c in COLLECT_TRUST])
-def test_an_untrusted_collect_run_never_moves_since(tmp_path: Path, case: str, change: dict[str, str]) -> None:
-    # Finding 3: a forged "completed collect" from a fork PR would hide every real hand-off.
-    co = _Checkout(tmp_path)
-    forged = _run(990, co.c if change.get("sha") == "c" else co.a, _day(8), event=change.get("event", "schedule"))
-    submit_runs = [_run(20, co.a, _day(3)), _run(30, co.b, _day(6))]
-    proc, ids = _run_download(tmp_path, co, [forged, *_trusted_collect(co)], submit_runs)
-    assert proc.returncode == 0, proc.stdout[-800:] + proc.stderr[-800:]
-    assert ids == [20, 30], (case, ids)
-
-
-def test_a_trusted_dispatch_collect_run_does_move_since(tmp_path: Path) -> None:
-    # Companion of the table above: a trusted dispatch run counts, whatever its conclusion.
-    co = _Checkout(tmp_path)
-    dispatch = _run(990, co.b, _day(4), event="workflow_dispatch", conclusion="failure")
-    submit_runs = [_run(20, co.a, _day(3)), _run(30, co.b, _day(6))]
-    proc, ids = _run_download(tmp_path, co, [dispatch, *_trusted_collect(co)], submit_runs)
-    assert proc.returncode == 0, proc.stdout[-800:] + proc.stderr[-800:]
-    assert ids == [30], ids
-
-
 @pytest.mark.parametrize(("failing", "kept"), [((25,), [30]), ((30,), [25]), ((25, 30), [])],
                          ids=["older-fails", "newer-fails", "all-fail"])
 def test_one_failed_download_is_reported_and_the_rest_still_collected(
@@ -545,7 +625,10 @@ def test_one_failed_download_is_reported_and_the_rest_still_collected(
     assert ids == kept, ids
     errors = [line for line in out.splitlines() if line.startswith("::error title=wiring-audit::")]
     for run_id in failing:
-        assert [e for e in errors if re.search(rf"\b{run_id}\b", e)], (run_id, errors)
+        mine = [e for e in errors if re.search(rf"\b{run_id}\b", e)]
+        assert mine, (run_id, errors)
+        # Round 4 ruling 4: with the fixed window the hand-off is retried; the message says so.
+        assert all("will be retried by the next collect run" in e for e in mine), mine
     attempted = [json.loads(line) for line in (tmp_path / "gh-calls.jsonl").read_text(encoding="utf-8").splitlines()]
     assert sorted(int(a[2]) for a in attempted if a[:2] == ["run", "download"]) == [25, 30]
 
@@ -557,17 +640,16 @@ def test_collector_still_runs_after_a_failed_download() -> None:
     assert re.fullmatch(r"!\s*cancelled\(\)|always\(\)", cond), cond
 
 
-def test_both_run_lookups_restrict_the_event_and_check_ancestry() -> None:
-    # Findings 1 and 3, static companion of the behavioural tests above: both `gh run list`
-    # calls restrict the event, neither keeps success-only for the collect lookup, and the
-    # step proves each head commit is on the default branch.
+def test_only_the_submit_lookup_remains_and_it_restricts_the_event_and_checks_ancestry() -> None:
+    # Round 4 ruling 1, static companion of the behavioural tests above: the step looks up
+    # submit runs only (no collect-run lookup, no `since`), restricts the event and proves
+    # each head commit is on the default branch.
     script = str(_download_step()["run"]).replace("\\\n", " ")
     lookups = [line for line in script.splitlines() if "gh run list" in line]
-    assert {w for line in lookups for w in (COLLECT_FILE, SUBMIT_FILE) if w in line} == {COLLECT_FILE, SUBMIT_FILE}
+    assert lookups and all(SUBMIT_FILE in line for line in lookups), lookups
+    assert COLLECT_FILE not in script
     for line in lookups:
         assert re.search(r"--event[ =]|\bevent\b", line), line
-        if COLLECT_FILE in line:
-            assert not re.search(r"--status[ =]success\b", line), line
     assert "merge-base --is-ancestor" in script
 
 
