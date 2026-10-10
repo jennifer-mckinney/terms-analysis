@@ -18,10 +18,11 @@ xref: [[LIB-ARCH]] [[LIB-STACK]] [[LIB-LEGAL]] [[LIB-TEST]] [[LIB-API]] [[LIB-RU
 |-----|-------|
 | Purpose | Analyse ToS and privacy policies for compliance risk, using rule + LLM + RAG detection |
 | Stack | FastAPI backend; Streamlit UI (v2 primary, v1 legacy rollback; Vue 3 planned under D2/G4); SQLite; LocalAI (Apertus-8B, EuroLLM-22B); numpy exhaustive search for the legal KB (no FAISS, no ANN) |
-| Python | CI runs 3.11 (`ci.yml`); local dev is 3.14. Moving CI to 3.14 via one `.python-version` file is #215 (in progress) |
+| Python | 3.14, pinned once in `.python-version`; `ci.yml` reads it (#277). Both repos run every workflow on GitHub-hosted `ubuntu-latest` (ingester ADR-016, PR #69; the laptop runner is decommissioned by the owner) |
 | Jurisdictions | 30 codes (full list in `schemas.py`); empty `jurisdictions=[]` means no filter |
 | Risk method | IRP composite per finding. Details: [[LIB-RULES#IRP]] |
-| Sibling repo | `legal-corpus-ingester` (PUBLIC, like this one). Corpus bundles feed `legal_kb.py`; `load_from_bundle` is still unwired (D9 / two silent failures) |
+| Sibling repo | `legal-corpus-ingester` (PUBLIC, like this one). Corpus bundles feed `legal_kb.py`; `load_from_bundle` is still unwired (D9 / two silent failures). Refresh/health state on ephemeral runners: ingester #71 decided (owner, 2026-10-10) as option 1, `actions/cache`; the mechanism, including the first-record seed step, is still to be implemented before refresh is wired (G2) |
+| Wiring audit | #224 shipped (#282): `wiring-audit-submit.yml` Mon 02:00 UTC, `wiring-audit-collect.yml` Tue 04:00 UTC, environment `wiring-audit` with secret `WIRING_AUDIT_API_KEY`, label `wiring-audit`. Fails loudly until the owner creates those. `AnalysisPayload.llm_status` (#287, LIB-API API7) tells an LLM outage from an always-fallback bug |
 | Hosting | Railway hosts the frontend (D10); railtail bridges to the local backend. Vercel is removed |
 | Review | P9 runs as CI jobs on every PR: `security-review` + `grumpy-review` in `.github/workflows/p9-review.yml` (#214). CRITICAL/HIGH/MEDIUM block; LOW/NIT are carded P3 (#218) |
 
@@ -67,7 +68,7 @@ These identifiers mean different things in the ingester repo. Never cite a bare 
 | Backend | `cd src/backend && uvicorn app.main:app --reload` |
 | Frontend | `cd src/webapp && streamlit run app_streamlit_v2.py --server.port 8501` |
 | Both | `./run.sh` |
-| Tests as CI runs them | copy the pytest line from `.github/workflows/ci.yml` verbatim and run it from `src/backend` on a Python 3.11 venv |
+| Tests as CI runs them | copy the pytest line from `.github/workflows/ci.yml` verbatim and run it from `src/backend` on a Python 3.14 venv (`.python-version`) |
 | Evaluation | `cd src/backend && python scripts/evaluate.py` |
 | Governance hashes | `bash scripts/governance/verify-hashes.sh` |
 | Evidence leak scan | `bash scripts/governance/scan-evidence-leaks.sh "$(git rev-parse --show-toplevel)"` |
@@ -93,7 +94,8 @@ These identifiers mean different things in the ingester repo. Never cite a bare 
 - P9 (LIB-PRINCIPLES): independent security and code-quality review before code reaches main. Since 2026-10-09 it runs in CI (`p9-review.yml`, claude-code-action on Opus, read-only tool allowlist, deny rules for `/proc`, `.git` and credentials). Reviews cost API credit; a `billing_error` shows as `is_error:true`, $0, under 1 s.
 - Retired on 2026-10-09 (#214): the local pre-push hard gate, `.git/reviews/*.signoff.json`, owner push scripts and evidence comments. `automations/p9-pre-push.md` stays as the verdict-contract reference the CI jobs use (cited by `docs/P9_ENFORCEMENT_GUIDE.md` and `docs/DEV_SETUP.md`).
 - Required checks on `main` as of 2026-10-09: `Lint (ruff)`, `Test (pytest + coverage)`, `Dependency audit (pip-audit)`. `security-review`, `grumpy-review` and `Evidence leak scan (docs/evidence)` are NOT required yet (owner action; a red review does not block the merge button until then). `main` requires conversation resolution, so an unresolved thread blocks the merge.
-- Round cap: a third review FAIL on a card goes to the owner (re-scope, or ship LOW/NIT with cards).
+- Round cap: a third review FAIL on a card goes to the owner (re-scope, or ship LOW/NIT with cards). Stop at the cap and wait for an explicit go; no automatic main re-syncs or thread-hygiene passes after every merge (owner, 2026-10-10). One PM thread pass per PR at the end, each GitHub write as its own command.
+- Resume: fast-forward local `main` at session start (`git fetch origin && git merge --ff-only origin/main`, through an agent); a stale `main` feeds the session-start hook an old copy of this file.
 
 ## governance-monitoring
 
