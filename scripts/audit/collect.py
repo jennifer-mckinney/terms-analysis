@@ -441,9 +441,13 @@ _WORKFLOW_BOT = "github-actions[bot]"
 
 
 def _bot_authored(item: dict[str, Any]) -> bool:
-    """Markers count only in issues a bot opened, so a human cannot suppress a finding by pasting one."""
+    """Markers count only in issues the workflow's own bot opened (exact login match).
+
+    A human pasting a marker, or another installed app with issues:write (any other
+    user.type "Bot"), cannot suppress a finding.
+    """
     user = item.get("user")
-    return isinstance(user, dict) and (user.get("login") == _WORKFLOW_BOT or user.get("type") == "Bot")
+    return isinstance(user, dict) and user.get("login") == _WORKFLOW_BOT
 
 
 def open_issue_keys(gh: Any, slug: str, cfg: dict[str, Any]) -> set[str]:
@@ -630,29 +634,41 @@ def main(argv: list[str] | None = None, *, http: Any = None, env: dict[str, str]
             code = rep.error(exc.name, str(exc))
         else:
             if utc_now() - art.created_at > limit:
-                code = rep.error("HANDOFF_STALE", f"hand-off for batch {art.batch_id} was written at "
-                                 f"{art.created_at:%Y-%m-%dT%H:%M:%SZ}, more than {cfg['stale_handoff_days']} "
-                                 "days ago; it is not checked or filed. Its batch is deleted so its prompts "
-                                 "leave retention")
-                delete_stale(api, art.batch_id, rep)
+                code = settle_stale(api, art, cfg, rep)
             else:
                 code = Collector(cfg, art, api, gh, slug, redactor, rep).run()
         codes.append(code)
     return run_exit(codes, rep)
 
 
-def delete_stale(api: Any, batch_id: str, rep: Any) -> None:
-    """Condition 8 for a stale hand-off: delete its batch; a 404 means it is already gone."""
+def settle_stale(api: Any, art: Artifact, cfg: dict[str, Any], rep: Any) -> int:
+    """A hand-off older than stale_handoff_days is never checked or filed; its batch is deleted first.
+
+    The listing re-lists hand-offs earlier weeks already collected, so the batch lookup
+    decides the verdict: a 404 on the DELETE means an earlier collect took this hand-off
+    and deleted its batch (ALREADY_COLLECTED, logged, never a failure). A batch that still
+    existed is HANDOFF_STALE; a failed delete is also DELETE_FAILED (condition 8).
+    """
+    batch_id = art.batch_id
     try:
         client.delete_batch(api, batch_id)
     except client.ApiFailure as exc:
         if exc.status == 404:
-            rep.log(f"stale batch {batch_id} was already deleted (HTTP 404)")
-        else:
-            rep.error("DELETE_FAILED", f"stale batch {batch_id} was not deleted ({exc}); delete it by "
-                      "hand so its prompts do not stay in retention")
+            rep.log(f"ALREADY_COLLECTED: batch {batch_id} no longer exists (HTTP 404 on delete); an earlier "
+                    "collect run took this hand-off, so it is skipped")
+            return EXIT_CODES["ALREADY_COLLECTED"]
+        delete_error = str(exc)
     else:
-        rep.log(f"stale batch {batch_id} deleted")
+        delete_error = ""
+    code = rep.error("HANDOFF_STALE", f"hand-off for batch {batch_id} was written at "
+                     f"{art.created_at:%Y-%m-%dT%H:%M:%SZ}, more than {cfg['stale_handoff_days']} days ago "
+                     "and its batch was never collected; it is not checked or filed")
+    if delete_error:
+        rep.error("DELETE_FAILED", f"stale batch {batch_id} was not deleted ({delete_error}); delete it by "
+                  "hand so its prompts do not stay in retention")
+    else:
+        rep.log(f"stale batch {batch_id} deleted so its prompts leave retention")
+    return code
 
 
 def run_exit(codes: list[int], rep: Any) -> int:

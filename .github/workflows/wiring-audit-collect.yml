@@ -67,8 +67,10 @@ jobs:
       # every such run CREATED within lookback_days (config.json; the vendor
       # keeps results 29 days) is listed, oldest first, every time. A batch an
       # earlier run already deleted comes back 404 and collect.py skips it as
-      # ALREADY_COLLECTED; one older than stale_handoff_days is refused there as
-      # HANDOFF_STALE and deleted. A failed download is reported by run id, the
+      # ALREADY_COLLECTED; one older than stale_handoff_days has its batch
+      # deleted first: a 404 there is also ALREADY_COLLECTED (last week's
+      # hand-off), while a batch that still existed is refused as HANDOFF_STALE.
+      # A failed download is reported by run id, the
       # rest still go to the collector, the step fails, and the next run
       # retries it.
       - name: Download every uncollected submit hand-off
