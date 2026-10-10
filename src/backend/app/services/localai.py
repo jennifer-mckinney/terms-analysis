@@ -251,5 +251,9 @@ class LocalAIClient:
             _log_http_error(f"LocalAI embed (model={selected})", exc)
             return None
         except Exception as exc:
-            logger.warning("LocalAI embed error (model=%s): %s", selected, exc)
+            # Issue #194 / #285: a parse error's message can quote the
+            # response body; log the exception type name only.
+            logger.warning(
+                "LocalAI embed error (model=%s): %s", selected, type(exc).__name__
+            )
             return None
