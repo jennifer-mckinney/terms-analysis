@@ -21,7 +21,7 @@ xref: [[LIB-ARCH]] [[LIB-STACK]] [[LIB-LEGAL]] [[LIB-TEST]] [[LIB-API]] [[LIB-RU
 | Python | 3.14, pinned once in `.python-version`; `ci.yml` reads it (#277). Both repos run every workflow on GitHub-hosted `ubuntu-latest` (ingester ADR-016, PR #69; the laptop runner is decommissioned by the owner) |
 | Jurisdictions | 30 codes (full list in `schemas.py`); empty `jurisdictions=[]` means no filter |
 | Risk method | IRP composite per finding. Details: [[LIB-RULES#IRP]] |
-| Sibling repo | `legal-corpus-ingester` (PUBLIC, like this one). Corpus bundles feed `legal_kb.py`; `load_from_bundle` is still unwired (D9 / two silent failures). Its refresh/health state on ephemeral runners is decision ingester #71, due before refresh is wired (G2) |
+| Sibling repo | `legal-corpus-ingester` (PUBLIC, like this one). Corpus bundles feed `legal_kb.py`; `load_from_bundle` is still unwired (D9 / two silent failures). Refresh/health state on ephemeral runners: ingester #71 decided (owner, 2026-10-10) as option 1, `actions/cache`; the mechanism, including the first-record seed step, is still to be implemented before refresh is wired (G2) |
 | Wiring audit | #224 shipped (#282): `wiring-audit-submit.yml` Mon 02:00 UTC, `wiring-audit-collect.yml` Tue 04:00 UTC, environment `wiring-audit` with secret `WIRING_AUDIT_API_KEY`, label `wiring-audit`. Fails loudly until the owner creates those. `AnalysisPayload.llm_status` (#287, LIB-API API7) tells an LLM outage from an always-fallback bug |
 | Hosting | Railway hosts the frontend (D10); railtail bridges to the local backend. Vercel is removed |
 | Review | P9 runs as CI jobs on every PR: `security-review` + `grumpy-review` in `.github/workflows/p9-review.yml` (#214). CRITICAL/HIGH/MEDIUM block; LOW/NIT are carded P3 (#218) |
