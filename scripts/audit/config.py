@@ -46,6 +46,8 @@ EXIT_CODES: dict[str, int] = {
     "CANARY_MISSING": 17,
     "SUBMIT_FAILED_AFTER_CREATE": 18,
     "CANCEL_TIMEOUT": 19,
+    "HANDOFF_STALE": 20,
+    "NO_HANDOFF": 21,
 }
 
 # Vendor API contracts, not tunables: the Batches API custom_id rule and the
@@ -217,6 +219,7 @@ _CHECKS: dict[str, Callable[[Any], bool]] = {
     "retry_backoff_seconds": _positive_number,
     "poll_interval_seconds": _positive_number,
     "cancel_timeout_seconds": _positive_int,
+    "stale_handoff_days": _positive_int,
     "subprocess_timeout_seconds": _positive_number,
     "max_subprocess_output_bytes": _positive_int,
 }

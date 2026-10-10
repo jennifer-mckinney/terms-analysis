@@ -166,9 +166,15 @@ def run_bounded(argv: list[str], *, cwd: Path | None, env: dict[str, str], stdin
     return proc.returncode, out, err
 
 
+# The only names a child process (git ls-files, leak_scan.py) inherits: an
+# allowlist, so the API key, GITHUB_TOKEN and anything else in the job env
+# never reach it, and no GIT_* variable can redirect git (F7).
+CHILD_ENV_ALLOWLIST = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR")
+
+
 def git_env() -> dict[str, str]:
-    """The caller's environment minus every GIT_* override (F7: no redirection)."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    """Allowlisted child environment plus fixed git settings (no credentials, no redirection)."""
+    env = {k: os.environ[k] for k in CHILD_ENV_ALLOWLIST if k in os.environ}
     env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0",
                 "LC_ALL": "C"})
     return env

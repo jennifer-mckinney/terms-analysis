@@ -55,7 +55,10 @@ def urllib_transport(timeout: float, max_bytes: int) -> Transport:
                     raise OSError("response body shorter or longer than its Content-Length")
         except urllib.error.HTTPError as exc:
             status = exc.code
-            data = exc.read(max_bytes + 1) if exc.fp is not None else b""
+            try:
+                data = exc.read(max_bytes + 1) if exc.fp is not None else b""
+            except Exception:  # noqa: BLE001 - an unreadable error body is reported by status alone
+                data = b""
         except http.client.HTTPException as exc:  # e.g. IncompleteRead: not an OSError
             raise OSError(f"HTTP protocol error: {type(exc).__name__}") from None
         if len(data) > max_bytes:

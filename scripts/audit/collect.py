@@ -29,6 +29,7 @@ DELETE_FAILED (condition 8). Actual cost from ``usage`` goes to the job summary.
 from __future__ import annotations
 
 import collections
+import datetime as dt
 import hashlib
 import importlib.util
 import json
@@ -65,9 +66,12 @@ SECRET_NAME = "WIRING_AUDIT_API_KEY"
 GITHUB_TOKEN_NAME = "GITHUB_TOKEN"
 EXIT_CODES = {name: config.EXIT_CODES[name] for name in (
     "OK", "CONFIG", "MISSING_SECRET", "ARTIFACT_INVALID", "BATCH_NOT_ENDED", "PARTIAL", "MISSING_OR_DUP",
-    "TRUNCATED_OR_REFUSED", "SCHEMA", "CANARY_MISSING", "API_ERROR", "DELETE_FAILED", "CANCEL_TIMEOUT")}
+    "TRUNCATED_OR_REFUSED", "SCHEMA", "CANARY_MISSING", "API_ERROR", "DELETE_FAILED", "CANCEL_TIMEOUT",
+    "HANDOFF_STALE", "NO_HANDOFF")}
 
-ARTIFACT_KEYS = frozenset({"batch_id", "canary_custom_id", "custom_ids", "model", "modules", "worst_case_usd"})
+ARTIFACT_KEYS = frozenset({"batch_id", "canary_custom_id", "created_at", "custom_ids", "model", "modules",
+                           "worst_case_usd"})
+_CREATED_AT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 FINDING_KEYS = frozenset({"kind", "severity", "symbol", "evidence", "recommendation"})
 OUTPUT_KEYS = frozenset({"module", "findings"})
 _REPO_SLUG = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
@@ -98,6 +102,18 @@ class Artifact:
         self.custom_ids: list[str] = doc["custom_ids"]
         self.canary_id: str = doc["canary_custom_id"]
         self.modules: dict[str, str] = doc["modules"]
+        self.created_at: dt.datetime = _parse_created_at(doc["created_at"])
+
+
+def _parse_created_at(value: Any) -> dt.datetime:
+    """RFC 3339 UTC with a Z suffix (the format submit writes), as an aware datetime."""
+    if not isinstance(value, str) or not _CREATED_AT.fullmatch(value):
+        raise ValueError("created_at is not RFC 3339 UTC (YYYY-MM-DDTHH:MM:SSZ)")
+    return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+
+
+def utc_now() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
 
 
 def read_artifact(path: Path) -> Artifact:
@@ -126,9 +142,17 @@ def read_artifact(path: Path) -> Artifact:
             isinstance(k, str) and config.CUSTOM_ID_RE.fullmatch(k) and isinstance(v, str)
             and _valid_module_path(v) for k, v in modules.items()):
         raise bad("modules must map custom ids to repository paths")
+    if canary not in ids:
+        raise bad("canary_custom_id is not one of custom_ids")
     if any(i != canary and i not in modules for i in ids):
         raise bad("a custom_id has no module path")
-    return Artifact(doc)
+    try:
+        art = Artifact(doc)
+    except ValueError as exc:
+        raise bad(str(exc)) from None
+    if art.created_at > utc_now():
+        raise bad("created_at is in the future")
+    return art
 
 
 def _valid_module_path(path: str) -> bool:
@@ -521,7 +545,8 @@ class Collector:
 def _parse(argv: list[str] | None) -> Any:
     parser = inventory.make_parser("Collect the weekly wiring-audit batch and file its findings.")
     parser.add_argument("--config", required=True)
-    parser.add_argument("--artifact", required=True)
+    parser.add_argument("--artifact", action="append", default=[],
+                        help="one per uncollected submit run, oldest first (repeatable)")
     parser.add_argument("--repo", default=str(Path(__file__).resolve().parents[2]),
                         help="checkout holding the pattern files (default: this script's checkout)")
     return parser.parse_args(argv)
@@ -548,14 +573,31 @@ def main(argv: list[str] | None = None, *, http: Any = None, env: dict[str, str]
     slug = env.get("GITHUB_REPOSITORY", "")
     if not _REPO_SLUG.fullmatch(slug):
         return rep.error("CONFIG", "GITHUB_REPOSITORY is not set to owner/name")
-    try:
-        art = read_artifact(Path(args.artifact))
-    except Failure as exc:
-        return rep.error(exc.name, str(exc))
+    if not args.artifact:
+        return rep.error("NO_HANDOFF", "no submit hand-off to collect: no successful submit run since the "
+                         "last successful collect; nothing was checked or filed")
     http = http or client.urllib_transport(cfg["http_timeout_seconds"], cfg["max_response_bytes"])
-    collector = Collector(cfg, art, client.anthropic_api(http, cfg, key), github_api(http, cfg, token),
-                          slug, redactor, rep)
-    return collector.run()
+    api, gh = client.anthropic_api(http, cfg, key), github_api(http, cfg, token)
+    limit = dt.timedelta(days=cfg["stale_handoff_days"])
+    rc = EXIT_CODES["OK"]
+    # Every hand-off is processed, oldest first; one failing never stops the next.
+    # The run's exit code is the first failure, so any failure turns it red.
+    for path in args.artifact:
+        try:
+            art = read_artifact(Path(path))
+        except Failure as exc:
+            code = rep.error(exc.name, str(exc))
+        else:
+            if utc_now() - art.created_at > limit:
+                code = rep.error("HANDOFF_STALE", f"hand-off for batch {art.batch_id} was written at "
+                                 f"{art.created_at:%Y-%m-%dT%H:%M:%SZ}, more than {cfg['stale_handoff_days']} "
+                                 "days ago; it was not collected and no request was made for it. If the "
+                                 "batch still exists, delete it by hand so its prompts leave retention")
+            else:
+                code = Collector(cfg, art, api, gh, slug, redactor, rep).run()
+        if rc == EXIT_CODES["OK"]:
+            rc = code
+    return rc
 
 
 def _terminate(signum: int, frame: Any) -> None:

@@ -328,6 +328,7 @@ def main(argv: list[str] | None = None, *, http: Any = None, env: dict[str, str]
         write_json_atomic(artifact, {
             "batch_id": batch_id,
             "canary_custom_id": canary["custom_id"],
+            "created_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "custom_ids": sorted(r["custom_id"] for r in requests),
             "model": cfg["model"],
             "modules": {m.custom_id: m.path for m in inv.modules},
