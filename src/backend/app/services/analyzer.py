@@ -19,6 +19,7 @@ from ..schemas import (
     Finding,
     IndustryProfile,
     Jurisdiction,
+    LLMStatus,
     normalise_corpus_status,
     passage_label_keys,
 )
@@ -33,6 +34,31 @@ from .rules import _seed_irp, detect_findings
 from .validation import validate_findings
 
 logger = logging.getLogger("uvicorn.error")
+
+
+# Issue #195: the fallback values of ``schemas.LLMStatus`` (derived, never
+# restated). A client-reported reason outside this set is not trusted.
+_LLM_FALLBACK_STATUSES = frozenset(
+    s for s in get_args(LLMStatus) if s.startswith("fallback_")
+)
+
+
+def _llm_status(llm_payload: Optional[Dict[str, Any]], client: Any) -> LLMStatus:
+    """Name the outcome of the full-mode LLM step (#195).
+
+    "ok" comes only from a returned answer (``LocalAIClient.analyze`` returns
+    one only after ``LLMAnswer`` validated it), never from a client attribute
+    or a key in the answer. With no answer, the client's recorded fallback
+    reason is used if it is a known fallback value; anything else (an unset,
+    stale-typed or foreign value, a stub client) fails closed to
+    "fallback_llm_error", the "our code fell back" class.
+    """
+    if llm_payload:
+        return "ok"
+    reason = getattr(client, "fallback_reason", None)
+    if isinstance(reason, str) and reason in _LLM_FALLBACK_STATUSES:
+        return reason  # type: ignore[return-value]
+    return "fallback_llm_error"
 
 
 @dataclass(frozen=True)
@@ -662,6 +688,7 @@ async def analyze_text(
         llm_findings: List[Finding] = []
         summary: Optional[str] = None
         overall_confidence: Optional[float] = None
+        llm_status: LLMStatus = "disabled"
     else:
         rule_findings = detect_findings(cleaned, jurisdictions)
 
@@ -685,6 +712,7 @@ async def analyze_text(
             rule_findings=formatted_rules,
             legal_context=legal_context,
         )
+        llm_status = _llm_status(llm_payload, client)
 
         llm_findings: List[Finding] = []
         summary: Optional[str] = None
@@ -820,6 +848,7 @@ async def analyze_text(
             legal_grounding, citations, jurisdictions
         ),
         legal_context=citations,
+        llm_status=llm_status,
     )
     return AnalysisResult(payload=payload, issues=validation.issues)
 

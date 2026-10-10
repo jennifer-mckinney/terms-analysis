@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 import httpx
 
 from ..config import settings
-from ..schemas import LLMAnswer
+from ..schemas import LLMAnswer, LLMStatus
 from .prompts import SYSTEM_PROMPT, build_user_prompt
 
 logger = logging.getLogger("uvicorn.error")
@@ -51,6 +51,11 @@ def _traceback_fingerprint(exc: BaseException) -> Tuple[str, str]:
     chain = " <- ".join(parts)
     digest = hashlib.sha256(chain.encode("utf-8")).hexdigest()[:12]
     return chain, digest
+
+
+# Name of the response-parsing stage of LocalAIClient.analyze(). A failure in
+# this stage is an invalid answer (#195); the name also appears in the log.
+_PARSE_STAGE = "response parse"
 
 
 def _detect_language(text: str) -> Optional[str]:
@@ -124,6 +129,12 @@ class LocalAIClient:
             base_url = f"{base_url}/v1"
         self._base_url = base_url
         self._timeout = settings.request_timeout_s
+        # Issue #195: why the last analyze() call returned None. Set only on
+        # the fallback path, from a fixed token per failure class (never from
+        # exception text or the model's answer). None after a validated
+        # answer. The analyzer derives "ok" from the returned answer itself
+        # and only reads this to name the kind of fallback.
+        self.fallback_reason: Optional[LLMStatus] = None
 
     async def analyze(
         self,
@@ -144,6 +155,7 @@ class LocalAIClient:
         # cancellation and shutdown keep working.
         # ``stage`` names where the failure happened in the fallback log.
         stage = "model selection"
+        self.fallback_reason = None
         try:
             model = _select_model(numbered_text)
             stage = "prompt build"
@@ -173,7 +185,7 @@ class LocalAIClient:
                     len(response.content),
                 )
                 response.raise_for_status()
-            stage = "response parse"
+            stage = _PARSE_STAGE
             content = response.json()["choices"][0]["message"]["content"]
             # One model checks the whole answer (object, field types, finite
             # confidence, valid UTF-8). A mismatch raises here, inside the
@@ -181,6 +193,8 @@ class LocalAIClient:
             answer = LLMAnswer.model_validate(json.loads(content))
             return answer.model_dump()
         except httpx.HTTPStatusError as exc:
+            # A reply arrived but not a 2xx: LocalAI is up, the call is wrong.
+            self.fallback_reason = "fallback_llm_error"
             body = exc.response.text
             logger.warning(
                 "LocalAI HTTP %s: %s",
@@ -189,9 +203,22 @@ class LocalAIClient:
             )
             return None
         except httpx.HTTPError as exc:
+            # Issue #195: only a TransportError means no response came back
+            # (connect error, any timeout, dropped connection). Other httpx
+            # errors (decoding, redirects, bad URL) are not an outage.
+            self.fallback_reason = (
+                "fallback_llm_unreachable"
+                if isinstance(exc, httpx.TransportError)
+                else "fallback_llm_error"
+            )
             logger.warning("LocalAI HTTP error: %s", exc)
             return None
         except Exception as exc:
+            # Issue #195: a failure while parsing or validating a 2xx answer
+            # means the model misbehaved; any other stage is our own error.
+            self.fallback_reason = (
+                "fallback_llm_invalid" if stage == _PARSE_STAGE else "fallback_llm_error"
+            )
             # Round 3: log the cause (type + content-free frame chain + hash)
             # so a deterministic bug is diagnosable, never the message, which
             # can quote document or corpus text (or hold a lone surrogate).
