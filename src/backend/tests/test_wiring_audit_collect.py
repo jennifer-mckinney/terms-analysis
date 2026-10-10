@@ -832,7 +832,6 @@ def test_http_error_whose_body_read_fails_is_api_error_not_a_traceback(tmp_path:
     import urllib.request
 
     prep = _prepare(tmp_path)
-    sim = Sim(prep)
     opened: list[str] = []
 
     class BrokenBody:
@@ -908,6 +907,45 @@ def test_a_batch_already_deleted_is_skipped_and_the_run_is_governed_by_the_rest(
     assert gone_calls == [("GET", f"/v1/messages/batches/{SECOND_BATCH_ID}")], gone_calls  # no results, cancel, delete
     assert [c.path for c in sim.deletes()] == [f"/v1/messages/batches/{BATCH_ID}"]  # the live batch is still deleted
     assert len(sim.issue_posts()) == (1 if other == "OK" else 0)
+    assert sim.fake.unexpected == [] and "Traceback" not in out
+
+
+@pytest.mark.parametrize(("case", "gone_ids", "expected"), [
+    ("only-handoff-gone", [BATCH_ID], "ALREADY_COLLECTED"),
+    ("every-handoff-gone", [SECOND_BATCH_ID, BATCH_ID], "ALREADY_COLLECTED"),
+    ("one-collected-one-gone", [SECOND_BATCH_ID], "OK"),
+])
+def test_a_run_whose_handoffs_were_all_already_collected_is_not_success(
+        tmp_path: Path, clock: Any, case: str, gone_ids: list[str], expected: str) -> None:
+    # Lead's ruling (round 3, F5): every hand-off ALREADY_COLLECTED and none failed means the
+    # run did nothing: it exits ALREADY_COLLECTED (non-zero) and files nothing. One hand-off
+    # collected normally next to already-collected ones is a run that did work: exit 0.
+    _real_clock(clock)
+    prep = _prepare(tmp_path)
+    sim = Sim(prep)
+    _three_findings(sim)
+    gone = _handoff(prep, "run-0900", batch_id=SECOND_BATCH_ID)
+    paths = [prep.artifact] if case == "only-handoff-gone" else [gone, _handoff(prep, "run-1000")]
+    lines = sim.result_lines()
+    _route_per_batch(sim, {BATCH_ID: lambda: lines})
+    n = len(prep.all_ids)
+
+    def retrieve(call: Call) -> tuple[int, bytes]:
+        batch_id = call.path.rsplit("/", 1)[1]
+        if batch_id in gone_ids:
+            return 404, jbytes(NOT_FOUND)
+        return 200, jbytes(batch_object("ended", {"succeeded": n}, batch_id=batch_id))
+
+    sim.fake.route("GET", BATCH, retrieve)
+    collect, rc, out = _collect(sim, artifacts=paths)
+    assert rc == exit_code(collect, expected), (case, out[-800:])
+    if expected == "ALREADY_COLLECTED":
+        assert rc != exit_code(collect, "OK")
+        assert sim.issue_posts() == [] and sim.deletes() == []
+        assert sim.fake.find("GET", RESULTS) == []
+    else:
+        assert len(sim.issue_posts()) == 1
+        assert [c.path for c in sim.deletes()] == [f"/v1/messages/batches/{BATCH_ID}"]
     assert sim.fake.unexpected == [] and "Traceback" not in out
 
 
