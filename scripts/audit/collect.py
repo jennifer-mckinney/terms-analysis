@@ -67,7 +67,7 @@ GITHUB_TOKEN_NAME = "GITHUB_TOKEN"
 EXIT_CODES = {name: config.EXIT_CODES[name] for name in (
     "OK", "CONFIG", "MISSING_SECRET", "ARTIFACT_INVALID", "BATCH_NOT_ENDED", "PARTIAL", "MISSING_OR_DUP",
     "TRUNCATED_OR_REFUSED", "SCHEMA", "CANARY_MISSING", "API_ERROR", "DELETE_FAILED", "CANCEL_TIMEOUT",
-    "HANDOFF_STALE", "NO_HANDOFF")}
+    "HANDOFF_STALE", "NO_HANDOFF", "ALREADY_COLLECTED")}
 
 ARTIFACT_KEYS = frozenset({"batch_id", "canary_custom_id", "created_at", "custom_ids", "model", "modules",
                            "worst_case_usd"})
@@ -80,6 +80,10 @@ _TITLE_UNSAFE = re.compile(r"[^A-Za-z0-9._/-]")
 _FORBIDDEN = frozenset({"Cc", "Cf", "Cs", "Co", "Cn"})
 _LINE_BREAKS = frozenset({"Zl", "Zp"})
 _REDACTED = "[redacted by the wiring audit: the line matched a secret or local-path pattern]"
+
+
+class AlreadyCollected(Exception):
+    """The hand-off's batch is gone (404 on its first retrieve): an earlier run deleted it."""
 
 
 class Failure(Exception):
@@ -464,6 +468,11 @@ class Collector:
         try:
             try:
                 self._work()
+            except AlreadyCollected:
+                delete = False  # nothing left to delete, nothing to file
+                self.rep.log(f"ALREADY_COLLECTED: batch {self.art.batch_id} no longer exists (HTTP 404 on "
+                             "retrieve); an earlier collect run deleted it, so this hand-off is skipped")
+                return EXIT_CODES["ALREADY_COLLECTED"]
             except Failure as exc:
                 outcome = exc
             except client.ApiFailure as exc:
@@ -493,7 +502,12 @@ class Collector:
 
     def _work(self) -> None:
         batch_id = self.art.batch_id
-        batch = client.retrieve(self.api, batch_id)
+        try:
+            batch = client.retrieve(self.api, batch_id)
+        except client.ApiFailure as exc:
+            if exc.status == 404:  # only this first retrieve means "already collected"
+                raise AlreadyCollected(batch_id) from None
+            raise
         status = client.processing_status(batch)
         if status != "ended":
             self.rep.log(f"batch {batch_id} is {client.safe_token(status)}; cancelling it")
@@ -579,9 +593,8 @@ def main(argv: list[str] | None = None, *, http: Any = None, env: dict[str, str]
     http = http or client.urllib_transport(cfg["http_timeout_seconds"], cfg["max_response_bytes"])
     api, gh = client.anthropic_api(http, cfg, key), github_api(http, cfg, token)
     limit = dt.timedelta(days=cfg["stale_handoff_days"])
-    rc = EXIT_CODES["OK"]
+    codes: list[int] = []
     # Every hand-off is processed, oldest first; one failing never stops the next.
-    # The run's exit code is the first failure, so any failure turns it red.
     for path in args.artifact:
         try:
             art = read_artifact(Path(path))
@@ -595,9 +608,20 @@ def main(argv: list[str] | None = None, *, http: Any = None, env: dict[str, str]
                                  "batch still exists, delete it by hand so its prompts leave retention")
             else:
                 code = Collector(cfg, art, api, gh, slug, redactor, rep).run()
-        if rc == EXIT_CODES["OK"]:
-            rc = code
-    return rc
+        codes.append(code)
+    return run_exit(codes, rep)
+
+
+def run_exit(codes: list[int], rep: Any) -> int:
+    """First failure wins; else OK if any hand-off was collected; else every one was gone (F5)."""
+    benign = {EXIT_CODES["OK"], EXIT_CODES["ALREADY_COLLECTED"]}
+    failures = [c for c in codes if c not in benign]
+    if failures:
+        return failures[0]
+    if EXIT_CODES["OK"] in codes:
+        return EXIT_CODES["OK"]
+    return rep.error("ALREADY_COLLECTED", f"all {len(codes)} hand-off(s) were already collected by an "
+                     "earlier run; this run checked and filed nothing")
 
 
 def _terminate(signum: int, frame: Any) -> None:

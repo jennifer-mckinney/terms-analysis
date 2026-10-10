@@ -48,6 +48,7 @@ EXIT_CODES: dict[str, int] = {
     "CANCEL_TIMEOUT": 19,
     "HANDOFF_STALE": 20,
     "NO_HANDOFF": 21,
+    "ALREADY_COLLECTED": 22,
 }
 
 # Vendor API contracts, not tunables: the Batches API custom_id rule and the

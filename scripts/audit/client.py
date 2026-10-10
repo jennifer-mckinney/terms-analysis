@@ -28,7 +28,11 @@ _SAFE_TOKEN = re.compile(r"[^A-Za-z0-9_.:-]")
 
 
 class ApiFailure(Exception):
-    """An API call failed; ``str()`` is safe to print."""
+    """An API call failed; ``str()`` is safe to print. ``status`` is the HTTP status, if any."""
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 def safe_token(value: Any, limit: int = 64) -> str:
@@ -108,7 +112,7 @@ class Api:
             if status in ok:
                 return data
             if last or status not in self.retry_statuses:
-                raise ApiFailure(f"{what} returned HTTP {int(status)} ({_error_type(data)})")
+                raise ApiFailure(f"{what} returned HTTP {int(status)} ({_error_type(data)})", int(status))
             time.sleep(self.backoff)
         raise ApiFailure(f"{what} failed")  # unreachable: the loop returns or raises
 
