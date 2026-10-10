@@ -59,6 +59,28 @@ def _traceback_fingerprint(exc: BaseException) -> Tuple[str, str]:
     return chain, digest
 
 
+def _log_http_error(label: str, exc: httpx.HTTPError) -> None:
+    """Log an httpx failure without any server-controlled text (issue #194).
+
+    The one renderer for LocalAI HTTP failures, shared by the chat and embed
+    paths. A status error logs the status code, the body byte length and a
+    short SHA-256 prefix of the body: never the body, and never ``str(exc)``,
+    which quotes the server's reason phrase. Any other httpx error logs its
+    exception type name only. No ``exc_info``.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        body = exc.response.content
+        logger.warning(
+            "%s HTTP %s: body_bytes=%d sha256=%s",
+            label,
+            exc.response.status_code,
+            len(body),
+            hashlib.sha256(body).hexdigest()[:_FINGERPRINT_HEX_CHARS],
+        )
+    else:
+        logger.warning("%s HTTP error: %s", label, type(exc).__name__)
+
+
 def _detect_language(text: str) -> Optional[str]:
     """
     Detect the primary language of text.
@@ -186,22 +208,11 @@ class LocalAIClient:
             # boundary, so analyze_text only ever sees a validated answer.
             answer = LLMAnswer.model_validate(json.loads(content))
             return answer.model_dump()
-        except httpx.HTTPStatusError as exc:
-            # Issue #194: the error body is untrusted (it can echo prompt,
-            # document or legal-passage text), so log only its byte length
-            # and a short SHA-256 prefix, never the text itself.
-            body = exc.response.content
-            logger.warning(
-                "LocalAI HTTP %s: body_bytes=%d sha256=%s",
-                exc.response.status_code,
-                len(body),
-                hashlib.sha256(body).hexdigest()[:_FINGERPRINT_HEX_CHARS],
-            )
-            return None
         except httpx.HTTPError as exc:
-            # Issue #194: str(exc) can quote server-controlled bytes; log the
-            # exception type name only.
-            logger.warning("LocalAI HTTP error: %s", type(exc).__name__)
+            # Issue #194: the error body is untrusted (it can echo prompt,
+            # document or legal-passage text); log status/length/fingerprint
+            # or the type name only.
+            _log_http_error("LocalAI", exc)
             return None
         except Exception as exc:
             # Round 3: log the cause (type + content-free frame chain + hash)
@@ -235,6 +246,10 @@ class LocalAIClient:
                 response.raise_for_status()
                 data = response.json()
                 return data["data"][0]["embedding"]
+        except httpx.HTTPError as exc:
+            # Issue #194 / #285: same content-free logging as the chat path.
+            _log_http_error(f"LocalAI embed (model={selected})", exc)
+            return None
         except Exception as exc:
             logger.warning("LocalAI embed error (model=%s): %s", selected, exc)
             return None
