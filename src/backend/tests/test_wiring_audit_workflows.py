@@ -13,6 +13,7 @@ missing-secret step is executed under bash.
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 import subprocess
@@ -29,6 +30,9 @@ from tests.wiring_audit_support import (
     REPO_ROOT,
     SECRET_NAME,
     SUBMIT_WORKFLOW,
+    TEST_REPO,
+    git,
+    make_repo,
     real_config,
 )
 
@@ -151,7 +155,13 @@ def test_checkout_persists_no_credentials_and_takes_no_ref(job: str) -> None:
     steps = _job(job)["steps"]
     checkout = [s for s in steps if str(s.get("uses", "")).startswith("actions/checkout@")]
     assert len(checkout) == 1
-    assert checkout[0].get("with") == {"persist-credentials": False}
+    w = checkout[0].get("with") or {}
+    assert w.get("persist-credentials") is False
+    # Round 3 (PR #282): collect may take full history so its ancestor check can
+    # see older submit commits; nothing else (no `ref`, no other depth) is allowed.
+    allowed = {"persist-credentials"} | ({"fetch-depth"} if job == "collect" else set())
+    assert set(w) <= allowed, sorted(set(w) - allowed)
+    assert w.get("fetch-depth", 0) == 0 and not isinstance(w.get("fetch-depth", 0), bool)
 
 
 @ALL
@@ -265,6 +275,300 @@ def test_collect_takes_every_uncollected_submit_run_not_only_the_newest() -> Non
     for line in lookups:
         assert not re.search(r"--limit(\s+|=)1\b", line), "collect still reads only the newest submit run"
         assert not re.search(r"\.\[0\]", line), "collect still takes only the first submit run of the list"
+
+
+# --- round 3 (PR #282): the collect download step, run under bash with a fake `gh` ---------------------
+#
+# Findings 1-3 of round 2. The step is executed as GitHub runs it (bash -eo pipefail) in a
+# sandbox clone made the way actions/checkout makes it (depth 1 unless the collect checkout
+# asks for fetch-depth 0), with a fake `gh` that filters and orders runs like the real CLI
+# (newest first; an in-progress run has conclusion ""). Only the hand-off list the step
+# writes for the collector, its exit code and its annotations are asserted.
+
+FAKE_GH = r'''
+import json, os, subprocess, sys
+ALIASES = {"-R": "--repo", "-w": "--workflow", "-b": "--branch", "-s": "--status", "-e": "--event",
+           "-L": "--limit", "-q": "--jq", "-n": "--name", "-D": "--dir", "-c": "--commit"}
+STATUSES = {"queued", "in_progress", "completed", "waiting", "requested", "pending", "action_required"}
+argv = sys.argv[1:]
+with open(os.environ["FAKE_GH_LOG"], "a", encoding="utf-8") as log:
+    log.write(json.dumps(argv) + "\n")
+with open(os.environ["FAKE_GH_STATE"], encoding="utf-8") as fh:
+    state = json.load(fh)
+opts, pos, i = {}, [], 0
+while i < len(argv):
+    a = argv[i]
+    if a.startswith("-"):
+        name, _, val = a.partition("=")
+        name = ALIASES.get(name, name)
+        if not _:
+            i += 1
+            val = argv[i]
+        opts.setdefault(name, []).append(val)
+    else:
+        pos.append(a)
+    i += 1
+def fail(msg, rc=1):
+    sys.stderr.write("fake gh: " + msg + "\n")
+    sys.exit(rc)
+if opts.get("--repo", [os.environ["GITHUB_REPOSITORY"]])[-1] != os.environ["GITHUB_REPOSITORY"]:
+    fail("wrong --repo", 4)
+if pos[:2] == ["run", "list"]:
+    allowed = {"--repo", "--workflow", "--branch", "--status", "--event", "--limit", "--json", "--jq", "--commit"}
+    if set(opts) - allowed:
+        fail("unsupported option " + ",".join(sorted(set(opts) - allowed)), 3)
+    runs = list(state["runs"].get(opts.get("--workflow", [""])[-1], []))
+    for key, field in (("--branch", "headBranch"), ("--event", "event"), ("--commit", "headSha")):
+        if key in opts:
+            runs = [r for r in runs if r[field] == opts[key][-1]]
+    if "--status" in opts:
+        want = opts["--status"][-1]
+        runs = [r for r in runs if (r["status"] if want in STATUSES else r["conclusion"]) == want]
+    runs.sort(key=lambda r: r["createdAt"], reverse=True)
+    runs = runs[: int(opts.get("--limit", ["20"])[-1])]
+    if "--json" not in opts:
+        fail("this fake answers --json only", 3)
+    fields = opts["--json"][-1].split(",")
+    unknown = [f for f in fields if f not in state["fields"]]
+    if unknown:
+        fail("Unknown JSON field: " + unknown[0])
+    out = json.dumps([{f: r[f] for f in fields} for r in runs])
+    if "--jq" in opts:
+        proc = subprocess.run(["jq", "-r", opts["--jq"][-1]], input=out, text=True, capture_output=True)
+        sys.stdout.write(proc.stdout)
+        sys.stderr.write(proc.stderr)
+        sys.exit(proc.returncode)
+    print(out)
+    sys.exit(0)
+if pos[:2] == ["run", "download"] and len(pos) == 3:
+    run_id = pos[2]
+    if run_id in state["fail_downloads"]:
+        fail("error downloading artifact for run " + run_id)
+    if opts.get("--name", [""])[-1] != "wiring-audit-batch-" + run_id:
+        fail("no valid artifacts found to download")
+    dest = opts.get("--dir", ["."])[-1]
+    os.makedirs(dest, exist_ok=True)
+    with open(os.path.join(dest, "wiring-audit-batch.json"), "w", encoding="utf-8") as fh:
+        json.dump({"run_id": run_id}, fh)
+    sys.exit(0)
+fail("unsupported command " + " ".join(pos[:2]), 3)
+'''
+
+COLLECT_FILE = COLLECT_WORKFLOW.name
+SUBMIT_FILE = SUBMIT_WORKFLOW.name
+STEP_ENV = {
+    "github.token": "ghs_fake-collect-token",
+    "github.event.repository.default_branch": "main",
+}
+HANDOFF_PATH = re.compile(r"/(\d+)/wiring-audit-batch\.json$")
+
+
+def _day(n: int, hour: int = 4) -> str:
+    return f"2026-09-{10 + n:02d}T{hour:02d}:00:00Z"
+
+
+def _run(run_id: int, sha: str, created: str, *, updated: str | None = None, event: str = "schedule",
+         branch: str = "main", status: str = "completed", conclusion: str = "success") -> dict[str, Any]:
+    return {"databaseId": run_id, "headSha": sha, "createdAt": created, "updatedAt": updated or created,
+            "event": event, "headBranch": branch, "status": status,
+            "conclusion": conclusion if status == "completed" else ""}
+
+
+def _download_step() -> dict[str, Any]:
+    steps = [s for s in _job("collect")["steps"] if "gh run download" in str(s.get("run", ""))]
+    assert len(steps) == 1, "collect has no single step that downloads the submit hand-offs"
+    return steps[0]
+
+
+def _collector_step() -> dict[str, Any]:
+    steps = [s for s in _job("collect")["steps"] if "scripts/audit/collect.py" in str(s.get("run", ""))]
+    assert len(steps) == 1
+    return steps[0]
+
+
+class _Checkout:
+    """origin (A <- B on main, plus an unrelated fork commit C under refs/pull) and a checkout of it."""
+
+    def __init__(self, tmp: Path) -> None:
+        src = tmp / "src"
+        files: dict[str, str | bytes] = {}
+        for path in sorted(AUDIT_DIR.rglob("*")):
+            if path.is_file() and "__pycache__" not in path.parts:
+                files[path.relative_to(REPO_ROOT).as_posix()] = path.read_bytes()
+        make_repo(src, files)
+        self.a = git(src, "rev-parse", "HEAD").stdout.decode().strip()
+        (src / "later.txt").write_text("later\n", encoding="utf-8")
+        git(src, "add", "later.txt")
+        git(src, "commit", "-q", "-m", "later")
+        self.b = git(src, "rev-parse", "HEAD").stdout.decode().strip()
+        tree = git(src, "rev-parse", "HEAD^{tree}").stdout.decode().strip()
+        self.c = git(src, "commit-tree", tree, "-m", "fork").stdout.decode().strip()
+        git(src, "update-ref", "refs/pull/1/head", self.c)
+        origin = tmp / "origin.git"
+        git(tmp, "clone", "-q", "--mirror", str(src), str(origin))
+        # actions/checkout: depth 1 by default; fetch-depth 0 takes every branch's history.
+        checkout = [s for s in _job("collect")["steps"] if str(s.get("uses", "")).startswith("actions/checkout@")]
+        depth = (checkout[0].get("with") or {}).get("fetch-depth", 1) if checkout else 1
+        self.work = tmp / "work"
+        args = ["clone", "-q", "--branch", "main"] + ([] if depth == 0 else ["--depth", "1"])
+        git(tmp, *args, origin.as_uri(), str(self.work))
+        self.unknown = "0123456789abcdef" * 2 + "01234567"  # well-formed, in no repository
+
+
+def _run_download(tmp: Path, co: _Checkout, collect_runs: list[dict[str, Any]], submit_runs: list[dict[str, Any]],
+                  fail_downloads: tuple[int, ...] = ()) -> tuple[subprocess.CompletedProcess[str], list[int]]:
+    step = _download_step()
+    bin_dir = tmp / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text(f"#!{sys.executable}\n" + FAKE_GH, encoding="utf-8")
+    gh.chmod(0o755)
+    state = {"runs": {COLLECT_FILE: collect_runs, SUBMIT_FILE: submit_runs},
+             "fields": sorted(_run(1, co.a, _day(0))),  # the JSON fields `gh run list` knows here
+             "fail_downloads": [str(r) for r in fail_downloads]}
+    (tmp / "gh-state.json").write_text(json.dumps(state), encoding="utf-8")
+    runner = tmp / "runner"
+    runner.mkdir()
+    (tmp / "home").mkdir()
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+        "HOME": str(tmp / "home"), "LC_ALL": "C",
+        "GITHUB_REPOSITORY": TEST_REPO, "RUNNER_TEMP": str(runner),
+        "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0",
+        "FAKE_GH_STATE": str(tmp / "gh-state.json"), "FAKE_GH_LOG": str(tmp / "gh-calls.jsonl"),
+    }
+    for name, value in (step.get("env") or {}).items():
+        expr = _strip_expr(str(value))
+        assert expr in STEP_ENV, f"download step env {name} = {value!r} has no stand-in in this test"
+        env[name] = STEP_ENV[expr]
+    proc = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", str(step["run"])],
+                          cwd=co.work, env=env, text=True, capture_output=True, timeout=120)
+    listed = runner / "wiring-audit" / "handoffs.txt"
+    ids: list[int] = []
+    for line in (listed.read_text(encoding="utf-8").splitlines() if listed.is_file() else []):
+        m = HANDOFF_PATH.search(line)
+        assert m and Path(line).is_file(), f"hand-off list names a file that was not downloaded: {line!r}"
+        ids.append(int(m.group(1)))
+    return proc, ids
+
+
+@pytest.mark.parametrize("conclusion", ["failure", "cancelled", "timed_out", "success"])
+def test_since_is_the_last_completed_collect_run_of_any_conclusion(tmp_path: Path, conclusion: str) -> None:
+    # Finding 1 (HIGH): a collect that failed after deleting its batches never moved `since`,
+    # so every later run re-downloaded those hand-offs (404, then HANDOFF_STALE) and stayed red.
+    # The newest collect run is this one, still in progress: it must not count either.
+    co = _Checkout(tmp_path)
+    collect_runs = [
+        _run(900, co.b, _day(9), status="in_progress"),  # the running collect itself
+        _run(800, co.b, _day(5), conclusion=conclusion),
+        _run(700, co.a, _day(1)),
+    ]
+    submit_runs = [
+        _run(10, co.a, _day(0), updated=_day(0, 5)),   # before both collects
+        _run(20, co.a, _day(3), updated=_day(3, 5)),   # handled by collect 800
+        _run(30, co.a, _day(7), updated=_day(7, 5)),   # new since collect 800
+    ]
+    proc, ids = _run_download(tmp_path, co, collect_runs, submit_runs)
+    assert proc.returncode == 0, proc.stdout[-800:] + proc.stderr[-800:]
+    assert ids == [30], ids
+
+
+def _trusted_collect(co: _Checkout) -> list[dict[str, Any]]:
+    return [_run(700, co.a, _day(1))]
+
+
+SUBMIT_TRUST = [
+    # (case, overrides of run 40, collected?)
+    ("schedule", {}, True),
+    ("workflow-dispatch-at-tip", {"event": "workflow_dispatch", "sha": "b"}, True),
+    ("pull-request-from-a-fork-main", {"event": "pull_request"}, False),
+    ("pull-request-target", {"event": "pull_request_target"}, False),
+    ("push", {"event": "push"}, False),
+    ("fork-commit-not-on-main", {"sha": "c"}, False),
+    ("commit-in-no-repository", {"sha": "unknown"}, False),
+    ("sha-is-a-ref-name", {"sha": "HEAD"}, False),
+]
+
+
+@pytest.mark.parametrize(("case", "change", "collected"), SUBMIT_TRUST, ids=[c[0] for c in SUBMIT_TRUST])
+def test_only_trusted_submit_runs_are_collected(tmp_path: Path, case: str, change: dict[str, str], collected: bool) -> None:
+    # Finding 3 (MEDIUM): `--branch main` also matches a fork PR whose head branch is the
+    # fork's `main`. Only schedule/dispatch runs on a commit of the default branch count.
+    co = _Checkout(tmp_path)
+    sha = {"a": co.a, "b": co.b, "c": co.c, "unknown": co.unknown}.get(change.get("sha", "a"), change.get("sha", ""))
+    candidate = _run(40, sha, _day(3), event=change.get("event", "schedule"))
+    control = _run(30, co.a, _day(2))  # positive control: trusted, older than the candidate
+    proc, ids = _run_download(tmp_path, co, _trusted_collect(co), [control, candidate])
+    assert proc.returncode == 0, proc.stdout[-800:] + proc.stderr[-800:]
+    assert ids == ([30, 40] if collected else [30]), (case, ids)
+
+
+COLLECT_TRUST = [
+    ("pull-request-collect", {"event": "pull_request"}),
+    ("fork-commit-collect", {"sha": "c"}),
+]
+
+
+@pytest.mark.parametrize(("case", "change"), COLLECT_TRUST, ids=[c[0] for c in COLLECT_TRUST])
+def test_an_untrusted_collect_run_never_moves_since(tmp_path: Path, case: str, change: dict[str, str]) -> None:
+    # Finding 3: a forged "completed collect" from a fork PR would hide every real hand-off.
+    co = _Checkout(tmp_path)
+    forged = _run(990, co.c if change.get("sha") == "c" else co.a, _day(8), event=change.get("event", "schedule"))
+    submit_runs = [_run(20, co.a, _day(3)), _run(30, co.b, _day(6))]
+    proc, ids = _run_download(tmp_path, co, [forged, *_trusted_collect(co)], submit_runs)
+    assert proc.returncode == 0, proc.stdout[-800:] + proc.stderr[-800:]
+    assert ids == [20, 30], (case, ids)
+
+
+def test_a_trusted_dispatch_collect_run_does_move_since(tmp_path: Path) -> None:
+    # Companion of the table above: a trusted dispatch run counts, whatever its conclusion.
+    co = _Checkout(tmp_path)
+    dispatch = _run(990, co.b, _day(4), event="workflow_dispatch", conclusion="failure")
+    submit_runs = [_run(20, co.a, _day(3)), _run(30, co.b, _day(6))]
+    proc, ids = _run_download(tmp_path, co, [dispatch, *_trusted_collect(co)], submit_runs)
+    assert proc.returncode == 0, proc.stdout[-800:] + proc.stderr[-800:]
+    assert ids == [30], ids
+
+
+@pytest.mark.parametrize(("failing", "kept"), [((25,), [30]), ((30,), [25]), ((25, 30), [])],
+                         ids=["older-fails", "newer-fails", "all-fail"])
+def test_one_failed_download_is_reported_and_the_rest_still_collected(
+        tmp_path: Path, failing: tuple[int, ...], kept: list[int]) -> None:
+    # Finding 2 (MEDIUM): under `set -euo pipefail` one failed `gh run download` ended the
+    # step before the other hand-offs were listed. Each failure names its run, the others
+    # are still listed, and the step fails at the end.
+    co = _Checkout(tmp_path)
+    proc, ids = _run_download(tmp_path, co, _trusted_collect(co),
+                              [_run(25, co.a, _day(2)), _run(30, co.b, _day(3))], fail_downloads=failing)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, out[-800:]
+    assert ids == kept, ids
+    errors = [line for line in out.splitlines() if line.startswith("::error title=wiring-audit::")]
+    for run_id in failing:
+        assert [e for e in errors if re.search(rf"\b{run_id}\b", e)], (run_id, errors)
+    attempted = [json.loads(line) for line in (tmp_path / "gh-calls.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert sorted(int(a[2]) for a in attempted if a[:2] == ["run", "download"]) == [25, 30]
+
+
+def test_collector_still_runs_after_a_failed_download() -> None:
+    # Finding 2: what did download is still checked and its batch deleted. The collector
+    # step must run when the download step failed, but not when the job was cancelled.
+    cond = _strip_expr(str(_collector_step().get("if", "")))
+    assert re.fullmatch(r"!\s*cancelled\(\)|always\(\)", cond), cond
+
+
+def test_both_run_lookups_restrict_the_event_and_check_ancestry() -> None:
+    # Findings 1 and 3, static companion of the behavioural tests above: both `gh run list`
+    # calls restrict the event, neither keeps success-only for the collect lookup, and the
+    # step proves each head commit is on the default branch.
+    script = str(_download_step()["run"]).replace("\\\n", " ")
+    lookups = [line for line in script.splitlines() if "gh run list" in line]
+    assert {w for line in lookups for w in (COLLECT_FILE, SUBMIT_FILE) if w in line} == {COLLECT_FILE, SUBMIT_FILE}
+    for line in lookups:
+        assert re.search(r"--event[ =]|\bevent\b", line), line
+        if COLLECT_FILE in line:
+            assert not re.search(r"--status[ =]success\b", line), line
+    assert "merge-base --is-ancestor" in script
 
 
 # --- [C9] not in the application -------------------------------------------------------------------

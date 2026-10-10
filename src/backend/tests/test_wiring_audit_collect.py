@@ -862,9 +862,91 @@ def test_http_error_whose_body_read_fails_is_api_error_not_a_traceback(tmp_path:
     assert not [u for u in opened if "/issues" in u]  # nothing filed
 
 
+# --- round 3 (PR #282) finding 1: a hand-off whose batch an earlier collect already deleted -----------------
+
+NOT_FOUND = {"type": "error", "error": {"type": "not_found_error", "message": "batch not found"}}
+
+
+def _gone(sim: Sim, gone_id: str) -> None:
+    """Retrieve answers 404 for gone_id (deleted by an earlier, failed collect); other batches are ended."""
+    n = len(sim.prep.all_ids)
+
+    def retrieve(call: Call) -> tuple[int, bytes]:
+        batch_id = call.path.rsplit("/", 1)[1]
+        if batch_id == gone_id:
+            return 404, jbytes(NOT_FOUND)
+        return 200, jbytes(batch_object("ended", {"succeeded": n}, batch_id=batch_id))
+
+    sim.fake.route("GET", BATCH, retrieve)
+
+
+@pytest.mark.parametrize("order", ["gone-first", "gone-last"])
+@pytest.mark.parametrize("other", ["OK", "CANARY_MISSING"])
+def test_a_batch_already_deleted_is_skipped_and_the_run_is_governed_by_the_rest(
+        tmp_path: Path, clock: Any, order: str, other: str) -> None:
+    # A failed collect deleted its batch but (before round 3) never moved `since`, so the
+    # next run met the same hand-off: retrieve 404. That hand-off is ALREADY_COLLECTED:
+    # logged with its batch id, no further request for it, not a failure of the run.
+    _real_clock(clock)
+    prep = _prepare(tmp_path)
+    sim = Sim(prep)
+    _three_findings(sim)
+    if other == "CANARY_MISSING":
+        _no_canary(sim)
+    gone = _handoff(prep, "run-0900", batch_id=SECOND_BATCH_ID)
+    fresh = _handoff(prep, "run-1000")
+    lines = sim.result_lines()
+    _route_per_batch(sim, {BATCH_ID: lambda: lines})
+    _gone(sim, SECOND_BATCH_ID)
+    collect, rc, out = _collect(sim, artifacts=[gone, fresh] if order == "gone-first" else [fresh, gone])
+    assert rc == exit_code(collect, other), out[-800:]
+    assert exit_code(collect, "ALREADY_COLLECTED") != exit_code(collect, "OK")  # a named, distinct outcome
+    notes = [line for line in out.splitlines() if "ALREADY_COLLECTED" in line]
+    assert notes and all(SECOND_BATCH_ID in line for line in notes), notes
+    assert not [line for line in notes if line.startswith("::error")], notes  # honest: not a failure
+    gone_calls = [(c.method, c.path) for c in sim.fake.calls if SECOND_BATCH_ID in c.url]
+    assert gone_calls == [("GET", f"/v1/messages/batches/{SECOND_BATCH_ID}")], gone_calls  # no results, cancel, delete
+    assert [c.path for c in sim.deletes()] == [f"/v1/messages/batches/{BATCH_ID}"]  # the live batch is still deleted
+    assert len(sim.issue_posts()) == (1 if other == "OK" else 0)
+    assert sim.fake.unexpected == [] and "Traceback" not in out
+
+
+def _results_404(sim: Sim) -> None:
+    sim.fake.route("GET", RESULTS, lambda c: (404, jbytes(NOT_FOUND)))
+
+
+def _issue_list_404(sim: Sim) -> None:
+    sim.fake.route("GET", ISSUES, lambda c: (404, jbytes({"message": "Not Found"})))
+
+
+def _issue_post_404(sim: Sim) -> None:
+    sim.fake.route("POST", ISSUES, lambda c: (404, jbytes({"message": "Not Found"})))
+
+
+OTHER_404 = [("results", _results_404), ("issue-list", _issue_list_404), ("issue-post", _issue_post_404)]
+
+
+@pytest.mark.parametrize(("case", "break_it"), OTHER_404, ids=[c for c, _ in OTHER_404])
+def test_a_404_after_the_initial_retrieve_is_still_api_error(tmp_path: Path, case: str,
+                                                             break_it: Callable[[Sim], None]) -> None:
+    # Only the first retrieve of a hand-off's batch means "already collected". A 404 later
+    # (results, the issues API) is a real failure: API_ERROR, never ALREADY_COLLECTED.
+    prep = _prepare(tmp_path)
+    sim = Sim(prep)
+    _three_findings(sim)
+    break_it(sim)
+    collect, rc, out = _collect(sim)
+    assert rc == exit_code(collect, "API_ERROR"), (case, out[-800:])
+    assert "::error title=wiring-audit::API_ERROR" in out
+    assert "ALREADY_COLLECTED" not in out
+    assert [c.path for c in sim.deletes()] == [f"/v1/messages/batches/{BATCH_ID}"]  # still deleted (C8)
+    assert "Traceback" not in out
+
+
 # Exit codes exercised above. Adding a code without a test fails here (T9 parity).
 COVERED = {"OK", "CONFIG", "MISSING_SECRET", "ARTIFACT_INVALID", "BATCH_NOT_ENDED", "API_ERROR",
-           "DELETE_FAILED", "CANCEL_TIMEOUT", "HANDOFF_STALE", "NO_HANDOFF"} | {name for *_, name in FAILURES}
+           "DELETE_FAILED", "CANCEL_TIMEOUT", "HANDOFF_STALE", "NO_HANDOFF",
+           "ALREADY_COLLECTED"} | {name for *_, name in FAILURES}
 
 
 def test_every_collect_exit_code_has_a_test() -> None:
