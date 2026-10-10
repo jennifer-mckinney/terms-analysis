@@ -922,3 +922,86 @@ class TestCategoryIInferenceEdges:
 
         # example.com is not in _AI_TECH_DOMAINS but URL contains "ai" keyword.
         assert infer_industry("https://example.com/ai/policy", None) == "AI / Tech Platform"
+
+
+# ===========================================================================
+# Issue #195 \u2014 AnalysisPayload.llm_status is a closed, schema-owned Literal
+# ===========================================================================
+
+
+def _llm_status_literal():
+    # Looked up at call time so a missing Literal fails the test (red for
+    # the right reason), not the module import.
+    from app import schemas
+    return schemas.LLMStatus
+
+
+def _forged_status_variants(value: str) -> list:
+    """Generated look-alikes of a valid status: each must be rejected."""
+    out = [
+        value.upper(),
+        value.title(),
+        f" {value}",
+        f"{value} ",
+        f"{value}\x00",
+        value.replace("_", "-") if "_" in value else f"{value}-",
+        "".join(chr(0xFF00 + ord(c) - 0x20) if "!" <= c <= "~" else c for c in value),  # fullwidth
+        f"{value[0]}\ud800{value[1:]}",  # lone surrogate
+    ]
+    for brk in ("\n", "\r", "\r\n", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+        out.append(f"{value}{brk}")
+    for cf in ("\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad", "\u202e", "\u2066"):
+        out.append(f"{value[:1]}{cf}{value[1:]}")
+    return out
+
+
+class TestLLMStatusSchemaContract:
+    """``llm_status`` tells an always-fallback bug from LocalAI being down."""
+
+    def test_field_annotation_is_the_llm_status_literal(self):
+        literal = _llm_status_literal()
+        assert AnalysisPayload.model_fields["llm_status"].annotation == literal
+        values = get_args(literal)
+        assert values and all(isinstance(v, str) for v in values)
+        assert len(set(values)) == len(values)
+        # The card's two states, distinct (acceptance criterion 2), plus
+        # the brief's minimum set.
+        assert {"ok", "fallback_llm_unreachable", "fallback_llm_invalid", "disabled"} <= set(values)
+
+    @pytest.mark.parametrize("value", [None, "", 0, 1, True, ["ok"], {"ok": 1}])
+    def test_non_member_types_are_rejected(self, value):
+        _llm_status_literal()
+        with pytest.raises(ValueError):
+            _payload(llm_status=value)
+
+    def test_forged_look_alikes_are_rejected(self):
+        values = get_args(_llm_status_literal())
+        variants = [v for value in values for v in _forged_status_variants(value)]
+        accepted = []
+        for variant in variants:
+            if variant in values:
+                continue
+            try:
+                _payload(llm_status=variant)
+            except ValueError:
+                continue
+            accepted.append(variant.encode("unicode_escape").decode("ascii"))
+        print(f"llm_status forged variants generated: {len(variants)}")
+        assert accepted == []
+
+    def test_every_member_round_trips_through_json(self):
+        for value in get_args(_llm_status_literal()):
+            payload = _payload(llm_status=value)
+            reloaded = AnalysisPayload.model_validate_json(payload.model_dump_json())
+            assert reloaded.llm_status == value
+
+    def test_row_stored_before_the_field_loads_with_its_default(self):
+        literal = _llm_status_literal()
+        legacy = _payload().model_dump(mode="json")
+        legacy.pop("llm_status", None)
+        loaded = AnalysisPayload(**legacy)
+        default = AnalysisPayload.model_fields["llm_status"].default
+        assert default in get_args(literal)
+        assert loaded.llm_status == default
+        # A legacy row must not claim the LLM answered.
+        assert default != "ok"

@@ -22,13 +22,16 @@ the request body is encoded by the same code that raises in production.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, get_args
 
 import httpx
 import pytest
 
+from app import schemas
+from app.schemas import AnalysisPayload
 from app.services import analyzer as analyzer_module
 from app.services import localai as localai_module
 from app.services.analyzer import analyze_text
@@ -419,3 +422,215 @@ def test_analyze_cancellation_propagates(localai_http):
     localai_http(_raise(asyncio.CancelledError()))
     with pytest.raises(asyncio.CancelledError):
         _analyze()
+
+
+# ---------------------------------------------------------------------------
+# Issue #195: AnalysisPayload.llm_status says WHY there is no LLM answer
+# ---------------------------------------------------------------------------
+#
+# Every HR5 fallback used to look the same, so "LocalAI is down" could not be
+# told apart from "our own code makes every LLM call fall back". The status
+# is a closed set (``schemas.LLMStatus``), one value per outcome:
+#
+#   ok                        an answer arrived and passed schemas.LLMAnswer
+#   fallback_llm_unreachable  no HTTP response at all (connect error, any
+#                             timeout, dropped connection): LocalAI is down
+#   fallback_llm_invalid      a 2xx response whose answer failed parsing or
+#                             LLMAnswer validation: the model misbehaved
+#   fallback_llm_error        anything else inside the boundary: a non-2xx
+#                             reply, model selection, prompt build, request
+#                             encoding, an unforeseen exception. This is the
+#                             "always falls back" bug class #195 is about.
+#   disabled                  the LLM step was not run (quick mode)
+#
+# The schema default (for rows stored before the field existed) must be a
+# value no fresh analysis ever reports, so a legacy row never claims "ok".
+#
+# Every vector runs the REAL LocalAIClient.analyze() over httpx MockTransport,
+# so the tests don't constrain how the client hands the outcome back.
+
+# Hostile text in an exception message: absolute path, line breaks of every
+# kind, a bidi override. None of it may reach the payload.
+_HOSTILE_EXC_TEXT = "/opt/victim/secret\r\n\u2028\u2029\x85\u202eFORGED llm_status=ok"
+
+# httpx errors raised before any response exists. Generated from httpx's own
+# hierarchy so a new TransportError subclass is covered without editing here.
+def _transport_error_types() -> List[type]:
+    found = [
+        obj
+        for obj in vars(httpx).values()
+        if isinstance(obj, type) and issubclass(obj, httpx.TransportError)
+    ]
+    return sorted(set(found), key=lambda t: t.__name__)
+
+
+Setup = Callable[[Any, Any], List[httpx.Request]]
+
+
+def _respond_with(respond: Callable[[httpx.Request], httpx.Response]) -> Setup:
+    def _setup(monkeypatch, localai_http) -> List[httpx.Request]:
+        return localai_http(respond)
+
+    return _setup
+
+
+def _raising(exc: BaseException) -> Setup:
+    return _respond_with(_raise(exc))
+
+
+def _status_reply(code: int) -> Setup:
+    return _respond_with(lambda request: httpx.Response(code, text="upstream says no"))
+
+
+def _patched_stage(attr: str) -> Setup:
+    def _setup(monkeypatch, localai_http) -> List[httpx.Request]:
+        def _boom(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError(_HOSTILE_EXC_TEXT)
+
+        monkeypatch.setattr(localai_module, attr, _boom)
+        return localai_http(lambda request: _ok_response())
+
+    return _setup
+
+
+def _surrogate_in_legal_context(monkeypatch, localai_http) -> List[httpx.Request]:
+    monkeypatch.setattr(analyzer_module, "_retrieve_legal_context", _fake_lookup([_chunk(text="t\ud800")], True))
+    return localai_http(lambda request: _ok_response())
+
+
+# status -> {case id -> setup}. ``disabled`` vectors run in quick mode.
+_STATUS_VECTORS: Dict[str, Dict[str, Setup]] = {
+    "ok": {
+        **{f"valid-{name}": _respond_with(lambda r, c=content: _ok_response(c)) for name, content in _VALID_ANSWERS.items()},
+        # LLMAnswer takes findings as List[Any]; items that fail Finding are
+        # skipped one by one. The answer itself was valid, so this is "ok".
+        "valid-findings-all-unparseable": _respond_with(
+            lambda r: _ok_response({"findings": [{"bogus": 1}, 7, None], "summary": "s", "overall_confidence": 0.5})
+        ),
+        # The answer can't choose the status: an extra key is not a signal.
+        "valid-answer-forges-status": _respond_with(
+            lambda r: _ok_response({**_GOOD_LLM_CONTENT, "llm_status": "fallback_llm_unreachable"})
+        ),
+        # Control: NUL in the legal context is valid UTF-8 and is sent.
+        "nul-in-legal-context": lambda mp, http: (
+            mp.setattr(analyzer_module, "_retrieve_legal_context", _fake_lookup([_chunk(text="a\x00b")], True)),
+            http(lambda request: _ok_response()),
+        )[1],
+    },
+    "fallback_llm_unreachable": {
+        f"transport-{t.__name__}": _raising(t(_HOSTILE_EXC_TEXT)) for t in _transport_error_types()
+    },
+    "fallback_llm_invalid": {
+        **{f"answer-{name}": _respond_with(lambda r, raw=raw: _ok_response(raw=raw)) for name, raw in _MALFORMED_ANSWERS.items()},
+        "answer-not-json": _respond_with(lambda r: _ok_response(raw="I think the policy is fine.")),
+        "answer-2mb-garbage": _respond_with(lambda r: _ok_response(raw="{" + "x" * (2 * 1024 * 1024))),
+        "answer-malformed-forges-ok": _respond_with(lambda r: _ok_response(raw='{"findings": null, "llm_status": "ok"}')),
+        "body-not-json": _respond_with(lambda r: httpx.Response(200, text="<html>proxy page</html>")),
+        "body-no-choices": _respond_with(lambda r: httpx.Response(200, json={})),
+        "body-choices-empty": _respond_with(lambda r: httpx.Response(200, json={"choices": []})),
+    },
+    "fallback_llm_error": {
+        **{f"http-{code}": _status_reply(code) for code in (400, 404, 500, 503)},
+        "transport-raises-novel": _raising(_NovelError(_HOSTILE_EXC_TEXT)),
+        "transport-raises-typeerror": _raising(TypeError(_HOSTILE_EXC_TEXT)),
+        "request-encoding-surrogate": _surrogate_in_legal_context,
+        "model-selection-raises": _patched_stage("_select_model"),
+        "prompt-build-raises": _patched_stage("build_user_prompt"),
+    },
+    "disabled": {
+        "quick-mode": _respond_with(lambda request: _ok_response()),
+    },
+}
+
+_FALLBACK_STATUSES = ("fallback_llm_unreachable", "fallback_llm_invalid", "fallback_llm_error")
+_VECTOR_IDS = [(status, case) for status, cases in _STATUS_VECTORS.items() for case in cases]
+
+
+def _run_vector(monkeypatch, localai_http, status: str, case: str):
+    monkeypatch.setattr(analyzer_module, "_retrieve_legal_context", _fake_lookup([_chunk()], True))
+    sent = _STATUS_VECTORS[status][case](monkeypatch, localai_http)
+    mode = "quick" if status == "disabled" else "full"
+    result = asyncio.run(analyze_text(_DOC, _JURISDICTIONS, mode=mode))
+    return result.payload, sent
+
+
+def test_llm_status_vectors_cover_every_emitted_status():
+    # Contract (F10): every value of the schema Literal except the legacy
+    # default has at least one vector here, and every vector names a real
+    # value. A new status without a test, or a test for a removed status,
+    # fails here.
+    statuses = set(get_args(schemas.LLMStatus))
+    legacy_default = AnalysisPayload.model_fields["llm_status"].default
+    assert legacy_default in statuses, "the default must itself be a valid LLMStatus"
+    assert legacy_default not in _STATUS_VECTORS, (
+        "the legacy default must differ from every status a fresh analysis reports"
+    )
+    assert set(_STATUS_VECTORS) | {legacy_default} == statuses
+    assert all(_STATUS_VECTORS[s] for s in _STATUS_VECTORS)
+    # httpx really has transport errors to generate from (no empty family).
+    assert len(_STATUS_VECTORS["fallback_llm_unreachable"]) >= 8
+    print(f"llm_status vectors: {len(_VECTOR_IDS)}")
+
+
+@pytest.mark.parametrize("status,case", _VECTOR_IDS, ids=[f"{s}:{c}" for s, c in _VECTOR_IDS])
+def test_llm_status_names_the_llm_outcome(monkeypatch, localai_http, status, case):
+    payload, sent = _run_vector(monkeypatch, localai_http, status, case)
+    assert payload.llm_status == status
+    assert payload.model_dump()["llm_status"] == status
+    # The status is a fixed token: no exception text reaches the payload.
+    assert "victim" not in payload.model_dump_json(exclude={"legal_context"})
+    if status == "disabled":
+        assert sent == [], "quick mode must not call the LLM"
+    elif case.startswith(("transport-", "http-", "valid-", "answer-", "body-")):
+        assert len(sent) == 1, "the vector must reach the HTTP layer to mean what it says"
+
+
+@pytest.mark.parametrize(
+    "status,case",
+    [(s, c) for s, c in _VECTOR_IDS if s in _FALLBACK_STATUSES],
+    ids=[f"{s}:{c}" for s, c in _VECTOR_IDS if s in _FALLBACK_STATUSES],
+)
+def test_llm_status_fallback_agrees_with_hr5_confidence_reduction(monkeypatch, localai_http, status, case):
+    # HR5: a fallback status and the rules-only result always come together:
+    # the same findings and the same reduced confidence as the documented
+    # rules-only path, no summary, and review_required driven by the
+    # configured threshold (read from the analyzer's settings, never restated).
+    baseline = _rules_only_baseline(monkeypatch)
+    payload, _ = _run_vector(monkeypatch, localai_http, status, case)
+    assert payload.llm_status == status
+    assert payload.summary is None
+    assert payload.confidence == pytest.approx(baseline.payload.confidence)
+    assert {f.category for f in payload.findings} == {f.category for f in baseline.payload.findings}
+    assert payload.review_required is (payload.confidence < analyzer_module.settings.review_threshold)
+    assert payload.status == ("needs_review" if payload.review_required else "completed")
+
+
+def test_llm_status_fallback_with_threshold_above_confidence_needs_review(monkeypatch, localai_http):
+    # Override the threshold through config so the fallback must be reviewed.
+    baseline = _rules_only_baseline(monkeypatch)
+    threshold = min(1.0, baseline.payload.confidence + 0.01)
+    monkeypatch.setattr(analyzer_module, "settings", dataclasses.replace(analyzer_module.settings, review_threshold=threshold))
+    payload, _ = _run_vector(monkeypatch, localai_http, "fallback_llm_unreachable", "transport-ConnectError")
+    assert payload.llm_status == "fallback_llm_unreachable"
+    assert payload.review_required is True
+    assert payload.status == "needs_review"
+
+
+def test_llm_status_ok_is_not_the_rules_only_result(monkeypatch, localai_http):
+    # Positive control for the agreement test: an ok answer with a summary is
+    # not given the rules-only confidence reduction.
+    baseline = _rules_only_baseline(monkeypatch)
+    payload, _ = _run_vector(monkeypatch, localai_http, "ok", "valid-full")
+    assert payload.llm_status == "ok"
+    assert payload.summary == _VALID_ANSWERS["full"]["summary"]
+    assert payload.confidence != pytest.approx(baseline.payload.confidence)
+
+
+def test_llm_status_set_on_every_batch_document(monkeypatch, localai_http):
+    monkeypatch.setattr(analyzer_module, "_retrieve_legal_context", _fake_lookup([], False))
+    localai_http(_raise(httpx.ConnectError(_HOSTILE_EXC_TEXT)))
+    docs = [(_DOC, "a", None, None), (_DOC, "b", None, None)]
+    payloads, _ = asyncio.run(analyzer_module.analyze_batch_documents(docs, None, _JURISDICTIONS))
+    assert [p.llm_status for p in payloads] == ["fallback_llm_unreachable"] * len(docs)
+    quick, _ = asyncio.run(analyzer_module.analyze_batch_documents(docs, None, _JURISDICTIONS, mode="quick"))
+    assert [p.llm_status for p in quick] == ["disabled"] * len(docs)
