@@ -12,6 +12,7 @@ xref: [[LIB-ARCH]] [[LIB-STACK]] [[LIB-LEGAL]] [[LIB-TEST]] [[LIB-API]] [[LIB-RU
 - Human-readable system overview: `docs/research/2026-10-09-system-playbook.md`.
 - Claude Code optimisation plan (context diet, model routing, W1-W7): `~/.claude/plans/study-the-anthropic-developer-synchronous-beaver.md`.
 - Process rules G1-G12, P9 CI review and M1-M3 monitoring: `.claude/library/LIB-PRINCIPLES.md#project-process`.
+- Never work on or push to main; merge commits only, no rebase, no force-push, no --no-verify; merging is owner-only (G2, G3, G8, G9). Read the project-process section before any git or review work.
 
 ## identity
 | Key | Value |
