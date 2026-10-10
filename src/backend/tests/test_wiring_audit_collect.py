@@ -201,12 +201,17 @@ class Sim:
         return self.fake.find("DELETE", BATCH)
 
 
-def _collect(sim: Sim, *, env: dict[str, str] | None = None, artifact: Path | None = None) -> tuple[Any, int, str]:
+def _collect(sim: Sim, *, env: dict[str, str] | None = None, artifact: Path | None = None,
+             artifacts: list[Path] | None = None) -> tuple[Any, int, str]:
     collect = require("collect")
     prep = sim.prep
+    paths = artifacts if artifacts is not None else [artifact or prep.artifact]
+    argv = ["--config", str(prep.cfg_path)]
+    for path in paths:  # ruling 1: one --artifact per uncollected submit run, newest last
+        argv += ["--artifact", str(path)]
     rc, out = run_main(
         collect,
-        ["--config", str(prep.cfg_path), "--artifact", str(artifact or prep.artifact)],
+        argv,
         http=sim.fake,
         env=audit_env(prep.tmp, GITHUB_TOKEN=FAKE_GH_TOKEN) if env is None else env,
     )
@@ -392,8 +397,13 @@ def test_module_identity_comes_from_the_batch_not_the_model(tmp_path: Path) -> N
     sim = Sim(prep)
     sim.outputs[prep.ids[ALPHA]] = {"module": "../../etc/passwd @evil", "findings": [_finding()]}
     collect, rc, out = _collect(sim)
-    assert rc in {exit_code(collect, "OK"), exit_code(collect, "SCHEMA")}
-    text = json.dumps(sim.issue_posts())
+    # Review finding 5 (PR #282): one contract. The model's `module` is ignored;
+    # the card names the module the artifact maps this custom_id to.
+    assert rc == exit_code(collect, "OK"), out[-800:]
+    posts = sim.issue_posts()
+    assert len(posts) == 1
+    assert ALPHA in posts[0]["title"] and f"`{ALPHA}`" in posts[0]["body"]
+    text = json.dumps(posts)
     assert "etc/passwd" not in text and "@evil" not in text
 
 
@@ -594,7 +604,17 @@ def test_results_transport_error_fails_closed(tmp_path: Path) -> None:
 # --- [C6] hand-off artifact (attack sketch T10) ------------------------------------------------------------
 
 
-@pytest.mark.parametrize("case", ["missing-file", "not-json", "no-batch-id", "empty-custom-ids", "batch-id-forged"])
+INVALID_ARTIFACTS = [
+    "missing-file", "not-json", "no-batch-id", "empty-custom-ids", "batch-id-forged",
+    # Review finding 3 (PR #282): a canary id the batch never carried was a KeyError traceback.
+    "canary-not-in-custom-ids",
+    # Ruling 1: created_at is required, RFC 3339 UTC, and never in the future.
+    "created-at-missing", "created-at-malformed", "created-at-naive", "created-at-number",
+    "created-at-line-break", "created-at-future",
+]
+
+
+@pytest.mark.parametrize("case", INVALID_ARTIFACTS)
 def test_invalid_artifact_is_refused_before_anything_is_filed(tmp_path: Path, case: str) -> None:
     prep = _prepare(tmp_path)
     sim = Sim(prep)
@@ -611,9 +631,32 @@ def test_invalid_artifact_is_refused_before_anything_is_filed(tmp_path: Path, ca
     elif case == "batch-id-forged":
         doc["batch_id"] = "../../v1/organizations\nX"
         bad.write_text(json.dumps(doc), encoding="utf-8")
+    elif case == "canary-not-in-custom-ids":
+        # Every other check passes: the real canary id is listed as a module, the
+        # results match custom_ids exactly, and only the canary pointer is wrong.
+        doc["modules"][prep.canary_id] = prep.cfg["canary_fixture"]
+        doc["canary_custom_id"] = "forged-canary-id"
+        bad.write_text(json.dumps(doc), encoding="utf-8")
+    elif case.startswith("created-at-"):
+        future = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=2)
+        values = {
+            "malformed": "last tuesday",
+            "naive": "2026-10-05T02:00:00",
+            "number": 1_760_000_000,
+            "line-break": "2026-10-05T02:00:00Z\n# forged",
+            "future": future.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        kind = case.removeprefix("created-at-")
+        if kind == "missing":
+            doc.pop("created_at", None)
+        else:
+            doc["created_at"] = values[kind]
+        bad.write_text(json.dumps(doc), encoding="utf-8")
     collect, rc, out = _collect(sim, artifact=bad)
     assert rc == exit_code(collect, "ARTIFACT_INVALID"), (case, out[-500:])
+    assert "Traceback" not in out
     assert sim.fake.calls == []
+    assert "\n# forged" not in out
 
 
 def test_tampered_artifact_cannot_shrink_the_expected_set(tmp_path: Path) -> None:
@@ -650,9 +693,178 @@ def test_collect_bad_config_fails_closed(tmp_path: Path) -> None:
     assert sim.fake.calls == []
 
 
+# --- ruling 1 (PR #282): every uncollected hand-off, stale refused, none is loud ---------------------------
+
+SECOND_BATCH_ID = "msgbatch_01SECONDHANDOFF"
+
+
+def _real_clock(clock: Any) -> float:
+    """Pin the fake clock to real UTC time, so either clock source agrees on "now"."""
+    clock.now = dt.datetime.now(dt.timezone.utc).timestamp()
+    return clock.now
+
+
+def _stamp(epoch: float) -> str:
+    return dt.datetime.fromtimestamp(epoch, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _handoff(prep: Prepared, name: str, **change: Any) -> Path:
+    doc = json.loads(prep.artifact.read_text(encoding="utf-8"))
+    doc.update(change)
+    path = prep.tmp / "handoffs" / name / "wiring-audit-batch.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return path
+
+
+def _route_per_batch(sim: Sim, results_for: dict[str, Callable[[], list[dict[str, Any]]]]) -> None:
+    """Retrieve echoes the asked id; results differ per batch; issue list reflects posted issues."""
+    n = len(sim.prep.all_ids)
+
+    def retrieve(call: Call) -> tuple[int, bytes]:
+        return 200, jbytes(batch_object("ended", {"succeeded": n}, batch_id=call.path.rsplit("/", 1)[1]))
+
+    def results(call: Call) -> tuple[int, bytes]:
+        lines = results_for[call.path.split("/")[-2]]()
+        return 200, ("\n".join(json.dumps(x) for x in lines) + "\n").encode("utf-8")
+
+    def issues(call: Call) -> tuple[int, bytes]:
+        posted = [{"number": 100 + i, "state": "open", "title": p["title"], "body": p["body"]}
+                  for i, p in enumerate(sim.issue_posts())]
+        return 200, jbytes(sim.existing_issues + posted)
+
+    sim.fake.route("GET", BATCH, retrieve)
+    sim.fake.route("GET", RESULTS, results)
+    sim.fake.route("GET", ISSUES, issues)
+
+
+def test_every_uncollected_handoff_is_collected_and_each_batch_deleted(tmp_path: Path, clock: Any) -> None:
+    _real_clock(clock)
+    prep = _prepare(tmp_path)  # summary mode: one issue per hand-off with new findings
+    sim = Sim(prep)
+    older = _handoff(prep, "run-1001")
+    newer = _handoff(prep, "run-1002", batch_id=SECOND_BATCH_ID)
+    _three_findings(sim)
+    first = sim.result_lines()
+    sim.module_output(ALPHA, [_finding(severity="HIGH", symbol="alpha_second")])  # BETA's finding repeats
+    second = sim.result_lines()
+    _route_per_batch(sim, {BATCH_ID: lambda: first, SECOND_BATCH_ID: lambda: second})
+    collect, rc, out = _collect(sim, artifacts=[older, newer])
+    assert rc == exit_code(collect, "OK"), out[-800:]
+    assert sim.fake.unexpected == []
+    deleted = [c.path.rsplit("/", 1)[1] for c in sim.deletes()]
+    assert sorted(deleted) == sorted([BATCH_ID, SECOND_BATCH_ID]), deleted  # two DELETE calls, one per batch
+    for batch_id in (BATCH_ID, SECOND_BATCH_ID):
+        assert len(sim.fake.find("GET", rf"/v1/messages/batches/{batch_id}/results")) == 1, batch_id
+    posts = sim.issue_posts()
+    assert len(posts) == 2, [p["title"] for p in posts]
+    bodies = "\n".join(p["body"] for p in posts)
+    assert marker(_key(BETA, "unwired_entry_point", "beta_main")) in bodies
+    assert marker(_key(ALPHA, "zero_caller_public", "alpha_second")) in bodies
+    assert bodies.count(marker(_key(BETA, "unwired_entry_point", "beta_main"))) == 1  # dedupe across hand-offs
+
+
+def _stale_days(prep: Prepared) -> int:
+    days = prep.cfg["stale_handoff_days"]
+    assert isinstance(days, int) and days > 0
+    return days
+
+
+@pytest.mark.parametrize("override", [None, 2], ids=["shipped-days", "config-override-2"])
+def test_stale_handoff_is_refused_without_any_request(tmp_path: Path, clock: Any, override: int | None) -> None:
+    now = _real_clock(clock)
+    prep = _prepare(tmp_path) if override is None else _prepare(tmp_path, stale_handoff_days=override)
+    sim = Sim(prep)
+    _three_findings(sim)
+    stale = _handoff(prep, "run-0900", created_at=_stamp(now - _stale_days(prep) * 86400 - 3600))
+    collect, rc, out = _collect(sim, artifacts=[stale])
+    assert rc == exit_code(collect, "HANDOFF_STALE"), out[-800:]
+    assert "::error title=wiring-audit::HANDOFF_STALE" in out and BATCH_ID in out
+    assert sim.fake.calls == []  # not re-collected: no retrieve, no results, no delete, nothing filed
+    assert "Traceback" not in out
+
+
+@pytest.mark.parametrize("override", [None, 2], ids=["shipped-days", "config-override-2"])
+def test_handoff_just_inside_the_stale_limit_is_collected(tmp_path: Path, clock: Any, override: int | None) -> None:
+    # Boundary and positive control: one hour younger than the limit is collected.
+    now = _real_clock(clock)
+    prep = _prepare(tmp_path) if override is None else _prepare(tmp_path, stale_handoff_days=override)
+    sim = Sim(prep)
+    _three_findings(sim)
+    fresh = _handoff(prep, "run-0950", created_at=_stamp(now - _stale_days(prep) * 86400 + 3600))
+    collect, rc, out = _collect(sim, artifacts=[fresh])
+    assert rc == exit_code(collect, "OK"), out[-800:]
+    assert len(sim.issue_posts()) == 1 and len(sim.deletes()) == 1
+
+
+def test_stale_handoff_does_not_stop_the_fresh_one(tmp_path: Path, clock: Any) -> None:
+    now = _real_clock(clock)
+    prep = _prepare(tmp_path)
+    sim = Sim(prep)
+    _three_findings(sim)
+    stale = _handoff(prep, "run-0900", batch_id=SECOND_BATCH_ID,
+                     created_at=_stamp(now - _stale_days(prep) * 86400 - 3600))
+    fresh = _handoff(prep, "run-1000")
+    collect, rc, out = _collect(sim, artifacts=[stale, fresh])
+    assert rc == exit_code(collect, "HANDOFF_STALE"), out[-800:]
+    assert not [c for c in sim.fake.calls if SECOND_BATCH_ID in c.url]  # no request for the stale batch
+    assert [c.path for c in sim.deletes()] == [f"/v1/messages/batches/{BATCH_ID}"]
+    assert len(sim.issue_posts()) == 1
+
+
+def test_no_handoff_is_a_loud_failure_not_success(tmp_path: Path) -> None:
+    # Ruling 1, F5: zero uncollected hand-offs is "did nothing", never exit 0.
+    prep = _prepare(tmp_path)
+    sim = Sim(prep)
+    collect, rc, out = _collect(sim, artifacts=[])
+    assert rc == exit_code(collect, "NO_HANDOFF"), out[-800:]
+    assert rc != exit_code(collect, "OK")
+    assert "::error title=wiring-audit::NO_HANDOFF" in out
+    assert sim.fake.calls == [] and "Traceback" not in out
+
+
+# --- review finding 4 (PR #282): HTTP error body that cannot be read ----------------------------------------
+
+
+def test_http_error_whose_body_read_fails_is_api_error_not_a_traceback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import http.client
+    import urllib.error
+    import urllib.request
+
+    prep = _prepare(tmp_path)
+    sim = Sim(prep)
+    opened: list[str] = []
+
+    class BrokenBody:
+        def read(self, *args: Any) -> bytes:
+            raise http.client.IncompleteRead(b"partial", 512)
+
+        def close(self) -> None:
+            return None
+
+    def opener_open(self: Any, fullurl: Any, data: Any = None, timeout: Any = None) -> Any:
+        url = fullurl.full_url if isinstance(fullurl, urllib.request.Request) else str(fullurl)
+        opened.append(url)
+        raise urllib.error.HTTPError(url, 500, "Internal Server Error", None, BrokenBody())  # type: ignore[arg-type]
+
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", opener_open)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda url, *a, **k: opener_open(None, url, *a, **k))
+    collect = require("collect")
+    rc, out = run_main(  # http=None: the real default transport, the fake is underneath it
+        collect,
+        ["--config", str(prep.cfg_path), "--artifact", str(prep.artifact)],
+        env=audit_env(prep.tmp, GITHUB_TOKEN=FAKE_GH_TOKEN),
+    )
+    assert opened, "the default transport was not used"
+    assert rc == exit_code(collect, "API_ERROR"), out[-800:]
+    assert "::error title=wiring-audit::API_ERROR" in out
+    assert "Traceback" not in out and "IncompleteRead(" not in out and FAKE_KEY not in out
+    assert not [u for u in opened if "/issues" in u]  # nothing filed
+
+
 # Exit codes exercised above. Adding a code without a test fails here (T9 parity).
 COVERED = {"OK", "CONFIG", "MISSING_SECRET", "ARTIFACT_INVALID", "BATCH_NOT_ENDED", "API_ERROR",
-           "DELETE_FAILED", "CANCEL_TIMEOUT"} | {name for *_, name in FAILURES}
+           "DELETE_FAILED", "CANCEL_TIMEOUT", "HANDOFF_STALE", "NO_HANDOFF"} | {name for *_, name in FAILURES}
 
 
 def test_every_collect_exit_code_has_a_test() -> None:

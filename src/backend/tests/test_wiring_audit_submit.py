@@ -19,7 +19,9 @@ import base64
 import datetime as dt
 import json
 import os
+import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -149,6 +151,13 @@ def test_submit_creates_one_batch_with_every_module_and_the_canary(tmp_path: Pat
     doc = json.loads(artifact.read_text(encoding="utf-8"))
     assert doc["batch_id"] == BATCH_ID
     assert sorted(doc["custom_ids"]) == sorted(ids)
+    # Ruling 1: the hand-off records when it was written (RFC 3339 UTC, "Z"), so
+    # collect can refuse a stale one. Either clock source is accepted.
+    created = doc.get("created_at")
+    assert isinstance(created, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", created), created
+    stamp = dt.datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp()
+    nows = (dt.datetime.now(dt.timezone.utc).timestamp(), time.time())
+    assert any(abs(stamp - now) <= 120 for now in nows), (created, nows)
     assert BATCH_ID in out and BATCH_ID in summary_text(tmp_path)
     _assert_no_secret(tmp_path, out, artifact.read_text(encoding="utf-8"))
     assert "x-api-key" not in artifact.read_text(encoding="utf-8").lower()
@@ -197,6 +206,35 @@ def test_scanner_sees_every_payload_before_the_first_request(tmp_path: Path) -> 
     for marker, _ in STD_MODULES.values():
         assert marker in scanned
     assert CANARY_MARKER in scanned
+
+
+def test_leak_scanner_child_env_carries_no_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Ruling 2 (PR #282): the key and GITHUB_TOKEN are in the job env (os.environ);
+    # the scanner subprocess must not inherit them, nor any name off the allowlist.
+    secrets = {
+        SECRET_NAME: "sk-" + "ant-" + "SCANENVLEAK-" + "w4" * 8,
+        "GITHUB_TOKEN": "ghs_" + "SCANENVLEAK" + "u6" * 8,
+        "WIRING_AUDIT_UNRELATED_VAR": "UNRELATED_" + "SCANENV_MARKER",
+    }
+    for name, value in secrets.items():
+        monkeypatch.setenv(name, value)
+    cfg_path, cfg = _cfg(tmp_path)
+    dump = tmp_path / "scanner-env.json"
+    scanner = (
+        "import json, os, sys\n"
+        "sys.stdin.buffer.read()\n"
+        f"open({str(dump)!r}, 'w').write(json.dumps(dict(os.environ)))\n"
+        "sys.stdout.write('CLEAN 3\\n')\n"
+        "sys.exit(1)\n"
+    )
+    repo = audit_repo(tmp_path, cfg, extra={cfg["leak_scan_script"]: scanner})
+    fake = _ok_fake()
+    submit, rc, out, _ = _submit(tmp_path, repo, cfg_path, fake)
+    assert rc == exit_code(submit, "OK"), out[-800:]  # positive control: the scan still ran clean
+    seen = json.loads(dump.read_text(encoding="utf-8"))
+    for name, value in secrets.items():
+        assert name not in seen, name
+        assert all(value not in v for v in seen.values()), name
 
 
 def test_leaking_module_refuses_submission_without_any_request(tmp_path: Path, net: list[str]) -> None:

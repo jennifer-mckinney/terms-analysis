@@ -18,7 +18,19 @@ The contract these tests pin for the code under ``scripts/audit/``
 * ``submit.py``: ``main(argv, *, http=None, env=None) -> int``; CLI
   ``--repo DIR --config FILE --artifact FILE``.
 * ``collect.py``: ``main(argv, *, http=None, env=None) -> int``; CLI
-  ``--config FILE --artifact FILE``.
+  ``--config FILE [--artifact FILE ...]``. ``--artifact`` repeats, one per
+  uncollected submit run, oldest first (newest last); each hand-off goes
+  through the whole result contract and its batch is deleted. No
+  ``--artifact`` at all is ``NO_HANDOFF``; a hand-off whose ``created_at``
+  is older than ``stale_handoff_days`` is ``HANDOFF_STALE`` and gets no
+  request (PR #282 review, ruling 1).
+* The hand-off artifact carries ``created_at``: RFC 3339 UTC with a ``Z``
+  suffix (``2026-10-05T02:00:00Z``, the Batches API's own format), written
+  by submit and validated by collect (F3). Missing, malformed, naive or
+  future values are ``ARTIFACT_INVALID``.
+* Child processes (``git ls-files``, ``leak_scan.py``) get an allowlisted
+  environment: no API key, no ``GITHUB_TOKEN``, nothing the allowlist does
+  not name (ruling 2).
 * ``http(method, url, headers, body) -> (status, body_bytes)``: the one
   injectable transport (default: stdlib urllib). It may raise ``OSError``.
 * Each of inventory/submit/collect exposes ``EXIT_CODES: dict[str, int]``;

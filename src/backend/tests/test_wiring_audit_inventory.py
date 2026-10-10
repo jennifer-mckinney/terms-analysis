@@ -67,6 +67,7 @@ REQUIRED_KEYS = (
     "leak_scan_patterns",
     "personal_path_patterns",
     "cancel_timeout_seconds",
+    "stale_handoff_days",  # PR #282 ruling 1: a hand-off older than this is refused
 )
 
 # Exit-code numbers the design gate fixed (s.2 budget + result contract).
@@ -90,6 +91,7 @@ REQUIRED_EXIT_NAMES = {
     "collect": {
         "OK", "CONFIG", "MISSING_SECRET", "ARTIFACT_INVALID", "BATCH_NOT_ENDED", "PARTIAL", "MISSING_OR_DUP",
         "TRUNCATED_OR_REFUSED", "SCHEMA", "CANARY_MISSING", "API_ERROR", "DELETE_FAILED", "CANCEL_TIMEOUT",
+        "HANDOFF_STALE", "NO_HANDOFF",  # PR #282 ruling 1
     },
 }
 
@@ -195,6 +197,25 @@ def test_shipped_config_starts_in_summary_card_mode() -> None:
     assert real_config()["card_mode"] == "summary"
 
 
+def _cron_offset_seconds(cron: str) -> int:
+    """Seconds into the week of a weekly 'M H * * D' cron; anything else fails the test."""
+    fields = cron.split()
+    assert len(fields) == 5 and fields[2:4] == ["*", "*"], cron
+    minute, hour, dow = (int(fields[0]), int(fields[1]), int(fields[4]))
+    return ((dow % 7) * 24 + hour) * 3600 + minute * 60
+
+
+def test_shipped_stale_handoff_days_covers_the_submit_to_collect_gap() -> None:
+    # Ruling 1: this week's hand-off is never stale when collect runs on schedule,
+    # and the value is a positive whole number of days read from config.
+    cfg = real_config()
+    days = cfg["stale_handoff_days"]
+    assert isinstance(days, int) and not isinstance(days, bool) and days > 0
+    week = 7 * 24 * 3600
+    gap = (_cron_offset_seconds(cfg["schedule"]["collect"]) - _cron_offset_seconds(cfg["schedule"]["submit"])) % week
+    assert days * 24 * 3600 > gap
+
+
 def test_shipped_config_price_review_date_is_iso() -> None:
     # [C5] stale prices fail closed; the shipped date must parse as ISO.
     import datetime as dt
@@ -269,6 +290,12 @@ BAD_VALUES = [
     ("personal_path_patterns", ""),
     ("cancel_timeout_seconds", 0),
     ("cancel_timeout_seconds", "600"),
+    ("stale_handoff_days", 0),
+    ("stale_handoff_days", -1),
+    ("stale_handoff_days", "8"),
+    ("stale_handoff_days", True),
+    ("stale_handoff_days", 1.5),
+    ("stale_handoff_days", None),
 ]
 
 
@@ -458,6 +485,29 @@ def test_git_environment_cannot_redirect_the_inventory(tmp_path: Path) -> None:
     assert b"OTHER_REPO_MARKER" not in redirected.stdout
     assert redirected.returncode == baseline.returncode == 0
     assert redirected.stdout == baseline.stdout
+
+
+# Ruling 2 (PR #282): the child env is an allowlist. Values assembled so no
+# secret-shaped literal is tracked; the unrelated name proves "allowlist", not
+# "denylist of two names".
+CHILD_ENV_SECRETS = {
+    "WIRING_AUDIT_API_KEY": "sk-" + "ant-" + "CHILDENVLEAK-" + "k3" * 8,
+    "GITHUB_TOKEN": "ghs_" + "CHILDENVLEAK" + "t5" * 8,
+    "WIRING_AUDIT_UNRELATED_VAR": "UNRELATED_" + "CHILDENV_MARKER",
+}
+
+
+def test_git_env_is_an_allowlist_without_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    inventory = require("inventory")
+    for name, value in CHILD_ENV_SECRETS.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("GIT_DIR", "/nonexistent-redirect")  # [F7] still dropped
+    env = inventory.git_env()
+    for name, value in CHILD_ENV_SECRETS.items():
+        assert name not in env, name
+        assert all(value not in v for v in env.values()), name
+    assert env.get("GIT_DIR") is None
+    assert env.get("PATH") == os.environ["PATH"]  # positive control: git is still found
 
 
 def test_inventory_is_byte_identical_across_runs(tmp_path: Path) -> None:

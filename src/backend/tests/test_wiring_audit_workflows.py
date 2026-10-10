@@ -238,14 +238,33 @@ def test_submit_has_a_failure_cleanup_step() -> None:
     assert cleanup[0].get("env", {}).get(SECRET_NAME) == SECRET_EXPR
 
 
+RUN_ID_EXPR = re.compile(r"\$\{\{\s*github\.run_id\s*\}\}")
+
+
 def test_artifact_handoff_is_wired_between_the_workflows() -> None:
     # [F12] collect reads what submit uploads, from the submit workflow only.
+    # Ruling 1 (PR #282): the hand-off name carries the run id, so two submit
+    # runs never collide; collect finds them by the fixed prefix.
     upload = [s for s in _job("submit")["steps"] if str(s.get("uses", "")).startswith("actions/upload-artifact@")]
     assert len(upload) == 1
-    name = upload[0]["with"]["name"]
+    name = str(upload[0]["with"]["name"])
+    assert RUN_ID_EXPR.search(name), name
+    prefix = name.split("${{", 1)[0]
+    assert prefix.strip("-_ ") != ""
     text = COLLECT_WORKFLOW.read_text(encoding="utf-8")
-    assert name in text
+    assert prefix in text
     assert "wiring-audit-submit.yml" in text
+
+
+def test_collect_takes_every_uncollected_submit_run_not_only_the_newest() -> None:
+    # Ruling 1 (PR #282): `gh run list --limit 1` orphaned every older batch.
+    # A lookup of the last collect run may use --limit 1; the submit-run lookup may not.
+    runs = "\n".join(str(s.get("run", "")) for s in _job("collect")["steps"]).replace("\\\n", " ")
+    lookups = [line for line in runs.splitlines() if "gh run list" in line and "wiring-audit-submit.yml" in line]
+    assert lookups, "collect no longer looks up the submit workflow's runs"
+    for line in lookups:
+        assert not re.search(r"--limit(\s+|=)1\b", line), "collect still reads only the newest submit run"
+        assert not re.search(r"\.\[0\]", line), "collect still takes only the first submit run of the list"
 
 
 # --- [C9] not in the application -------------------------------------------------------------------
