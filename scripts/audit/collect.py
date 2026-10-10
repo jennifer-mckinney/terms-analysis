@@ -265,8 +265,6 @@ def usage_cost(results: list[dict[str, Any]], cfg: dict[str, Any]) -> tuple[floa
     totals = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0,
               "cache_creation_input_tokens": 0}
     for line in results:
-        if line["result"].get("type") != "succeeded":
-            continue
         usage = _message(line).get("usage")
         if line["result"].get("type") != "succeeded" or not valid_usage(usage):
             continue  # errored/expired/canceled carry no usage; check_results judges the rest
