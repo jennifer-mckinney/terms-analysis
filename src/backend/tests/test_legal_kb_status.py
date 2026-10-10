@@ -571,8 +571,13 @@ class _StatusKB:
     def __init__(self, result: Any = None, exc: Optional[Exception] = None) -> None:
         self._result = result
         self._exc = exc
+        # Issue #196: every call is recorded so a test proves "not called" with
+        # ``assert kb.calls == []`` after the action. A raise inside the fake
+        # can be swallowed by the code under test and look like success.
+        self.calls: List[Tuple[Any, ...]] = []
 
     async def retrieve(self, *args: Any, **kwargs: Any):
+        self.calls.append((args, kwargs))
         if self._exc is not None:
             raise self._exc
         return self._result
@@ -758,11 +763,16 @@ def test_schemas_legal_citation_status_normalised(raw, expected):
 
 
 def test_analyzer_analyze_text_quick_mode_is_ungrounded_and_skips_kb(monkeypatch):
-    kb = _StatusKB(exc=AssertionError("quick mode must not call the legal KB"))
+    # Issue #196: the KB would answer grounded (OK + a GDPR chunk) if asked,
+    # and records the call, so a quick-mode lookup is caught twice: by the
+    # call record and by the grounding fields. No raise for a broad except
+    # in the code under test to swallow.
+    kb = _StatusKB(RetrievalResult([{**_CHUNKS[0], "score": 0.1}], status=RetrievalStatus.OK))
     monkeypatch.setattr(analyzer_module, "get_legal_kb", lambda: kb)
     result = asyncio.run(
         analyzer_module.analyze_text("We sell your data.", ["GDPR"], mode="quick")
     )
+    assert kb.calls == []
     assert result.payload.legal_grounding is False
     assert result.payload.legal_context == []
 
@@ -916,8 +926,15 @@ def test_localai_analyze_prompt_build_failure_degrades_to_rules_only(monkeypatch
     # client returns None (rules-only) and never calls the LLM endpoint.
     import httpx
 
+    # Issue #196: record every client construction instead of raising
+    # AssertionError, which analyze()'s HR5 ``except Exception`` boundary
+    # would swallow into the same ``None`` this test expects. The fake still
+    # refuses (RuntimeError) so no real request can leave the process.
+    http_calls: List[Tuple[Any, ...]] = []
+
     def _no_http(*args: Any, **kwargs: Any):
-        raise AssertionError("LLM endpoint must not be called when the prompt fails")
+        http_calls.append((args, kwargs))
+        raise RuntimeError("LLM endpoint reached in a no-HTTP test")
 
     monkeypatch.setattr(httpx, "AsyncClient", _no_http)
     with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
@@ -929,6 +946,7 @@ def test_localai_analyze_prompt_build_failure_degrades_to_rules_only(monkeypatch
                 legal_context=["not-a-dict"],  # type: ignore[list-item]
             )
         )
+    assert http_calls == []
     assert result is None
     assert any("prompt build failed" in r.getMessage() for r in caplog.records)
 
