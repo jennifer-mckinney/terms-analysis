@@ -102,9 +102,26 @@ rule: `check_frequency` in seconds, constrained to `[300, 604800]` (5 min to 7 d
 {
   "id": "uuid", "status": "completed|needs_review", "review_required": false,
   "confidence": 0.91, "risk_score": 6.8, "grade": "C+",
-  "findings": [...], "summary": "..."
+  "findings": [...], "summary": "...",
+  "legal_grounding": true,
+  "legal_grounding_authoritative": false,
+  "legal_context": [
+    {"jurisdiction": "GDPR", "law": "gdpr", "section": "Article 17 — Right to erasure",
+     "status": "placeholder", "score": 0.0328}
+  ]
 }
 ```
+
+### API6: legal-grounding-fields (issue #91)
+rule: `legal_grounding` (bool, default false) = the legal-KB index loaded and retrieval ran against it. True even when every candidate fell below `LEGAL_KB_MIN_SCORE` (then `legal_context=[]`; only possible when the floor is set) and even when every passage is placeholder text. False when the index is missing or empty, retrieval errored (incl. zero-norm query embedding = broken embedder, or a KB returning no `RetrievalStatus`), or `mode=quick`; `legal_context` is then always `[]` and no KB passage reached the LLM prompt
+rule: `legal_grounding_authoritative` (bool, default false) = `legal_grounding` AND `LEGAL_KB_MIN_SCORE` is set AND at least one citation has a status in the allowlist `schemas.AUTHORITATIVE_STATUSES` = `{"in_force"}` (vocabulary from legal-corpus-ingester `pipeline/status_rules.py::resolve_status`) AND is a citation with a known, requested jurisdiction (any known one when none was requested) (SO5: none requested = `jurisdictions=[]`); known = in `schemas.KNOWN_JURISDICTIONS`, derived from the `Jurisdiction` Literal. Fails closed: null, unknown, typo, `not_yet_in_force` and `placeholder` statuses are NOT authoritative, and neither is a passage with a null, blank or unrecognised jurisdiction (in every mode) or one from another jurisdiction (retrieval falls back to the full corpus when no passage matches the requested ones; those passages are labelled OUT OF JURISDICTION in the prompt). One table decides both the flag and the prompt labels: `schemas.passage_label_keys` / `PASSAGE_LABELS`. Clients MUST use this, not `legal_grounding`, before presenting an analysis as grounded in law
+rule: relevance floor `LEGAL_KB_MIN_SCORE` defaults to unset = DISABLED (owner ruling 2026-10-07, "Disabled + loud"): NO_MATCH cannot be reported without a floor, a WARNING is logged at startup, and `legal_grounding_authoritative` is forced false. A set value must be finite and in (-1, 1] or startup fails (-1 keeps every candidate, so it is rejected as the disabled floor in disguise). `LEGAL_KB_TOP_K` must be an integer >= 1 or startup fails
+rule: prompt labels: every passage that is not authoritative law for the analysis carries a label from `schemas.PASSAGE_LABELS` (UNVERIFIED PLACEHOLDER, NOT YET IN FORCE, UNVERIFIED PROVENANCE for null/unknown status, UNKNOWN JURISDICTION for a null, blank or unrecognised jurisdiction, OUT OF JURISDICTION), and the prompt's NEVER-cite rule names every marker. Each passage is one header line `[<jurisdiction> <section>]`, emitted only by `prompts.render_passage_header`: the canonical `KNOWN_JURISDICTIONS` code or `Law` (never the raw value) and the section through `schemas.normalise_section_title` with whitespace collapsed, so it holds no `[`, `]` or line break. Every line of passage text follows behind `prompts.PASSAGE_BODY_PREFIX` (`    > `), so no text line can look like a header
+rule: index metadata: every chunk must be an object with a string `text`; `jurisdiction`, `law`, `section`, `status` must each be a string or null, every string key and value must be valid UTF-8 (no lone surrogate, as `json.loads` makes from `"\ud800"`), and `section` must hold no control / line-break character. Undecodable bytes in a metadata or corpus file are `LegalKBIndexCorruptError` too, for build, load and `load_from_bundle`. `section` is first normalised by `schemas.normalise_section_title` (`[`/`]` become `(`/`)`, format (Cf) characters are stripped), so `## Article 6 [Lawfulness]` is valid. One `legal_kb._validate_chunks` runs at build (per corpus file, before anything is embedded or written; the `index` CLI then exits 1 with no index written) and at load, where anything else is `LegalKBIndexCorruptError` (ERROR, analysis ungrounded, still 200), never a response-validation 500. A jurisdiction holding a Cf character is unknown (rejected, not stripped)
+rule: `legal_context` (List[LegalCitation], default `[]`) = KB passages supplied to the LLM prompt; metadata only, no passage text
+schema: `LegalCitation` = `{jurisdiction?: str, law?: str, section?: str, status?: str, score?: float}`; `status` is always stripped + lower-cased (`"placeholder"` = synthetic, non-authoritative text); `score` is the RRF fusion score (rank-based, not a probability)
+because: the shipped corpus is entirely `# Status: PLACEHOLDER`, so "retrieval ran" and "grounded in law" must be separate signals
+back_compat: rows stored before these fields existed load with the false / `[]` defaults
 
 ### DiffResult
 ```json

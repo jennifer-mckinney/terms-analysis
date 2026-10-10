@@ -1,25 +1,251 @@
+"""HR5: any failure of the LLM step falls back to rule-only findings.
+
+HR5: "LLM failures MUST fall back to rule-only findings with reduced
+confidence". The whole LLM step (model selection, prompt build, request
+encoding, the HTTP call, response parsing AND validation of the answer's
+shape) sits behind ONE boundary in ``LocalAIClient.analyze()``. Every
+non-cancellation exception there returns ``None`` (rules-only), with the
+stage and exception type logged and no message or document text.
+Cancellation still propagates.
+
+Issue #91 r12 security F2: a lone surrogate in the legal context or the
+document raised ``UnicodeEncodeError`` while httpx encoded the body.
+Issue #91 F2 round security M1: a JSON object answer with wrong field types
+(``"findings": null``, ``"overall_confidence": "high"``, a lone surrogate in
+``summary``) passed ``analyze()`` and then raised out of ``analyze_text`` or
+the response serialiser (a 500). ``analyze()`` must return either ``None``
+or an answer ``analyze_text`` can use unchecked.
+
+The HTTP layer is real httpx with a ``MockTransport`` (``localai_http``), so
+the request body is encoded by the same code that raises in production.
+"""
+from __future__ import annotations
+
 import asyncio
+import json
+import logging
+from typing import Any, Callable, Dict, List, Optional
 
 import httpx
+import pytest
 
+from app.services import analyzer as analyzer_module
+from app.services import localai as localai_module
 from app.services.analyzer import analyze_text
 from app.services.localai import LocalAIClient
 
+_LOGGER_NAME = "uvicorn.error"
+_DOC = "We sell personal information and use automated decision-making."
+_JURISDICTIONS = ["US-CA", "GDPR"]
+_GOOD_LLM_CONTENT = {"summary": "ok", "overall_confidence": 0.9, "findings": []}
 
-def test_analyze_text_falls_back_to_rules(monkeypatch):
-    async def fake_analyze(self, numbered_text, jurisdictions, rule_findings, legal_context=None):
+
+def _ok_response(content: Any = None, raw: Any = None) -> httpx.Response:
+    """A chat-completions response whose message content is ``raw`` (JSON text,
+    or any non-string value to model a malformed ``content`` field)."""
+    text = raw if raw is not None else json.dumps(content or _GOOD_LLM_CONTENT)
+    return httpx.Response(200, json={"choices": [{"message": {"content": text}}]})
+
+
+@pytest.fixture
+def localai_http(monkeypatch) -> Callable[[Callable[[httpx.Request], httpx.Response]], List[httpx.Request]]:
+    """Route LocalAIClient's httpx.AsyncClient through an httpx MockTransport.
+
+    Call it with a responder; it returns the list of requests the responder
+    received (empty means the request was never sent).
+    """
+    real_client = httpx.AsyncClient
+
+    def _install(respond: Callable[[httpx.Request], httpx.Response]) -> List[httpx.Request]:
+        sent: List[httpx.Request] = []
+
+        def _record(request: httpx.Request) -> httpx.Response:
+            sent.append(request)
+            return respond(request)
+
+        def _factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+            kwargs["transport"] = httpx.MockTransport(_record)
+            return real_client(*args, **kwargs)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _factory)
+        return sent
+
+    return _install
+
+
+def _chunk(text: str = "Article 17 erasure", section: str = "Article 17") -> Dict[str, Any]:
+    return {"text": text, "section": section, "jurisdiction": "GDPR", "law": "gdpr", "status": "in_force"}
+
+
+def _analyze(
+    numbered_text: str = "0001| We sell your data.",
+    legal_context: Optional[List[dict]] = None,
+) -> Optional[Dict[str, Any]]:
+    return asyncio.run(
+        LocalAIClient().analyze(
+            numbered_text=numbered_text,
+            jurisdictions=["GDPR"],
+            rule_findings=[],
+            legal_context=legal_context,
+        )
+    )
+
+
+def _fallback_records(caplog) -> List[logging.LogRecord]:
+    return [r for r in caplog.records if "falling back to rules-only" in r.getMessage()]
+
+
+# ---------------------------------------------------------------------------
+# Answers the LLM can return. Raw JSON text, as it arrives in ``content``.
+# ---------------------------------------------------------------------------
+
+_VALID_FINDING: Dict[str, Any] = {
+    "category": "data_sharing",
+    "severity": "High",
+    "confidence": 0.85,
+    "excerpt": "We sell personal information",
+    "explanation": "Sells data.",
+    "jurisdictions": ["GDPR"],
+    "evidence": {"line_start": 1, "line_end": 1, "legal_basis": ["GDPR Art. 6"]},
+}
+
+# Security M1: every row must make analyze() return None (rules-only). The
+# whole answer is rejected; no field of it may be used.
+_MALFORMED_ANSWERS: Dict[str, Any] = {
+    # Not a JSON object at all.
+    "content-list": "[1, 2]",
+    "content-null": "null",
+    "content-str": '"just text"',
+    "content-int": "5",
+    # ``content`` itself is not a string (a mutant returning an empty
+    # "success" answer for non-string content must fail).
+    "content-not-a-string": 7,
+    # findings is not a list.
+    "findings-null": '{"summary": "ok", "findings": null}',
+    "findings-int": '{"summary": "ok", "findings": 5}',
+    "findings-bool": '{"findings": true}',
+    "findings-str": '{"findings": "abc"}',
+    "findings-object": '{"findings": {"a": 1}}',
+    # overall_confidence is not a finite number.
+    "confidence-str": '{"findings": [], "summary": "ok", "overall_confidence": "high"}',
+    "confidence-list": '{"findings": [], "overall_confidence": [1]}',
+    # A JSON boolean is not a number (lax float coercion gives 1.0), and
+    # "1_0" is not a plain numeric string (it would coerce to 10.0).
+    "confidence-bool": '{"findings": [], "summary": "ok", "overall_confidence": true}',
+    "confidence-underscore-str": '{"findings": [], "summary": "ok", "overall_confidence": "1_0"}',
+    "confidence-nan": '{"findings": [], "summary": "ok", "overall_confidence": NaN}',
+    "confidence-inf": '{"findings": [], "summary": "ok", "overall_confidence": Infinity}',
+    "confidence-neg-inf": '{"findings": [], "summary": "ok", "overall_confidence": -Infinity}',
+    # summary is not a string.
+    "summary-object": '{"findings": [], "summary": {"a": 1}}',
+    "summary-int": '{"findings": [], "summary": 7}',
+    # A string that is not valid UTF-8 (lone surrogate via a JSON escape).
+    "summary-lone-surrogate": '{"findings": [], "summary": "x\\ud800"}',
+    "finding-lone-surrogate": json.dumps(
+        {"summary": "ok", "findings": [{**_VALID_FINDING, "explanation": "MARK"}]}
+    ).replace("MARK", "x\\udfff"),
+}
+
+# Allow rows: well-typed answers are returned with their fields intact.
+_VALID_ANSWERS: Dict[str, Dict[str, Any]] = {
+    "full": {**_GOOD_LLM_CONTENT, "findings": [_VALID_FINDING]},
+    "empty-findings": _GOOD_LLM_CONTENT,
+    "null-optionals": {"findings": [], "summary": None, "overall_confidence": None},
+    "astral-summary": {"findings": [], "summary": "ok \U0001F600", "overall_confidence": 0.0},
+    "confidence-one": {"findings": [], "summary": "ok", "overall_confidence": 1},
+    # Numeric string: schema validation coerces it, so the returned value must
+    # be the validated float, not the raw parsed string (kills mutant M8).
+    "confidence-numeric-string": {"findings": [], "summary": "ok", "overall_confidence": "0.9"},
+}
+
+# Allow rows whose returned value is the schema-coerced one, not the raw input.
+_COERCED_CONFIDENCE: Dict[str, float] = {"confidence-numeric-string": 0.9}
+
+
+def _rules_only_baseline(monkeypatch) -> Any:
+    async def _none(self, **kwargs: Any):
         return None
 
-    monkeypatch.setattr(LocalAIClient, "analyze", fake_analyze)
-
-    text = "We sell personal information and use automated decision-making."
-    result = asyncio.run(analyze_text(text, ["US-CA", "GDPR"]))
-    categories = {finding.category for finding in result.payload.findings}
-    assert "Sale/Share" in categories
-    assert "ADM" in categories
+    with monkeypatch.context() as patch:
+        patch.setattr(LocalAIClient, "analyze", _none)
+        patch.setattr(analyzer_module, "_retrieve_legal_context", _fake_lookup([], False))
+        return asyncio.run(analyze_text(_DOC, _JURISDICTIONS))
 
 
-def test_localai_unreachable_returns_none(monkeypatch):
+def _fake_lookup(chunks: List[Dict[str, Any]], grounded: bool):
+    async def _lookup(query, client, jurisdictions):
+        return chunks, grounded
+
+    return _lookup
+
+
+class _NovelError(Exception):
+    """An exception type no handler list could have anticipated."""
+
+
+def _raise(exc: BaseException) -> Callable[[httpx.Request], httpx.Response]:
+    def _respond(request: httpx.Request) -> httpx.Response:
+        raise exc
+
+    return _respond
+
+
+# ---------------------------------------------------------------------------
+# HR5 end to end: analyze_text returns rule-only findings, reduced confidence
+# ---------------------------------------------------------------------------
+
+_FALLBACK_CASES = [
+    "llm-returns-none",
+    "surrogate-in-legal-text",
+    "surrogate-in-legal-section",
+    "transport-raises-novel",
+    "transport-raises-typeerror",
+    *[f"answer-{name}" for name in _MALFORMED_ANSWERS],
+]
+
+
+@pytest.mark.parametrize("case", _FALLBACK_CASES)
+def test_analyze_text_falls_back_to_rules(monkeypatch, localai_http, case):
+    baseline = _rules_only_baseline(monkeypatch)
+    lookup = _fake_lookup([_chunk()], True)
+    if case == "llm-returns-none":
+        async def fake_analyze(self, numbered_text, jurisdictions, rule_findings, legal_context=None):
+            return None
+
+        monkeypatch.setattr(LocalAIClient, "analyze", fake_analyze)
+    elif case == "surrogate-in-legal-text":
+        lookup = _fake_lookup([_chunk(text="t\ud800")], True)
+        localai_http(lambda request: _ok_response())
+    elif case == "surrogate-in-legal-section":
+        lookup = _fake_lookup([_chunk(section="Art\udfff 1")], True)
+        localai_http(lambda request: _ok_response())
+    elif case.startswith("transport-raises"):
+        localai_http(_raise(_NovelError("x") if case.endswith("novel") else TypeError("x")))
+    else:
+        raw = _MALFORMED_ANSWERS[case.removeprefix("answer-")]
+        localai_http(lambda request: _ok_response(raw=raw))
+    monkeypatch.setattr(analyzer_module, "_retrieve_legal_context", lookup)
+
+    result = asyncio.run(analyze_text(_DOC, _JURISDICTIONS))
+    payload = result.payload
+    if not case.startswith("surrogate-in-legal"):
+        # The response serialises (no lone surrogate, no NaN reached it).
+        # The surrogate-in-legal cases bypass the KB's own validator (the
+        # fake lookup hands the chunk straight to the analyzer), so their
+        # citations can't serialise; the KB rejects such chunks at load.
+        json.loads(payload.model_dump_json())
+    # Rule-only findings: the same categories the rules-only path produces.
+    categories = {finding.category for finding in payload.findings}
+    assert {"Sale/Share", "ADM"} <= categories
+    assert categories == {f.category for f in baseline.payload.findings}
+    assert payload.summary is None
+    # Reduced confidence: the rules-only factor applies, exactly as for the
+    # documented fallback (LLM returned None).
+    assert payload.confidence == pytest.approx(baseline.payload.confidence)
+    assert payload.confidence < 1.0
+
+
+def test_localai_unreachable_returns_none(monkeypatch, caplog):
     class UnreachableClient:
         def __init__(self, *args, **kwargs):
             pass
@@ -35,6 +261,161 @@ def test_localai_unreachable_returns_none(monkeypatch):
 
     monkeypatch.setattr(httpx, "AsyncClient", UnreachableClient)
 
-    result = asyncio.run(LocalAIClient().analyze("text", ["US-CA"], []))
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        result = asyncio.run(LocalAIClient().analyze("text", ["US-CA"], []))
 
     assert result is None
+    # The kept httpx.HTTPError handler logged it, not the generic boundary.
+    assert any(r.getMessage().startswith("LocalAI HTTP error") for r in caplog.records)
+    assert _fallback_records(caplog) == []
+
+
+# ---------------------------------------------------------------------------
+# Response parsing and validation are inside the boundary (security M1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", list(_MALFORMED_ANSWERS))
+def test_analyze_unusable_response_returns_none(localai_http, caplog, name):
+    raw = _MALFORMED_ANSWERS[name]
+    localai_http(lambda request: _ok_response(raw=raw))
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        assert _analyze() is None
+    records = _fallback_records(caplog)
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert message.startswith("LocalAI response parse failed")
+    # The log line is encodable and quotes no part of the answer.
+    message.encode("utf-8")
+    assert "high" not in message and "abc" not in message
+
+
+@pytest.mark.parametrize("name", list(_VALID_ANSWERS))
+def test_analyze_valid_answer_is_returned(localai_http, name):
+    content = _VALID_ANSWERS[name]
+    localai_http(lambda request: _ok_response(content))
+    result = _analyze()
+    assert result is not None
+    assert result["findings"] == content["findings"]
+    assert result.get("summary") == content["summary"]
+    expected = _COERCED_CONFIDENCE.get(name, content["overall_confidence"])
+    assert result.get("overall_confidence") == expected
+
+
+# ---------------------------------------------------------------------------
+# Request encoding: hostile strings in each input that reaches the body
+# ---------------------------------------------------------------------------
+
+
+# The last entry is an UNJOINED pair: two code points, not U+1F600.
+_SURROGATES = ["\ud800", "\udfff", "\ude00\ud83d", chr(0xD83D) + chr(0xDE00)]
+
+
+@pytest.mark.parametrize("surrogate", _SURROGATES)
+@pytest.mark.parametrize("where", ["legal_text", "legal_section", "numbered_text"])
+def test_analyze_surrogate_in_request_returns_none_and_sends_nothing(localai_http, caplog, where, surrogate):
+    sent = localai_http(lambda request: _ok_response())
+    kwargs: Dict[str, Any] = {"legal_context": [_chunk()]}
+    if where == "legal_text":
+        kwargs["legal_context"] = [_chunk(text=f"t{surrogate}t")]
+    elif where == "legal_section":
+        kwargs["legal_context"] = [_chunk(section=f"Art{surrogate} 1")]
+    else:
+        kwargs["numbered_text"] = f"0001| We sell{surrogate} your data."
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        result = _analyze(**kwargs)
+    assert result is None
+    assert sent == [], "a request that can't be encoded must never be sent"
+    records = _fallback_records(caplog)
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert "UnicodeEncodeError" in message
+    # No document or corpus text in the log, and the log line is encodable.
+    message.encode("utf-8")
+    assert "We sell" not in message and "erasure" not in message
+
+
+def test_analyze_valid_astral_character_is_sent_and_parsed(localai_http):
+    # Control: a real astral character (one code point) is valid UTF-8.
+    sent = localai_http(lambda request: _ok_response())
+    result = _analyze(legal_context=[_chunk(text="emoji \U0001F600 here")])
+    assert result == _GOOD_LLM_CONTENT
+    assert len(sent) == 1
+    assert "\U0001F600".encode("utf-8") in sent[0].content
+
+
+def test_analyze_nul_in_context_is_sent(localai_http):
+    # Control: NUL is valid UTF-8 and JSON-escapable; it isn't an LLM failure.
+    sent = localai_http(lambda request: _ok_response())
+    result = _analyze(legal_context=[_chunk(text="a\x00b")], numbered_text="0001| a\x00b")
+    assert result == _GOOD_LLM_CONTENT
+    assert len(sent) == 1
+    assert b"\\u0000" in sent[0].content
+
+
+# ---------------------------------------------------------------------------
+# The boundary is structural: any non-cancellation exception falls back
+# ---------------------------------------------------------------------------
+
+
+_RAISED = [
+    UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed"),
+    TypeError("Object of type bytes is not JSON serializable"),
+    ValueError("Out of range float values are not JSON compliant"),
+    OverflowError("int too large"),
+    RecursionError("maximum recursion depth exceeded"),
+    RuntimeError("event loop is closed"),
+    KeyError("choices"),
+    AttributeError("'list' object has no attribute 'get'"),
+    _NovelError("never seen before"),
+]
+
+
+@pytest.mark.parametrize("exc", _RAISED, ids=lambda e: type(e).__name__)
+def test_analyze_any_exception_from_the_http_step_returns_none(localai_http, caplog, exc):
+    localai_http(_raise(exc))
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        assert _analyze(legal_context=[_chunk()]) is None
+    records = _fallback_records(caplog)
+    assert len(records) == 1
+    assert type(exc).__name__ in records[0].getMessage()
+    assert records[0].exc_info is None
+
+
+@pytest.mark.parametrize("exc", _RAISED[:3], ids=lambda e: type(e).__name__)
+def test_analyze_any_exception_from_request_serialisation_returns_none(monkeypatch, localai_http, exc):
+    # The serialiser itself raising (not the transport) is part of the step.
+    # The prompt payload holds only strings, so the serialiser is patched;
+    # monkeypatch's default raising=True makes an httpx rename fail loudly.
+    sent = localai_http(lambda request: _ok_response())
+
+    def _bad_dumps(*args: Any, **kwargs: Any) -> str:
+        raise exc
+
+    monkeypatch.setattr(httpx._content, "json_dumps", _bad_dumps)
+    assert _analyze() is None
+    assert sent == []
+
+
+@pytest.mark.parametrize("exc", _RAISED[-3:], ids=lambda e: type(e).__name__)
+def test_analyze_any_exception_from_model_selection_returns_none(monkeypatch, localai_http, caplog, exc):
+    def _raise_on_select(text: str) -> str:
+        raise exc
+
+    monkeypatch.setattr(localai_module, "_select_model", _raise_on_select)
+    sent = localai_http(lambda request: _ok_response())
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        assert _analyze() is None
+    assert sent == []
+    # Grumpy F2-round NIT 4: the fallback log names the stage that failed.
+    records = _fallback_records(caplog)
+    assert len(records) == 1
+    assert records[0].getMessage().startswith("LocalAI model selection failed")
+
+
+def test_analyze_cancellation_propagates(localai_http):
+    # CancelledError is how asyncio stops a task; swallowing it would hang
+    # shutdown and timeouts, so it is the one failure that must not fall back.
+    localai_http(_raise(asyncio.CancelledError()))
+    with pytest.raises(asyncio.CancelledError):
+        _analyze()

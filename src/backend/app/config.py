@@ -5,7 +5,7 @@ import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -59,6 +59,53 @@ def _data_dir() -> Path:
     return target
 
 
+def _parse_min_score(raw: Optional[str]) -> Optional[float]:
+    """Parse LEGAL_KB_MIN_SCORE; unset/blank -> None (relevance floor disabled).
+
+    Issue #91 round-2 (grumpy #5 / security R2-F5): ``float()`` alone accepted
+    ``nan`` (``score >= nan`` is always False) and out-of-range values, which
+    silently turned every retrieval into NO_MATCH. A set value must be a
+    finite cosine in (-1, 1]; anything else raises at import, so a
+    misconfigured floor fails startup instead of disabling the KB quietly.
+    """
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"LEGAL_KB_MIN_SCORE must be a number in (-1, 1], got {raw!r}"
+        ) from exc
+    # Round 8 (security F11): -1 is excluded. Cosine is never below -1, so a
+    # floor of -1 keeps every candidate, exactly like the disabled floor, yet
+    # it would open the legal_grounding_authoritative gate. Leave the
+    # variable unset to disable the floor; a set floor must be in (-1, 1].
+    if not math.isfinite(value) or not -1.0 < value <= 1.0:
+        raise ValueError(
+            f"LEGAL_KB_MIN_SCORE must be a finite number in (-1, 1] "
+            f"(unset disables the floor), got {raw!r}"
+        )
+    return value
+
+
+def _parse_top_k(raw: Optional[str]) -> int:
+    """Parse LEGAL_KB_TOP_K; unset -> 5. Must be an integer >= 1.
+
+    Round 8 (grumpy 6): ``int()`` alone accepted 0 and negatives, which made
+    every retrieval return no chunks (NO_MATCH, "grounded, no relevant law")
+    with the floor disabled. Anything else raises at import, so startup fails.
+    """
+    if raw is None:
+        return 5
+    try:
+        value = int(raw.strip())
+    except ValueError as exc:
+        raise ValueError(f"LEGAL_KB_TOP_K must be an integer >= 1, got {raw!r}") from exc
+    if value < 1:
+        raise ValueError(f"LEGAL_KB_TOP_K must be an integer >= 1, got {raw!r}")
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     # ── Inference backend ────────────────────────────────────────────────────
@@ -110,7 +157,26 @@ class Settings:
             )
         )
     )
-    legal_kb_top_k: int = int(os.getenv("LEGAL_KB_TOP_K", "5"))
+    legal_kb_top_k: int = field(
+        default_factory=lambda: _parse_top_k(os.getenv("LEGAL_KB_TOP_K"))
+    )
+    # Relevance floor (issue #91, grumpy F1; round-2 OWNER RULING 2026-10-07,
+    # "Disabled + loud"): minimum dense cosine similarity (range -1..1, on
+    # L2-normalised vectors) a legal-KB passage must reach to be a retrieval
+    # candidate. Applied before RRF fusion; passages scoring strictly below it
+    # are dropped, and if none survive the retrieval reports NO_MATCH.
+    # Default None = floor DISABLED. The value is uncalibrated (no gold set
+    # yet for the Apertus mean-pooled embeddings, whose cosines sit in a
+    # compressed positive band), and a 0.0 default looked like a filter while
+    # keeping every candidate. With the floor disabled NO_MATCH cannot be
+    # reported, the app logs a WARNING at startup, and
+    # legal_grounding_authoritative is forced False (nobody checked the
+    # passages for relevance). Set LEGAL_KB_MIN_SCORE once calibrated in
+    # G2b/G3; a set value must be finite and in (-1, 1] or startup fails
+    # (-1 keeps every candidate, so it is the disabled floor in disguise).
+    legal_kb_min_score: Optional[float] = field(
+        default_factory=lambda: _parse_min_score(os.getenv("LEGAL_KB_MIN_SCORE"))
+    )
 
     # ── Core settings ────────────────────────────────────────────────────────
     database_url: str = os.getenv(
