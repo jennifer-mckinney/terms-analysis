@@ -453,9 +453,9 @@ def _run_download(tmp: Path, co: _Checkout, collect_runs: list[dict[str, Any]], 
 
 
 @pytest.mark.parametrize("conclusion", ["failure", "cancelled", "timed_out", "success"])
-def test_since_is_the_last_completed_collect_run_of_any_conclusion(tmp_path: Path, conclusion: str) -> None:
-    # Finding 1 (HIGH): a collect that failed after deleting its batches never moved `since`,
-    # so every later run re-downloaded those hand-offs (404, then HANDOFF_STALE) and stayed red.
+def test_since_advances_only_after_a_successful_collect_run(tmp_path: Path, conclusion: str) -> None:
+    # A failed/cancelled collect may not have downloaded or deleted every batch.
+    # Retry its hand-offs; the collector skips batches it already deleted.
     # The newest collect run is this one, still in progress: it must not count either.
     co = _Checkout(tmp_path)
     collect_runs = [
@@ -465,12 +465,12 @@ def test_since_is_the_last_completed_collect_run_of_any_conclusion(tmp_path: Pat
     ]
     submit_runs = [
         _run(10, co.a, _day(0), updated=_day(0, 5)),   # before both collects
-        _run(20, co.a, _day(3), updated=_day(3, 5)),   # handled by collect 800
+        _run(20, co.a, _day(3), updated=_day(3, 5)),   # potentially missed by collect 800
         _run(30, co.a, _day(7), updated=_day(7, 5)),   # new since collect 800
     ]
     proc, ids = _run_download(tmp_path, co, collect_runs, submit_runs)
     assert proc.returncode == 0, proc.stdout[-800:] + proc.stderr[-800:]
-    assert ids == [30], ids
+    assert ids == ([30] if conclusion == "success" else [20, 30]), ids
 
 
 def _trusted_collect(co: _Checkout) -> list[dict[str, Any]]:
@@ -521,9 +521,9 @@ def test_an_untrusted_collect_run_never_moves_since(tmp_path: Path, case: str, c
 
 
 def test_a_trusted_dispatch_collect_run_does_move_since(tmp_path: Path) -> None:
-    # Companion of the table above: a trusted dispatch run counts, whatever its conclusion.
+    # Companion of the table above: a successful trusted dispatch run counts.
     co = _Checkout(tmp_path)
-    dispatch = _run(990, co.b, _day(4), event="workflow_dispatch", conclusion="failure")
+    dispatch = _run(990, co.b, _day(4), event="workflow_dispatch")
     submit_runs = [_run(20, co.a, _day(3)), _run(30, co.b, _day(6))]
     proc, ids = _run_download(tmp_path, co, [dispatch, *_trusted_collect(co)], submit_runs)
     assert proc.returncode == 0, proc.stdout[-800:] + proc.stderr[-800:]
@@ -559,7 +559,7 @@ def test_collector_still_runs_after_a_failed_download() -> None:
 
 def test_both_run_lookups_restrict_the_event_and_check_ancestry() -> None:
     # Findings 1 and 3, static companion of the behavioural tests above: both `gh run list`
-    # calls restrict the event, neither keeps success-only for the collect lookup, and the
+    # calls restrict the event, only successful collect runs move the cutoff, and the
     # step proves each head commit is on the default branch.
     script = str(_download_step()["run"]).replace("\\\n", " ")
     lookups = [line for line in script.splitlines() if "gh run list" in line]
@@ -567,7 +567,7 @@ def test_both_run_lookups_restrict_the_event_and_check_ancestry() -> None:
     for line in lookups:
         assert re.search(r"--event[ =]|\bevent\b", line), line
         if COLLECT_FILE in line:
-            assert not re.search(r"--status[ =]success\b", line), line
+            assert re.search(r"--status[ =]success\b", line), line
     assert "merge-base --is-ancestor" in script
 
 

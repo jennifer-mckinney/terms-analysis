@@ -64,8 +64,8 @@ jobs:
       # successful submit run triggered by schedule or workflow_dispatch whose
       # head commit is on the default branch (a fork PR's "main" is not), never
       # from another workflow's artifact. `since` is the start of the last
-      # COMPLETED trusted collect run of any conclusion (a failed collect has
-      # already deleted what it collected; the running collect is not completed);
+      # successful trusted collect run (a failed/cancelled run may have missed
+      # hand-offs; batches it already deleted are skipped on retrieve);
       # with none, stale_handoff_days back. Every submit run that finished after
       # `since` is downloaded, oldest first. A failed download is reported by
       # run id and the rest still go to the collector; the step then fails.
@@ -83,7 +83,7 @@ jobs:
           }
           # Newest first; a failed lookup fails the step (set -e).
           gh run list --repo "$GITHUB_REPOSITORY" --workflow wiring-audit-collect.yml \
-            --branch "$DEFAULT_BRANCH" --status completed --limit 100 --json createdAt,headSha,event \
+            --branch "$DEFAULT_BRANCH" --status success --limit 100 --json createdAt,headSha,event \
             --jq 'sort_by(.createdAt) | reverse | .[] | select(.event == "schedule" or .event == "workflow_dispatch") | "\(.createdAt) \(.headSha)"' \
             > "$dest/collect-runs.txt"
           since=""
