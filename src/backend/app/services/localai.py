@@ -15,6 +15,10 @@ from .prompts import SYSTEM_PROMPT, build_user_prompt
 
 logger = logging.getLogger("uvicorn.error")
 
+# Hex chars of a SHA-256 kept in log fingerprints. A fixed log-format width
+# (enough to group repeats, too short to be a content oracle), not a tunable.
+_FINGERPRINT_HEX_CHARS = 12
+
 try:
     from langdetect import detect as _langdetect
 
@@ -49,7 +53,9 @@ def _traceback_fingerprint(exc: BaseException) -> Tuple[str, str]:
         parts.append(f"{type(current).__name__}@{frames or '-'}")
         current = current.__cause__ or current.__context__
     chain = " <- ".join(parts)
-    digest = hashlib.sha256(chain.encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha256(chain.encode("utf-8")).hexdigest()[
+        :_FINGERPRINT_HEX_CHARS
+    ]
     return chain, digest
 
 
@@ -181,15 +187,21 @@ class LocalAIClient:
             answer = LLMAnswer.model_validate(json.loads(content))
             return answer.model_dump()
         except httpx.HTTPStatusError as exc:
-            body = exc.response.text
+            # Issue #194: the error body is untrusted (it can echo prompt,
+            # document or legal-passage text), so log only its byte length
+            # and a short SHA-256 prefix, never the text itself.
+            body = exc.response.content
             logger.warning(
-                "LocalAI HTTP %s: %s",
+                "LocalAI HTTP %s: body_bytes=%d sha256=%s",
                 exc.response.status_code,
-                body[:300].replace("\n", "\\n"),
+                len(body),
+                hashlib.sha256(body).hexdigest()[:_FINGERPRINT_HEX_CHARS],
             )
             return None
         except httpx.HTTPError as exc:
-            logger.warning("LocalAI HTTP error: %s", exc)
+            # Issue #194: str(exc) can quote server-controlled bytes; log the
+            # exception type name only.
+            logger.warning("LocalAI HTTP error: %s", type(exc).__name__)
             return None
         except Exception as exc:
             # Round 3: log the cause (type + content-free frame chain + hash)
