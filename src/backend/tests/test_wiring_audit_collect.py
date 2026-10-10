@@ -374,14 +374,17 @@ def test_severity_threshold_comes_from_config(tmp_path: Path) -> None:
     assert marker(_key(BETA, "unwired_entry_point", "beta_main")) in posts[0]["body"]
 
 
-# Round 4 ruling 2: a dedupe marker counts only in an issue opened by a bot (the workflow's
-# github-actions[bot], or any user.type "Bot"). A marker pasted by a human into a labelled
-# issue must not suppress a real finding. (case, issue "user" value or _NO_USER, deduped?)
+# Round 4 ruling 2, narrowed in round 5: a dedupe marker counts only in an issue opened by
+# the workflow's own github-actions[bot] login. A marker pasted by a human, or planted by any
+# other installed app with issues:write (user.type "Bot"), must not suppress a real finding.
+# (case, issue "user" value or _NO_USER, deduped?)
 _NO_USER = object()
 ISSUE_AUTHORS = [
     ("github-actions-bot", {"login": "github-actions[bot]", "type": "Bot"}, True),
     ("github-actions-login-only", {"login": "github-actions[bot]"}, True),
-    ("another-bot-type", {"login": "some-app[bot]", "type": "Bot"}, True),
+    ("other-app-bot-type", {"login": "other-app[bot]", "type": "Bot"}, False),
+    ("bot-type-login-lookalike-zwsp", {"login": "github-actions[bot]\u200b", "type": "Bot"}, False),
+    ("bot-type-login-missing", {"type": "Bot"}, False),
     ("human-user", {"login": "octo-human", "type": "User"}, False),
     ("human-claims-bot-login-lookalike", {"login": "github-\u0430ctions[bot]", "type": "User"}, False),
     ("human-type-not-a-string", {"login": "octo-human", "type": ["Bot"]}, False),
@@ -915,22 +918,24 @@ def _stale_days(prep: Prepared) -> int:
 
 
 STALE_DELETE = [
-    # (case, DELETE status) -- round 4 (refined) ruling 2
-    ("deleted", 200),
-    ("already-gone-404", 404),
-    ("delete-refused-403", 403),
-    ("delete-server-error-500", 500),
+    # (case, DELETE status, run outcome) -- round 4 (refined) ruling 2, round 5 ruling 1
+    ("deleted", 200, "HANDOFF_STALE"),
+    ("already-gone-404", 404, "ALREADY_COLLECTED"),
+    ("delete-refused-403", 403, "HANDOFF_STALE"),
+    ("delete-server-error-500", 500, "HANDOFF_STALE"),
 ]
 
 
 @pytest.mark.parametrize("override", [None, 2], ids=["shipped-days", "config-override-2"])
-@pytest.mark.parametrize(("case", "status"), STALE_DELETE, ids=[c[0] for c in STALE_DELETE])
+@pytest.mark.parametrize(("case", "status", "outcome"), STALE_DELETE, ids=[c[0] for c in STALE_DELETE])
 def test_stale_handoff_is_refused_but_its_batch_is_still_deleted(tmp_path: Path, clock: Any, override: int | None,
-                                                                  case: str, status: int) -> None:
+                                                                  case: str, status: int, outcome: str) -> None:
     # Round 4 (refined) ruling 2, condition 8: a stale hand-off is not checked or filed, but
-    # its batch DELETE is still attempted so the prompts leave retention. A 404 there is
-    # fine (logged, not an error); any other failure is reported as DELETE_FAILED. The run
-    # still exits HANDOFF_STALE (the verdict outranks the delete, as on every other path).
+    # its batch DELETE is still attempted so the prompts leave retention. Any failure other
+    # than 404 is reported as DELETE_FAILED and the run exits HANDOFF_STALE.
+    # Round 5 ruling 1 (HIGH): a 404 on that DELETE means an earlier collect already took the
+    # hand-off and deleted its batch. It is ALREADY_COLLECTED (logged, no ::error), never
+    # HANDOFF_STALE; alone in the run it did nothing, so the run exits ALREADY_COLLECTED (F5).
     now = _real_clock(clock)
     prep = _prepare(tmp_path) if override is None else _prepare(tmp_path, stale_handoff_days=override)
     sim = Sim(prep)
@@ -940,8 +945,13 @@ def test_stale_handoff_is_refused_but_its_batch_is_still_deleted(tmp_path: Path,
         sim.fake.route("DELETE", BATCH, lambda c: (status, jbytes(body)))
     stale = _handoff(prep, "run-0900", created_at=_stamp(now - _stale_days(prep) * 86400 - 3600))
     collect, rc, out = _collect(sim, artifacts=[stale])
-    assert rc == exit_code(collect, "HANDOFF_STALE"), (case, out[-800:])
-    assert "::error title=wiring-audit::HANDOFF_STALE" in out and BATCH_ID in out
+    assert rc == exit_code(collect, outcome), (case, out[-800:])
+    if outcome == "HANDOFF_STALE":
+        assert "::error title=wiring-audit::HANDOFF_STALE" in out and BATCH_ID in out
+    else:
+        assert "HANDOFF_STALE" not in out, (case, out[-800:])
+        notes = [line for line in out.splitlines() if "ALREADY_COLLECTED" in line and BATCH_ID in line]
+        assert notes and not [line for line in notes if line.startswith("::error")], (case, out[-800:])
     # Not re-collected: no retrieve, no results, nothing filed; only the batch DELETE.
     assert {(c.method, c.path) for c in sim.fake.calls} == {("DELETE", f"/v1/messages/batches/{BATCH_ID}")}, case
     if status in (200, 404):
@@ -982,6 +992,90 @@ def test_stale_handoff_does_not_stop_the_fresh_one(tmp_path: Path, clock: Any) -
     assert sorted(c.path for c in sim.deletes()) == sorted(
         f"/v1/messages/batches/{b}" for b in (BATCH_ID, SECOND_BATCH_ID))
     assert len(sim.issue_posts()) == 1
+
+
+def _cron_offset_seconds(cron: str) -> int:
+    """Seconds from Monday 00:00 for a weekly 'minute hour * * weekday' cron (the shipped form)."""
+    m = re.fullmatch(r"(\d+) (\d+) \* \* (\d)", cron)
+    assert m, f"schedule {cron!r} is not a weekly 'm h * * d' cron; this scenario needs updating"
+    minute, hour, weekday = (int(g) for g in m.groups())
+    return ((weekday - 1) % 7) * 86400 + hour * 3600 + minute * 60
+
+
+WEEK_BATCH_IDS = ["msgbatch_01WEEKONEHANDOFF", "msgbatch_01WEEKTWOHANDOFF", "msgbatch_01WEEKTHREEHANDOFF"]
+
+
+def test_last_weeks_collected_handoff_is_already_collected_in_later_weeks_not_stale(
+        tmp_path: Path, clock: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Round 5 ruling 1 (HIGH): the download step lists every trusted submit run within
+    # lookback_days, so each week re-lists the hand-offs earlier weeks already collected.
+    # At the next scheduled collect, last week's hand-off is older than stale_handoff_days and
+    # its batch is gone (DELETE 404). It must be logged ALREADY_COLLECTED, not fail the run as
+    # HANDOFF_STALE; this week's fresh hand-off is collected and the run exits 0, every week.
+    cfg = real_config()
+    week = 7 * 86400
+    gap = _cron_offset_seconds(cfg["schedule"]["collect"]) - _cron_offset_seconds(cfg["schedule"]["submit"])
+    gap %= week
+    stale, lookback = cfg["stale_handoff_days"] * 86400, cfg["lookback_days"] * 86400
+    # Preconditions of the scenario, from the shipped config: this week's hand-off is fresh,
+    # last week's is stale, and the listing still reaches back over every week simulated.
+    assert gap < stale < week + gap <= (len(WEEK_BATCH_IDS) - 1) * week + gap < lookback, (gap, stale, lookback)
+    start = _real_clock(clock) - len(WEEK_BATCH_IDS) * week  # every timestamp stays in the past
+    prep = _prepare(tmp_path)
+    sim = Sim(prep)
+    results: dict[str, list[dict[str, Any]]] = {}
+    for n, batch_id in enumerate(WEEK_BATCH_IDS):
+        sim.module_output(ALPHA, [_finding(severity="HIGH", symbol=f"week_{n}_fn")])
+        results[batch_id] = sim.result_lines()
+    _route_per_batch(sim, {b: (lambda b=b: results[b]) for b in WEEK_BATCH_IDS})
+    gone: set[str] = set()  # batches a collect run deleted: retrieve and DELETE answer 404
+    n_ids = len(prep.all_ids)
+
+    def retrieve(call: Call) -> tuple[int, bytes]:
+        batch_id = call.path.rsplit("/", 1)[1]
+        if batch_id in gone:
+            return 404, jbytes(NOT_FOUND)
+        return 200, jbytes(batch_object("ended", {"succeeded": n_ids}, batch_id=batch_id))
+
+    def delete(call: Call) -> tuple[int, bytes]:
+        batch_id = call.path.rsplit("/", 1)[1]
+        if batch_id in gone:
+            return 404, jbytes(NOT_FOUND)
+        gone.add(batch_id)
+        return 200, jbytes({"id": batch_id, "type": "message_batch_deleted"})
+
+    sim.fake.route("GET", BATCH, retrieve)
+    sim.fake.route("DELETE", BATCH, delete)
+    handoffs: list[tuple[float, Path]] = []
+    for n, batch_id in enumerate(WEEK_BATCH_IDS):
+        submitted = start + n * week
+        handoffs.append((submitted, _handoff(prep, f"run-week-{n}", batch_id=batch_id, created_at=_stamp(submitted))))
+        now = submitted + gap
+        clock.now = now
+        collect = require("collect")
+        monkeypatch.setattr(collect, "utc_now", lambda now=now: dt.datetime.fromtimestamp(now, dt.timezone.utc))
+        listed = [path for created, path in handoffs if now - created <= lookback]  # oldest first
+        assert len(listed) == n + 1
+        before, posted_before = len(sim.fake.calls), len(sim.issue_posts())
+        argv = ["--config", str(prep.cfg_path)]
+        for path in listed:
+            argv += ["--artifact", str(path)]
+        rc, out = run_main(collect, argv, http=sim.fake, env=audit_env(prep.tmp, GITHUB_TOKEN=FAKE_GH_TOKEN))
+        week_calls = sim.fake.calls[before:]
+        assert rc == exit_code(collect, "OK"), (n, out[-1200:])
+        assert "HANDOFF_STALE" not in out and "::error" not in out, (n, out[-1200:])
+        for old_id in WEEK_BATCH_IDS[:n]:  # collected in an earlier week: only its DELETE, logged as such
+            assert [(c.method, c.path) for c in week_calls if old_id in c.url] == [
+                ("DELETE", f"/v1/messages/batches/{old_id}")], (n, old_id)
+            notes = [line for line in out.splitlines() if "ALREADY_COLLECTED" in line and old_id in line]
+            assert notes, (n, old_id, out[-1200:])
+        assert [c.path for c in week_calls if c.method == "GET" and c.path.endswith("/results")] == [
+            f"/v1/messages/batches/{batch_id}/results"], n
+        new_posts = sim.issue_posts()[posted_before:]
+        assert len(new_posts) == 1, (n, [p["title"] for p in new_posts])
+        assert marker(_key(ALPHA, "zero_caller_public", f"week_{n}_fn")) in new_posts[0]["body"]
+        assert batch_id in gone
+    assert sim.fake.unexpected == []
 
 
 @pytest.mark.parametrize("override", [None, 2], ids=["shipped-days", "config-override-stale+2"])
