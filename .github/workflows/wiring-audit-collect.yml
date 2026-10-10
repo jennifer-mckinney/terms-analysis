@@ -1,8 +1,8 @@
 name: Wiring audit (collect)
 
 # Weekly "is it wired" audit, step 2 of 2 (card #224, ADR 0002). A day after
-# wiring-audit-submit.yml, downloads the batch hand-off of every submit run it
-# has not collected yet (default branch, oldest first), checks each batch against the
+# wiring-audit-submit.yml, downloads the batch hand-off of every trusted submit
+# run created within lookback_days (oldest first), checks each batch against the
 # result contract (ended, every request present once and succeeded, end_turn,
 # schema-valid output, the canary's defect reported), files the findings as
 # issues through the REST API, logs the actual cost, and deletes the batch on
@@ -63,12 +63,14 @@ jobs:
       # Attack sketch T10 and PR #282 review: a hand-off comes only from a
       # successful submit run triggered by schedule or workflow_dispatch whose
       # head commit is on the default branch (a fork PR's "main" is not), never
-      # from another workflow's artifact. `since` is the start of the last
-      # successful trusted collect run (a failed/cancelled run may have missed
-      # hand-offs; batches it already deleted are skipped on retrieve);
-      # with none, stale_handoff_days back. Every submit run that finished after
-      # `since` is downloaded, oldest first. A failed download is reported by
-      # run id and the rest still go to the collector; the step then fails.
+      # from another workflow's artifact. There is no "since the last collect":
+      # every such run CREATED within lookback_days (config.json; the vendor
+      # keeps results 29 days) is listed, oldest first, every time. A batch an
+      # earlier run already deleted comes back 404 and collect.py skips it as
+      # ALREADY_COLLECTED; one older than stale_handoff_days is refused there as
+      # HANDOFF_STALE and deleted. A failed download is reported by run id, the
+      # rest still go to the collector, the step fails, and the next run
+      # retries it.
       - name: Download every uncollected submit hand-off
         env:
           GH_TOKEN: ${{ github.token }}
@@ -81,25 +83,19 @@ jobs:
           trusted_sha() {
             [[ "$1" =~ ^[0-9a-f]{40}$ ]] && git merge-base --is-ancestor "$1" HEAD 2>/dev/null
           }
-          # Newest first; a failed lookup fails the step (set -e).
-          gh run list --repo "$GITHUB_REPOSITORY" --workflow wiring-audit-collect.yml \
-            --branch "$DEFAULT_BRANCH" --status success --limit 100 --json createdAt,headSha,event \
-            --jq 'sort_by(.createdAt) | reverse | .[] | select(.event == "schedule" or .event == "workflow_dispatch") | "\(.createdAt) \(.headSha)"' \
-            > "$dest/collect-runs.txt"
-          since=""
-          while read -r created sha; do
-            if trusted_sha "$sha"; then since="$created"; break; fi
-          done < "$dest/collect-runs.txt"
-          if [ -z "$since" ]; then
-            days="$(jq -r '.stale_handoff_days' scripts/audit/config.json)"
-            [[ "$days" =~ ^[0-9]+$ ]] || { echo "::error title=wiring-audit::CONFIG: stale_handoff_days is not a whole number"; exit 1; }
-            since="$(jq -rn --argjson d "$days" 'now - $d * 86400 | strftime("%Y-%m-%dT%H:%M:%SZ")')"
+          # The window, validated as the config loader validates it (whole days >= 1,
+          # lookback_days >= stale_handoff_days); anything else fails closed.
+          if ! days="$(jq -er 'if (.lookback_days | type) == "number" and (.stale_handoff_days | type) == "number"
+                and .lookback_days == (.lookback_days | floor) and .lookback_days >= 1
+                and .lookback_days >= .stale_handoff_days then .lookback_days else error("bad") end' \
+                scripts/audit/config.json)"; then
+            echo "::error title=wiring-audit::CONFIG: lookback_days in scripts/audit/config.json must be a whole number of days, at least 1 and at least stale_handoff_days"
+            exit 1
           fi
-          [[ "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$ ]] || { echo "::error title=wiring-audit::CONFIG: unexpected run timestamp"; exit 1; }
-          echo "wiring-audit: collecting submit runs that finished after ${since}"
-          gh run list --repo "$GITHUB_REPOSITORY" --workflow wiring-audit-submit.yml \
-            --branch "$DEFAULT_BRANCH" --status success --limit 100 --json databaseId,createdAt,updatedAt,headSha,event \
-            | jq -r --arg since "$since" 'map(select((.event == "schedule" or .event == "workflow_dispatch") and .updatedAt > $since)) | sort_by(.createdAt) | .[] | "\(.databaseId) \(.headSha)"' \
+          cutoff="$(jq -rn --argjson d "$days" 'now - $d * 86400 | strftime("%Y-%m-%dT%H:%M:%SZ")')"
+          echo "wiring-audit: listing trusted successful submit runs created since ${cutoff} (${days} days)"
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow wiring-audit-submit.yml --branch "$DEFAULT_BRANCH" --status success --created ">=${cutoff}" --limit 500 --json databaseId,createdAt,headSha,event \
+            | jq -r --arg cutoff "$cutoff" 'map(select((.event == "schedule" or .event == "workflow_dispatch") and .createdAt >= $cutoff)) | sort_by(.createdAt) | .[] | "\(.databaseId) \(.headSha)"' \
             > "$dest/runs.txt"
           failed=0
           while read -r run_id sha; do
@@ -110,7 +106,7 @@ jobs:
             fi
             if ! gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "wiring-audit-batch-${run_id}" \
                 --dir "$dest/$run_id"; then
-              echo "::error title=wiring-audit::DOWNLOAD_FAILED: the hand-off of submit run ${run_id} could not be downloaded; its batch is not collected by this run"
+              echo "::error title=wiring-audit::DOWNLOAD_FAILED: the hand-off of submit run ${run_id} could not be downloaded; it will be retried by the next collect run"
               failed=1
               continue
             fi
