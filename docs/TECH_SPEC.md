@@ -500,9 +500,16 @@ Anchor: [PRD §F3.3 Evidence Binding]. `context_before` / `context_after` are sh
 
 Same fields as `AnalyzeRequest` scoped to URL / file / batch inputs. `AnalyzeBatchRequest.items: List[BatchItem]` with `min_items=1`; `BatchItem` has `url?`, `name?`, `doc_type?` [`schemas.py:361`].
 
-#### 5.1.5 `AnalysisPayload` [`schemas.py:220`]
+#### 5.1.5 `AnalysisPayload` [`schemas.py:364`]
 
-25 fields including: `id`, `name`, `doc_type`, `industry`, `source_url`, `document_text`, `line_offsets`, `status`, `review_required`, `confidence`, `risk_score`, `grade`, `created_at`, `findings`, `summary`, `analysis_mode`, `estimated_time`, `action_readiness` (Literal["Go","Review","Stop"]), `completeness` (float [0.0, 1.0]), `context`, `jurisdictions`, `verdict_headline`, `verdict_label`, `top_by_domain` (dict[str, list[Finding]]), `action_items` (List[str]).
+28 fields including: `id`, `name`, `doc_type`, `industry`, `source_url`, `document_text`, `line_offsets`, `status`, `review_required`, `confidence`, `risk_score`, `grade`, `created_at`, `findings`, `summary`, `analysis_mode`, `estimated_time`, `action_readiness` (Literal["Go","Review","Stop"]), `completeness` (float [0.0, 1.0]), `context`, `jurisdictions`, `verdict_headline`, `verdict_label`, `top_by_domain` (dict[str, list[Finding]]), `action_items` (List[str]), `legal_grounding` (bool, default false), `legal_grounding_authoritative` (bool, default false), `legal_context` (List[LegalCitation], default `[]`).
+
+**Issue #91 legal-grounding fields:**
+
+- `legal_grounding`: true only when the legal-KB index loaded and retrieval ran against it. It reflects retrieval, not legal authority. It stays true when every candidate scored below `LEGAL_KB_MIN_SCORE` (`legal_context` is then `[]`) and when every passage is placeholder text. It is false when the index is missing or empty, retrieval errored (including a zero-norm query embedding or a KB result with no `RetrievalStatus`), or the analysis ran in quick mode. In those cases `legal_context` is `[]` and no KB passage reached the LLM prompt.
+- `legal_grounding_authoritative`: true only when `legal_grounding` is true, the relevance floor `LEGAL_KB_MIN_SCORE` is set, and at least one citation both has an allow-listed status (`schemas.AUTHORITATIVE_STATUSES` = `{"in_force"}`, from the legal-corpus-ingester `status_rules.resolve_status` vocabulary) and is a citation with a known, requested jurisdiction (any known one when none was requested) (none requested = `jurisdictions` is empty); known means in `schemas.KNOWN_JURISDICTIONS`, derived from the `Jurisdiction` Literal. It fails closed: a null, unknown or misspelled status, `not_yet_in_force` and `placeholder` are never authoritative, and neither is a passage with a null, blank or unrecognised jurisdiction or one from another jurisdiction, which is what the full-corpus fallback (§ legal-KB retrieval step 2) returns. The flag and the prompt labels read the same table, `schemas.passage_label_keys` / `PASSAGE_LABELS`. Clients must check this field, not `legal_grounding`, before presenting an analysis as grounded in law. The shipped corpus is entirely placeholder and the floor is unset by default, so this is false today.
+- `legal_context` / `LegalCitation` [`schemas.py:331`]: `{jurisdiction?, law?, section?, status?, score?}`. These are the KB passages supplied to the LLM prompt, metadata only with no passage text. `status` is always stripped and lower-cased (`"placeholder"` marks synthetic text). `score` is the RRF fusion score: it is rank-based, not a probability.
+- Relevance floor: `LEGAL_KB_MIN_SCORE` is the minimum dense cosine a passage needs to be a candidate. If no candidate reaches it, the result is NO_MATCH (grounded, empty context). It is unset by default (floor disabled, uncalibrated until G2b/G3): NO_MATCH cannot be reported without a floor, a startup WARNING says so, and `legal_grounding_authoritative` is forced false. A set value must be finite and in (-1, 1] or the app fails at startup; -1 is rejected because it keeps every candidate (the disabled floor in disguise).
 
 **Post-PR #34 additions [drift from PRD §Analysis Response]:** `action_readiness`, `completeness`, `context`, `jurisdictions`, `verdict_headline`, `verdict_label`, `top_by_domain`, `action_items` — none are described in PRD API contract. **OPEN QUESTION:** update PRD API contract to reflect shipped payload.
 
@@ -739,7 +746,7 @@ Includes:
 - Requested jurisdictions.
 - JSON schema for `summary`, `overall_confidence`, `findings[]` with each finding carrying `category`, `severity`, `confidence`, `excerpt`, `explanation`, `jurisdictions`, `impact`, `likelihood`, `safeguard_score`, `evidence: {line_start, line_end, legal_basis}`.
 - Rules block: "Every finding must cite line numbers", "must include at least one legal_basis citation", "Only include issues supported by the text", "Keep categories short", "If there are no issues, return an empty findings list", "Estimate impact/likelihood/safeguard_score (0-5: mitigations visible in the document for this specific finding)".
-- Optional legal-KB `legal_context` block: each retrieved passage prefixed by `[<jurisdiction> <section>]`; PLACEHOLDER-status passages get an inline `[UNVERIFIED PLACEHOLDER — not real statute text, do not cite as authoritative]` warning [`prompts.py:23`; LIB-LEGAL §RAG Architecture].
+- Optional legal-KB `legal_context` block: each retrieved passage is one header line `[<jurisdiction> <section>]` (the canonical `schemas.KNOWN_JURISDICTIONS` code, or `Law` for a null, blank or unrecognised jurisdiction, never the raw value; the section through `schemas.normalise_section_title` with whitespace collapsed, so the header holds no `[`, `]` or line break), followed by every line of its text behind the fixed body prefix `    > ` (`prompts.PASSAGE_BODY_PREFIX`; split on every `str.splitlines` boundary), so no text line can start a header. Only `prompts.render_passage_header` emits header lines. Each passage that is not authoritative law for the analysis has its `schemas.PASSAGE_LABELS` label(s) first on its header line: UNVERIFIED PLACEHOLDER, NOT YET IN FORCE, UNVERIFIED PROVENANCE, UNKNOWN JURISDICTION, OUT OF JURISDICTION [`prompts.py` INVARIANT comment, `schemas.passage_label_keys`; LIB-LEGAL §RAG Architecture].
 - Rule-based detections included verbatim for context.
 - Line-numbered document text [`analyzer.py:148` `_with_line_numbers` — 4-digit zero-padded prefix].
 
@@ -748,6 +755,8 @@ Includes:
 Per-finding fields expected: `category` (str), `severity` (Low/Medium/High/Critical), `confidence` (float), `excerpt` (str), `explanation` (str), `jurisdictions` (List[str]), `impact` (int 1-5), `likelihood` (int 1-5), `safeguard_score` (int 0-5), `evidence.line_start`, `evidence.line_end`, `evidence.legal_basis[]`. Parsed into `Finding` [`analyzer.py:497`]; invalid entries silently skipped.
 
 Payload-level: `summary` (2-4 sentence string) and `overall_confidence` (float) [`analyzer.py:493`].
+
+HR5 boundary: `LocalAIClient.analyze()` has one boundary around the whole LLM step (model selection, prompt build, request encoding, the HTTP call, response parsing and validation): any `Exception` returns `None` (rules-only) and logs the stage plus a content-free fingerprint; cancellation still propagates. The parsed answer is validated against `schemas.LLMAnswer` inside that boundary: a JSON object whose `findings` is a list, `summary` a string or null and `overall_confidence` a finite number or null (no NaN/Infinity), with every string valid UTF-8. Any mismatch rejects the whole answer, so `analyze_text` never reads an unvalidated field.
 
 ### 7.5 Merge algorithm
 
@@ -1137,7 +1146,7 @@ Rationale for retirement over parity work:
 - Verified subdirectories present [`ls data/legal_corpus/`]: `canada/`, `eu/`, `us-ca/`, `us-co/`, `us-ct/`, `us-ny/`.
 - File format: leading `# Key: Value` metadata lines, `## Section N — Title` chunk headers [`legal_kb.py:_parse_corpus_file`].
 - Content: currently placeholder text pending real statute ingestion [.claude/CLAUDE.md §Project Map; BRD §Executive Summary; LIB-LEGAL §RAG Architecture note].
-- PLACEHOLDER status propagates via `PLACEHOLDER_STATUS = "placeholder"` [`legal_kb.py:47`] into prompt warnings [`prompts.py:23`].
+- PLACEHOLDER status propagates via `schemas.PLACEHOLDER_STATUS = "placeholder"` [`schemas.py:234`] and `schemas.PASSAGE_LABELS` into prompt labels [`prompts.py:23`].
 
 ### 13.3 Watchlist storage
 
@@ -1175,19 +1184,19 @@ Meta-origin dependency, rejected [LIB-LEGAL §REJECTED Tools; LIB-STACK §Reject
 
 ### 14.3 Retrieval flow
 
-`get_legal_kb().retrieve(query, client, jurisdictions)` [`legal_kb.py`; wired into `analyzer.py:477`]:
+`get_legal_kb().retrieve(query, client, jurisdictions)` [`legal_kb.py`; wired into `analyzer.py:678` via `_retrieve_legal_context`]:
 
-1. Build query text: `" ".join(jurisdictions) + " " + cleaned[:500]` [`analyzer.py:476`].
-2. Filter corpus to jurisdiction-matching chunks; fall back to full corpus if no matches [LIB-ARCH §Failure Modes].
-3. BM25 scores over filtered pool.
-4. Dense embeddings query + cosine similarity over filtered pool.
-5. RRF fusion with `k=60`.
-6. Return top `LEGAL_KB_TOP_K` chunks (default 5, `config.py:74`) as dicts with `jurisdiction`, `section`, `text`, `status` keys.
-7. Failure paths return `[]` — never raise into `analyze_text`.
+1. Build query text: `" ".join(jurisdictions) + " " + cleaned[:500]` [`analyzer.py:677`].
+2. Filter corpus to jurisdiction-matching chunks (codes compared stripped and lower-cased, `schemas.normalise_jurisdiction`); fall back to full corpus if no matches [LIB-ARCH §Failure Modes]. Fallback passages are, by construction, out of jurisdiction: the prompt labels them OUT OF JURISDICTION and they never make the analysis authoritative.
+3. Dense embeddings query + cosine similarity over filtered pool. A missing query vector, a zero-norm query vector (broken embedder) or a dimension mismatch is an error.
+4. If `LEGAL_KB_MIN_SCORE` is set, drop candidates whose cosine is below it; if none survive, the result is NO_MATCH. If it is unset (the default, owner ruling 2026-10-07), the floor is disabled: every candidate is kept, NO_MATCH cannot be reported, a WARNING is logged at startup, and `legal_grounding_authoritative` is always false.
+5. BM25 scores over the surviving pool, then RRF fusion with `k=60`.
+6. Return top `LEGAL_KB_TOP_K` chunks (default 5; an integer >= 1, else startup fails, and a `top_k` argument < 1 is an ERROR result). Each is a fresh dict holding every corpus metadata key of the chunk (`text`, `section`, `jurisdiction`, and file meta such as `law`, `source`, `status`, `effective date` when present, keys lower-cased) plus `score` (the RRF fusion score).
+7. `retrieve()` never raises into `analyze_text`. It returns a frozen `RetrievalResult(chunks, status)` whose `RetrievalStatus` is OK, NO_MATCH (both grounded), NO_INDEX (index missing or empty) or ERROR (both ungrounded). The analyzer treats any non-`RetrievalResult` return as ungrounded (fail closed). See §5.1.5 for the resulting `legal_grounding` / `legal_grounding_authoritative` fields.
 
 ### 14.4 Corpus placeholder status
 
-Chunks marked `# Status: PLACEHOLDER` in the corpus file metadata carry `status="placeholder"` [`legal_kb.py:47`]. `prompts.py::build_user_prompt` [`prompts.py:23`] wraps such passages in `[UNVERIFIED PLACEHOLDER — not real statute text, do not cite as authoritative]` and adds a system-prompt directive to never cite placeholder text as legal basis. This preserves the ability to demonstrate the RAG pipeline while the real corpus is under ingestion (see issue #6).
+Chunks marked `# Status: PLACEHOLDER` in the corpus file metadata carry `status="placeholder"` (`schemas.PLACEHOLDER_STATUS`, compared after `schemas.normalise_corpus_status`) [`schemas.py:234`]. `prompts.py::build_user_prompt` [`prompts.py:23`] labels EVERY passage that is not authoritative law for the analysis, from `schemas.PASSAGE_LABELS`: `[UNVERIFIED PLACEHOLDER — not real statute text, do not cite as authoritative]`, `[NOT YET IN FORCE — ...]`, `[UNVERIFIED PROVENANCE — ...]` (null or unknown status), `[UNKNOWN JURISDICTION — ...]` (a null, blank or unrecognised jurisdiction, in every mode) and `[OUT OF JURISDICTION — ...]`, and its NEVER-cite directive names every marker. Index metadata whose `jurisdiction`, `law`, `section` or `status` is not a string or null (or whose `text` is not a string, or whose `section`, after `schemas.normalise_section_title` maps `[`/`]` to `(`/`)` and strips format characters, holds a control / line-break character, or whose string keys or values are not valid UTF-8, such as a lone surrogate; undecodable bytes count too) is rejected at load as `LegalKBIndexCorruptError` (ERROR, ungrounded), never a 500; the same `_validate_chunks` runs at build, so such a corpus fails the build and writes no index. This preserves the ability to demonstrate the RAG pipeline while the real corpus is under ingestion (see issue #6).
 
 ---
 
@@ -1272,7 +1281,8 @@ Verified against `src/backend/app/config.py` and `.env.example`.
 | `LEGAL_CORPUS_DIR` | `data/legal_corpus` | Corpus source dir | filesystem path |
 | `LEGAL_KB_INDEX_PATH` | `data/legal_kb.npy` | Numpy index file | filesystem path |
 | `LEGAL_KB_METADATA_PATH` | `data/legal_kb_metadata.json` | Chunk metadata | filesystem path |
-| `LEGAL_KB_TOP_K` | `5` | Retrieval top-k | int ≥ 1 |
+| `LEGAL_KB_TOP_K` | `5` | Retrieval top-k | int ≥ 1; anything else fails startup |
+| `LEGAL_KB_MIN_SCORE` | unset (floor disabled) | Minimum dense cosine for a retrieval candidate; all-below = NO_MATCH. Unset = no floor: NO_MATCH unreachable, startup WARNING, never authoritative. UNCALIBRATED until G2b/G3 | finite float in (-1, 1]; anything else (including -1) fails startup |
 | `DATABASE_URL` | `sqlite:///{data_dir}/terms_analysis.db` | SQLite URL | SQLAlchemy URL |
 | `REVIEW_THRESHOLD` | `0.80` | HITL confidence gate | float [0, 1] |
 | `LM_REQUEST_TIMEOUT_S` | `60` | LocalAI request timeout (seconds) | float > 0 |

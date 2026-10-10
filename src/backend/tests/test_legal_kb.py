@@ -9,7 +9,13 @@ import pytest
 import sys
 
 from app.config import settings
-from app.services.legal_kb import LegalKnowledgeBase, _main, _parse_corpus_file
+from app.services.legal_kb import (
+    LegalKBIndexCorruptError,
+    LegalKnowledgeBase,
+    RetrievalStatus,
+    _main,
+    _parse_corpus_file,
+)
 from app.services.localai import LocalAIClient
 
 
@@ -80,10 +86,11 @@ def test_parse_corpus_file_without_sections_is_single_chunk(tmp_path):
     assert chunks[0]["section"] is None
 
 
-def test_retrieve_returns_empty_when_no_index_built(patched_paths, toy_client):
+def test_retrieve_is_no_index_when_no_index_built(patched_paths, toy_client):
     kb = LegalKnowledgeBase()
     result = asyncio.run(kb.retrieve("erasure of personal data", toy_client))
-    assert result == []
+    assert result.chunks == ()
+    assert result.status is RetrievalStatus.NO_INDEX
 
 
 def test_build_and_retrieve_ranks_relevant_chunk_first(patched_paths, toy_client):
@@ -103,9 +110,10 @@ def test_build_and_retrieve_ranks_relevant_chunk_first(patched_paths, toy_client
     assert count == 2
     assert kb.chunk_count == 2
 
-    results = asyncio.run(kb.retrieve("right to erasure", toy_client, top_k=2))
-    assert len(results) >= 1
-    assert "erasure" in results[0]["text"].lower()
+    result = asyncio.run(kb.retrieve("right to erasure", toy_client, top_k=2))
+    assert result.status is RetrievalStatus.OK
+    assert len(result.chunks) >= 1
+    assert "erasure" in result.chunks[0]["text"].lower()
 
 
 def test_retrieve_filters_by_jurisdiction(patched_paths, toy_client):
@@ -128,7 +136,7 @@ def test_retrieve_filters_by_jurisdiction(patched_paths, toy_client):
 
     results = asyncio.run(
         kb.retrieve("erasure rights", toy_client, jurisdictions=["US-CA"], top_k=5)
-    )
+    ).chunks
     assert results
     assert all(r["jurisdiction"] == "US-CA" for r in results)
 
@@ -150,9 +158,10 @@ def test_build_persists_index_and_metadata_to_disk(patched_paths, toy_client):
 
     # A fresh instance should be able to load the persisted index/metadata.
     reloaded = LegalKnowledgeBase()
-    results = asyncio.run(reloaded.retrieve("erasure rights", toy_client))
+    result = asyncio.run(reloaded.retrieve("erasure rights", toy_client))
     assert reloaded.chunk_count == 1
-    assert results
+    assert result.status is RetrievalStatus.OK
+    assert result.chunks
 
 
 def test_build_returns_zero_for_empty_corpus_dir(patched_paths, toy_client):
@@ -162,7 +171,7 @@ def test_build_returns_zero_for_empty_corpus_dir(patched_paths, toy_client):
     assert kb.chunk_count == 0
 
 
-def test_retrieve_returns_empty_when_embedding_endpoint_unreachable(
+def test_retrieve_is_error_when_embedding_endpoint_unreachable(
     patched_paths, monkeypatch
 ):
     corpus_dir, _, _ = patched_paths
@@ -183,7 +192,8 @@ def test_retrieve_returns_empty_when_embedding_endpoint_unreachable(
 
     monkeypatch.setattr(LocalAIClient, "embed", broken_embed)
     result = asyncio.run(kb.retrieve("anything", LocalAIClient()))
-    assert result == []
+    assert result.chunks == ()
+    assert result.status is RetrievalStatus.ERROR
 
 
 def test_retrieve_filters_by_jurisdiction_using_schema_codes(patched_paths, toy_client):
@@ -211,13 +221,13 @@ def test_retrieve_filters_by_jurisdiction_using_schema_codes(patched_paths, toy_
 
     results = asyncio.run(
         kb.retrieve("erasure rights", toy_client, jurisdictions=["GDPR"], top_k=5)
-    )
+    ).chunks
     assert results
     assert all(r["jurisdiction"] == "GDPR" for r in results)
 
     results = asyncio.run(
         kb.retrieve("retention", toy_client, jurisdictions=["PIPEDA"], top_k=5)
-    )
+    ).chunks
     assert results
     assert all(r["jurisdiction"] == "PIPEDA" for r in results)
 
@@ -238,12 +248,14 @@ def test_retrieve_falls_back_to_full_corpus_when_jurisdiction_pool_empty(
     with caplog.at_level("WARNING"):
         results = asyncio.run(
             kb.retrieve("erasure", toy_client, jurisdictions=["US-TX"], top_k=5)
-        )
+        ).chunks
     assert results
     assert any("US-TX" in r.message for r in caplog.records)
 
 
-def test_retrieve_returns_empty_on_embedding_dimension_mismatch(patched_paths, toy_client):
+def test_retrieve_embedding_dimension_mismatch_is_error(patched_paths, toy_client):
+    # Grumpy F8: list equality ignored .status, so the old ``result == []``
+    # would also have passed for a wrong NO_MATCH. Assert the status itself.
     corpus_dir, _, _ = patched_paths
     _write_corpus_file(
         corpus_dir, "eu", "gdpr", "## Article 17 — Erasure\nErasure rights text.\n"
@@ -256,21 +268,27 @@ def test_retrieve_returns_empty_on_embedding_dimension_mismatch(patched_paths, t
             return [1.0, 0.0, 0.0, 0.0, 0.0]  # 5 dims vs. the 3-dim index built above
 
     result = asyncio.run(kb.retrieve("erasure", WrongDimClient()))
-    assert result == []
+    assert result.chunks == ()
+    assert result.status is RetrievalStatus.ERROR
+    assert result.grounded is False
 
 
-def test_load_returns_false_and_retrieve_returns_empty_on_corrupted_index(
+def test_load_raises_and_retrieve_reports_error_on_corrupted_index(
     patched_paths, toy_client
 ):
+    # Issue #91: _load() now raises a typed error instead of returning False,
+    # and retrieve() reports ERROR (not a silent, status-less []).
     _, index_path, metadata_path = patched_paths
     index_path.parent.mkdir(parents=True, exist_ok=True)
     index_path.write_bytes(b"not a valid numpy file")
     metadata_path.write_text("also not valid json", encoding="utf-8")
 
     kb = LegalKnowledgeBase()
-    assert kb._load() is False
+    with pytest.raises(LegalKBIndexCorruptError):
+        kb._load()
     result = asyncio.run(kb.retrieve("anything", toy_client))
-    assert result == []
+    assert result.chunks == ()
+    assert result.status is RetrievalStatus.ERROR
 
 
 def test_parse_corpus_file_propagates_placeholder_status(tmp_path):
@@ -340,10 +358,25 @@ def test_build_returns_zero_and_writes_nothing_when_every_embedding_fails(
     assert not metadata_path.exists()
 
 
-def test_build_skips_chunks_whose_embedding_is_a_zero_vector(patched_paths, monkeypatch):
-    """A zero vector cannot be L2-normalized; that chunk is dropped while the
-    others are still indexed and persisted."""
-    corpus_dir, _, metadata_path = patched_paths
+@pytest.mark.parametrize(
+    "bad_vector",
+    [
+        pytest.param([0.0, 0.0, 0.0], id="zero"),
+        # Round 3 (CI review MEDIUM, ref #91): a non-finite embedding used to
+        # normalise to an all-NaN row and be written into the index.
+        pytest.param([float("nan"), 0.0, 1.0], id="nan"),
+        pytest.param([float("inf"), 1.0, 0.0], id="pos-inf"),
+        pytest.param([1.0, float("-inf"), 0.0], id="neg-inf"),
+        pytest.param([1e39, 0.0, 0.0], id="float32-overflow"),
+    ],
+)
+def test_build_skips_chunks_whose_embedding_is_a_zero_vector(
+    patched_paths, monkeypatch, bad_vector
+):
+    """A zero or non-finite vector cannot be L2-normalized; that chunk is
+    dropped while the others are still indexed and persisted, and no NaN or
+    inf row ever reaches the on-disk matrix."""
+    corpus_dir, index_path, metadata_path = patched_paths
     _write_corpus_file(
         corpus_dir,
         "eu",
@@ -352,21 +385,27 @@ def test_build_skips_chunks_whose_embedding_is_a_zero_vector(patched_paths, monk
     )
 
     async def partial_embed(self, text, model=None):
-        # "Misc" chunk gets an all-zero embedding; the consent chunk is valid.
-        return [0.0, 0.0, 0.0] if "Misc" in text else _toy_embed(text)
+        # "Misc" chunk gets the degenerate embedding; the consent chunk is valid.
+        return list(bad_vector) if "Misc" in text else _toy_embed(text)
 
     monkeypatch.setattr(LocalAIClient, "embed", partial_embed)
     kb = LegalKnowledgeBase()
     assert asyncio.run(kb.build(LocalAIClient())) == 1
     persisted = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert [c["section"] for c in persisted] == ["Article 7 — Consent"]
+    matrix = np.load(index_path)
+    assert matrix.shape[0] == 1
+    assert np.isfinite(matrix).all()
 
 
 def test_load_rejects_index_whose_row_count_disagrees_with_metadata(
     patched_paths, toy_client
 ):
     """A 2-row matrix next to 1 metadata entry is a stale/mixed bundle: _load()
-    must refuse it and retrieve() must return no context."""
+    must refuse it and retrieve() must return no context.
+
+    Issue #91: _load() raises a typed error instead of returning False, and
+    retrieve() reports ERROR (not a silent, status-less [])."""
     _, index_path, metadata_path = patched_paths
     index_path.parent.mkdir(parents=True, exist_ok=True)
     np.save(index_path, np.eye(2, 3, dtype="float32"))
@@ -376,6 +415,9 @@ def test_load_rejects_index_whose_row_count_disagrees_with_metadata(
     )
 
     kb = LegalKnowledgeBase()
-    assert kb._load() is False
+    with pytest.raises(LegalKBIndexCorruptError, match="index/metadata mismatch"):
+        kb._load()
     assert kb.chunk_count == 0
-    assert asyncio.run(kb.retrieve("erasure", toy_client)) == []
+    result = asyncio.run(kb.retrieve("erasure", toy_client))
+    assert result.chunks == ()
+    assert result.status is RetrievalStatus.ERROR

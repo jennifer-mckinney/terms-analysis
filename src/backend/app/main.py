@@ -53,6 +53,7 @@ from .services.analyzer import (
 from .services.diffing import content_hash, diff_summary, diff_tokens
 from .services.inference import infer_all
 from .services.ingest import extract_text_from_bytes, fetch_url_text
+from .services.legal_kb import warn_if_relevance_floor_disabled
 from .services.rules import detect_findings
 
 logger = logging.getLogger("uvicorn.error")
@@ -78,6 +79,9 @@ def _verify_api_key(x_api_key: str | None = Header(default=None)) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    # Issue #91 round-2 owner ruling: say loudly at startup when the legal-KB
+    # relevance floor is disabled (NO_MATCH unreachable, never authoritative).
+    warn_if_relevance_floor_disabled()
     task: asyncio.Task | None = None
     if settings.watchlist_refresh_seconds > 0:
         task = asyncio.create_task(_watchlist_loop_async())
