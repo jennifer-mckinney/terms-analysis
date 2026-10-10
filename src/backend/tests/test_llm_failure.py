@@ -22,8 +22,12 @@ the request body is encoded by the same code that raises in production.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import re
+import sys
+import unicodedata
 from typing import Any, Callable, Dict, List, Optional
 
 import httpx
@@ -419,3 +423,188 @@ def test_analyze_cancellation_propagates(localai_http):
     localai_http(_raise(asyncio.CancelledError()))
     with pytest.raises(asyncio.CancelledError):
         _analyze()
+
+
+# ---------------------------------------------------------------------------
+# Issue #194: an error response body never reaches the logs
+# ---------------------------------------------------------------------------
+# The LocalAI response body is untrusted: it can echo the prompt, the
+# document or a legal passage. On an HTTP error the log carries the status
+# and a content-free fingerprint of the body (its length; at most a SHA-256
+# prefix) so an operator can still correlate repeats, and nothing else.
+
+_BODY_SENTINEL = "SENTINEL194BODYqz7"
+_FORGED_MARK = "FORGED194LINE"
+_FORGED_LINE = f"CRITICAL uvicorn.error {_FORGED_MARK} admin login ok"
+_BODY_FILLER = "BODYFILL"
+# Matches the levelname that starts every record line of caplog.text.
+_RECORD_LINE = re.compile(r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL) ")
+
+# Generated, not listed: every code point str.splitlines() breaks on, plus
+# CRLF, NUL, and every Cf (format: bidi, zero-width, BOM) character at once.
+_LINE_BREAKS = ["\r\n"] + [
+    chr(cp) for cp in range(sys.maxunicode + 1)
+    if 0xD800 > cp or cp > 0xDFFF
+    if len(f"a{chr(cp)}b".splitlines()) == 2
+]
+_CF_CHARS = "".join(
+    chr(cp) for cp in range(sys.maxunicode + 1)
+    if 0xD800 > cp or cp > 0xDFFF
+    if unicodedata.category(chr(cp)) == "Cf"
+)
+_SEPARATORS: Dict[str, str] = {
+    **{f"break-U+{ord(s[-1]):04X}-{len(s)}": s for s in _LINE_BREAKS},
+    "nul": "\x00",
+    "all-cf": _CF_CHARS,
+}
+
+_ERROR_STATUSES = [400, 401, 403, 404, 413, 422, 429, 500, 502, 503, 504]
+
+
+def _hostile_body(separator: str = "\n", prefix: bytes = b"") -> bytes:
+    text = f"model echoed: {_BODY_SENTINEL} {_BODY_FILLER}{separator}{_FORGED_LINE}"
+    return prefix + text.encode("utf-8")
+
+
+def _error_response(status: int, body: bytes) -> Callable[[httpx.Request], httpx.Response]:
+    def _respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, content=body, headers={"content-type": "text/plain"})
+
+    return _respond
+
+
+def _assert_no_body_text(caplog, body: bytes) -> None:
+    """No part of ``body`` is in any captured log output, formatted or raw."""
+    text = caplog.text
+    for token in (_BODY_SENTINEL, _FORGED_MARK, _BODY_FILLER):
+        assert token not in text
+    # No forged record: every physical line (by every line-break rule
+    # str.splitlines() knows) is a real record line.
+    for line in text.splitlines():
+        assert _RECORD_LINE.match(line), f"forged log line: {line[:80]!a}"
+    # No raw NUL / Cf bytes from the body reach the log.
+    assert "\x00" not in text
+    assert not set(text) & set(_CF_CHARS)
+    for record in caplog.records:
+        # Structured handlers serialise msg and args; tracebacks quote locals.
+        assert _BODY_SENTINEL not in repr(record.msg)
+        assert _BODY_SENTINEL not in repr(record.args)
+        assert record.exc_info is None
+
+
+def _assert_fingerprint(caplog, status: int, body: bytes) -> None:
+    """The one warning carries the status and the body's length; any
+    hex fingerprint in it is an honest SHA-256 prefix, never the full hash."""
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert message.startswith(f"LocalAI HTTP {status}")
+    numbers = set(re.findall(r"(?<![0-9A-Za-z])\d+(?![0-9A-Za-z])", message))
+    lengths = {str(len(body)), str(len(body.decode("utf-8", errors="replace")))}
+    assert numbers & lengths, f"no body length in {message!a}"
+    digest = hashlib.sha256(body).hexdigest()
+    for run in re.findall(r"[0-9a-f]{8,}", message):
+        if re.search(r"[a-f]", run):
+            assert len(run) < len(digest)
+            assert digest.startswith(run)
+    assert _fallback_records(caplog) == []
+
+
+@pytest.mark.parametrize("status", _ERROR_STATUSES)
+def test_http_error_log_has_status_and_fingerprint_not_body(localai_http, caplog, status):
+    body = _hostile_body()
+    localai_http(_error_response(status, body))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _analyze() is None
+    _assert_no_body_text(caplog, body)
+    _assert_fingerprint(caplog, status, body)
+
+
+@pytest.mark.parametrize("name", list(_SEPARATORS))
+def test_http_error_log_no_forged_line_for_any_separator(localai_http, caplog, name):
+    body = _hostile_body(_SEPARATORS[name])
+    localai_http(_error_response(500, body))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _analyze() is None
+    _assert_no_body_text(caplog, body)
+    _assert_fingerprint(caplog, 500, body)
+
+
+def test_http_error_separator_table_is_generated_and_complete():
+    # Contract: the generated table holds every splitlines() break (single
+    # code points plus CRLF), NUL and the Cf set; spot-check known members.
+    singles = {s for s in _LINE_BREAKS if len(s) == 1}
+    assert {"\n", "\r", "\x85", " ", " "} <= singles
+    assert "\r\n" in _LINE_BREAKS
+    assert {"‮", "​", "﻿"} <= set(_CF_CHARS)
+    print(f"generated separators: {len(_SEPARATORS)}")
+
+
+_BODY_SHAPES: Dict[str, bytes] = {
+    "invalid-utf8": _hostile_body(prefix=b"\xff\xfe\xc3("),
+    "huge-2mb-sentinel-last": (_BODY_FILLER * (2 * 1024 * 1024 // len(_BODY_FILLER))).encode()
+    + _hostile_body(),
+    "empty": b"",
+}
+
+
+@pytest.mark.parametrize("name", list(_BODY_SHAPES))
+def test_http_error_log_body_shapes(localai_http, caplog, name):
+    body = _BODY_SHAPES[name]
+    localai_http(_error_response(503, body))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _analyze() is None
+    _assert_no_body_text(caplog, body)
+    _assert_fingerprint(caplog, 503, body)
+
+
+def test_generic_fallback_logs_no_body_text(localai_http, caplog):
+    # A 200 whose answer fails schema validation: pydantic's error message
+    # quotes the input value, so only the type may reach the log.
+    raw = json.dumps({"findings": [], "summary": {"x": f"{_BODY_SENTINEL}\n{_FORGED_LINE}"}})
+    localai_http(lambda request: _ok_response(raw=raw))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _analyze() is None
+    _assert_no_body_text(caplog, raw.encode())
+    assert len(_fallback_records(caplog)) == 1
+
+
+def test_generic_fallback_non_json_body_logs_no_body_text(localai_http, caplog):
+    body = _hostile_body()
+    localai_http(lambda request: httpx.Response(200, content=body))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _analyze() is None
+    _assert_no_body_text(caplog, body)
+    assert len(_fallback_records(caplog)) == 1
+
+
+@pytest.mark.parametrize(
+    "exc_type", [httpx.RemoteProtocolError, httpx.DecodingError], ids=lambda t: t.__name__
+)
+def test_transport_error_log_quotes_no_server_bytes(localai_http, caplog, exc_type):
+    # h11 quotes the server's raw status line in its error ("illegal status
+    # line: b'...'"), so an httpx.HTTPError message is server-controlled too.
+    body = _hostile_body()
+    localai_http(_raise(exc_type(f"illegal status line: {body!r}\n{_FORGED_LINE}")))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert _analyze() is None
+    _assert_no_body_text(caplog, body)
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert exc_type.__name__ in warnings[0].getMessage()
+
+
+def test_http_error_surfaces_no_body_to_the_caller(monkeypatch, localai_http, caplog):
+    # analyze() returns None (no exception, no text); the API payload built
+    # by analyze_text from that fallback carries no body text either.
+    baseline = _rules_only_baseline(monkeypatch)
+    localai_http(_error_response(500, _hostile_body()))
+    monkeypatch.setattr(analyzer_module, "_retrieve_legal_context", _fake_lookup([_chunk()], True))
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        result = asyncio.run(analyze_text(_DOC, _JURISDICTIONS))
+    serialised = result.payload.model_dump_json()
+    assert _BODY_SENTINEL not in serialised and _FORGED_MARK not in serialised
+    assert {f.category for f in result.payload.findings} == {
+        f.category for f in baseline.payload.findings
+    }
+    assert _BODY_SENTINEL not in caplog.text
