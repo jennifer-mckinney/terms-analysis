@@ -284,6 +284,38 @@ def test_actual_cost_is_summed_from_usage_and_logged(tmp_path: Path) -> None:
     assert f"{expected:.2f}" in summary_text(tmp_path)
 
 
+@pytest.mark.parametrize("kind", ["errored", "expired", "canceled"])
+def test_partial_batch_cost_counts_only_successful_requests(tmp_path: Path, kind: str) -> None:
+    prep = _prepare(tmp_path)
+    sim = Sim(prep)
+    _errored(kind)(sim)
+    collect, rc, out = _collect(sim)
+    assert rc == exit_code(collect, "PARTIAL"), out[-800:]
+    prices = prep.cfg["prices_usd_per_mtok"]
+    per = (USAGE["input_tokens"] * prices["input"] + USAGE["output_tokens"] * prices["output"]
+           + USAGE["cache_read_input_tokens"] * prices["cache_read"]) / 1_000_000
+    expected = per * (len(prep.all_ids) - 1)
+    assert f"${expected:.2f}" in summary_text(tmp_path)
+    assert sim.issue_posts() == []
+    assert len(sim.deletes()) == 1
+
+
+@pytest.mark.parametrize("usage", [
+    None, [], {}, {"input_tokens": 0}, {"output_tokens": 0},
+    *[{**USAGE, key: value} for key in USAGE for value in (-1, True, 1.5, "1", None)],
+])
+def test_successful_request_with_invalid_usage_fails_closed(tmp_path: Path, usage: Any) -> None:
+    prep = _prepare(tmp_path, card_mode="cards")
+    sim = Sim(prep)
+    line = _succeeded(prep.ids[ALPHA], sim.default_text(prep.ids[ALPHA]))
+    line["result"]["message"]["usage"] = usage
+    _set_line(sim, _alpha, lambda c: line)
+    collect, rc, out = _collect(sim)
+    assert rc == exit_code(collect, "API_ERROR"), out[-800:]
+    assert sim.issue_posts() == []
+    assert len(sim.deletes()) == 1
+
+
 def test_cards_mode_files_one_issue_per_finding(tmp_path: Path) -> None:
     prep = _prepare(tmp_path, card_mode="cards")
     sim = Sim(prep)
