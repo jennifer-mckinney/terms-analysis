@@ -52,18 +52,25 @@ def _patch_transport(monkeypatch, handler):
 
 def test_fetch_url_text_rejects_redirect_to_blocked_address(monkeypatch):
     """A public URL that 302s to a link-local/metadata address must not be followed."""
+    # Issue #196: record every request instead of raising AssertionError for
+    # the blocked hop. A raise could be wrapped into the ValueError this test
+    # expects; the request record can't be. The metadata answer is served so
+    # a followed redirect is visible in the record, not hidden by a crash.
+    requests: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
         if request.url.host == "93.184.216.34":
             return httpx.Response(
                 302, headers={"location": "http://169.254.169.254/latest/meta-data/"}
             )
-        raise AssertionError(f"blocked redirect target was followed: {request.url}")
+        return httpx.Response(200, content=b"metadata served")
 
     _patch_transport(monkeypatch, handler)
 
     with pytest.raises(ValueError):
         asyncio.run(fetch_url_text("http://93.184.216.34/policy"))
+    assert requests == ["http://93.184.216.34/policy"]
 
 
 def test_fetch_url_text_follows_redirect_to_allowed_address(monkeypatch):
@@ -241,10 +248,18 @@ def resolver(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_real_network(monkeypatch):
+    # Issue #196: every real-transport attempt is recorded and the record is
+    # asserted empty after the test, so an attempt is caught even when the
+    # code under test swallows the refusal (e.g. maps it to a connect error).
+    attempts: list[str] = []
+
     async def refuse(self, request):
-        raise AssertionError(f"real network attempted: {request.url!r}")
+        attempts.append(str(request.url))
+        raise RuntimeError("real network attempted in a unit test")
 
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", refuse)
+    yield attempts
+    assert attempts == [], f"real network attempted: {attempts!r}"
 
 
 @pytest.fixture
