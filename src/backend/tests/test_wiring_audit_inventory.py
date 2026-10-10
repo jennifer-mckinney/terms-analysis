@@ -503,9 +503,10 @@ def test_git_env_is_an_allowlist_without_credentials(monkeypatch: pytest.MonkeyP
         monkeypatch.setenv(name, value)
     monkeypatch.setenv("GIT_DIR", "/nonexistent-redirect")  # [F7] still dropped
     env = inventory.git_env()
-    for name, value in CHILD_ENV_SECRETS.items():
-        assert name not in env, name
-        assert all(value not in v for v in env.values()), name
+    # Compare names only: a failure must never print the child env (F8).
+    leaked = sorted(name for name, value in CHILD_ENV_SECRETS.items()
+                    if name in env or any(value in v for v in env.values()))
+    assert leaked == []
     assert env.get("GIT_DIR") is None
     assert env.get("PATH") == os.environ["PATH"]  # positive control: git is still found
 

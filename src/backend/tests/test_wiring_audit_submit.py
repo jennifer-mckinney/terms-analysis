@@ -232,9 +232,10 @@ def test_leak_scanner_child_env_carries_no_credentials(tmp_path: Path, monkeypat
     submit, rc, out, _ = _submit(tmp_path, repo, cfg_path, fake)
     assert rc == exit_code(submit, "OK"), out[-800:]  # positive control: the scan still ran clean
     seen = json.loads(dump.read_text(encoding="utf-8"))
-    for name, value in secrets.items():
-        assert name not in seen, name
-        assert all(value not in v for v in seen.values()), name
+    # Compare names only: a failure must never print the child env (F8).
+    leaked = sorted(name for name, value in secrets.items()
+                    if name in seen or any(value in v for v in seen.values()))
+    assert leaked == []
 
 
 def test_leaking_module_refuses_submission_without_any_request(tmp_path: Path, net: list[str]) -> None:
