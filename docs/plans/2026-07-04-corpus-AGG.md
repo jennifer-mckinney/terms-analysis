@@ -116,7 +116,7 @@ note_on_location: written to plans/ under plan-mode restriction; on approval, mo
 ### HuggingFace: MultiEURLEX
 1. **Operator + funding**: Academic (Chalkidis et al.). HuggingFace-hosted.
 2. **Bulk URL**: `https://huggingface.co/datasets/coastalcph/multi_eurlex`.
-3. **License**: **CC-BY-4.0** (based on 2011/833/EU). **Commercial use permitted.**
+3. **License**: **CC-BY-SA-4.0** per the dataset card's YAML metadata tag (`license: cc-by-sa-4.0`). The card contradicts itself: its prose says the data keeps the EU's CC-BY-4.0; the stricter tag governs. **Commercial use permitted with attribution; ShareAlike applies to adapted versions of the dataset.** Source: https://huggingface.co/datasets/coastalcph/multi_eurlex (revision `2020d0350241461069a54177b639f0e6c7a7a712`), checked 2026-10-10 (#159).
 4. **Coverage**: 65,000 EU documents 1958-2016, 23 EU languages (excludes Irish), multi-label EUROVOC classification.
 5. **Format**: HuggingFace `datasets` format, multilingual + monolingual variants.
 6. **Freshness**: Static, ends 2016.
@@ -128,14 +128,14 @@ note_on_location: written to plans/ under plan-mode restriction; on approval, mo
 ### HuggingFace: LegalBench
 1. **Operator + funding**: Stanford HazyResearch + 40 contributors. HuggingFace-hosted.
 2. **Bulk URL**: `https://huggingface.co/datasets/nguha/legalbench`.
-3. **License**: **CC-BY-4.0** for the aggregate; individual tasks may vary. **Commercial use permitted with per-task verification.**
-4. **Coverage**: 162 tasks, 91,750 rows, American law, English. Includes CUAD (contracts), ContractNLI, MAUD, LearnedHands, **OPP115 (privacy policy analysis)**.
+3. **License**: per task; the HF card's aggregate `cc-by-4.0` tag does not hold for every task. ToS/privacy tasks: `unfair_tos` **CC-BY-4.0**; `privacy_policy_qa` **MIT**; `privacy_policy_entailment` **CC-BY-NC-3.0** (non-commercial); the 9 `opp115_*` tasks **CC-BY-NC** (non-commercial, version unstated upstream). **Only 2 of the 12 ToS/privacy tasks allow commercial use; the other 10 conflict with HR1 for product use.** Sources: each task's `tasks/<task>/README.md` in https://github.com/HazyResearch/legalbench (commit `b46bf4ffae90524b2b72aaa30e7745fe9db64481`) and https://huggingface.co/datasets/nguha/legalbench (revision `daec8237410aa23e3faf4bc41ad8b3a7e1696826`), checked 2026-10-10 (#159).
+4. **Coverage**: 162 tasks, 91,750 rows, American law, English. Includes CUAD (contracts), ContractNLI, MAUD, LearnedHands, **OPP115 (privacy policy analysis; CC-BY-NC, non-commercial)**.
 5. **Format**: HuggingFace `datasets`.
 6. **Freshness**: Ongoing academic maintenance.
 7. **HR2 status**: Clear.
-8. **Consolidation replacement**: **OPP115 (privacy-policy annotations across 115 policies) is directly relevant to the tool's privacy-policy analysis path.** Not a runtime corpus but a strong evaluation and rule-tuning asset.
+8. **Consolidation replacement**: **OPP115 (CC-BY-NC, non-commercial; privacy-policy annotations across 115 policies) is topically relevant to the tool's privacy-policy analysis path, but its licence conflicts with HR1 for product use.** Do not use it for evaluation or rule tuning of the commercial product without a separate licence. `unfair_tos` (CC-BY-4.0) and `privacy_policy_qa` (MIT) are the usable ToS/privacy tasks.
 9. **Effort savings**: N/A runtime; ~20-40h saved on evaluation-set curation.
-10. **Risks**: Per-task license verification required before commercial use.
+10. **Risks**: Per-task licences differ from the aggregate tag; re-check each task's README before any use, and before every LegalBench version bump.
 
 ### HuggingFace: joelniklaus/legal-mc4
 1. **Operator + funding**: Academic (Niklaus). Derived from Google's MC4 web crawl, filtered for legal content.
@@ -231,8 +231,8 @@ note_on_location: written to plans/ under plan-mode restriction; on approval, mo
 
 **Training/evaluation supplements** (not runtime corpus but strong assets):
 - **LexGLUE** (UNFAIR-ToS + LEDGAR + ECtHR + SCOTUS subsets) — CC-BY-4.0.
-- **LegalBench OPP115** — privacy-policy annotation.
-- **MultiEURLEX** — multilingual EU legal pretraining supplement.
+- **LegalBench OPP115** — privacy-policy annotation. CC-BY-NC (non-commercial): conflicts with HR1 for product use; not usable without a separate licence.
+- **MultiEURLEX** — multilingual EU legal pretraining supplement. CC-BY-SA-4.0 (ShareAlike).
 
 ## Open questions for owner
 
@@ -265,6 +265,7 @@ note_on_location: written to plans/ under plan-mode restriction; on approval, mo
 - https://huggingface.co/datasets/coastalcph/lex_glue
 - https://huggingface.co/datasets/coastalcph/multi_eurlex
 - https://huggingface.co/datasets/nguha/legalbench
+- https://github.com/HazyResearch/legalbench (per-task `tasks/<task>/README.md` licences; checked 2026-10-10, #159)
 - https://huggingface.co/datasets/joelniklaus/legal-mc4
 - https://huggingface.co/datasets/pile-of-law/pile-of-law (HR1-blocked)
 - https://huggingface.co/datasets/joelniklaus/Multi_Legal_Pile (HR1-blocked)

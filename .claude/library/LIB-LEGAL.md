@@ -110,12 +110,18 @@ Legal Corpus (data/legal_corpus/<jurisdiction>/<law>.txt)
 | Corpus | License | Coverage | Source |
 |--------|---------|----------|--------|
 | **EUR-Lex** | CC-BY-4.0 | Full EU legislation incl. GDPR | data.europa.eu |
-| **MultiEURLEX** | CC-BY-4.0 | 65K EU laws, 23 languages | HuggingFace |
+| **MultiEURLEX** | CC-BY-SA-4.0 (ShareAlike; see note) | 65K EU laws, 23 languages | HuggingFace `coastalcph/multi_eurlex` |
 | **US state law texts** | Public domain | CCPA/CPRA, CPA, CTDPA, SHIELD | State legislature sites |
 | **PIPEDA** | Public domain | Canadian federal privacy law | laws-lois.justice.gc.ca |
 | **CourtListener/RECAP** | Public domain | US court opinions, dockets | courtlistener.com |
 | **CUAD** | CC-BY-4.0 | 510 contracts, 41 clause types | atticusprojectai.org |
-| **LegalBench** | Open | 162 legal reasoning tasks | HuggingFace |
+| **LegalBench** | Per task. ToS/privacy tasks: `unfair_tos` CC-BY-4.0; `privacy_policy_qa` MIT; `privacy_policy_entailment` CC-BY-NC-3.0 (non-commercial); `opp115_*` (9 tasks) CC-BY-NC (non-commercial, version unstated upstream) | 162 legal reasoning tasks | HuggingFace `nguha/legalbench`; per-task READMEs in GitHub `HazyResearch/legalbench` |
+
+Licence notes (P7 attribution; sources checked 2026-10-10, #159):
+
+- **MultiEURLEX**: the dataset card contradicts itself. Its YAML metadata tag is `license: cc-by-sa-4.0`; its prose says the data keeps the EU's CC-BY-4.0. The stricter tag governs here. Source: https://huggingface.co/datasets/coastalcph/multi_eurlex (revision `2020d0350241461069a54177b639f0e6c7a7a712`), checked 2026-10-10.
+- **LegalBench**: licensing is per task. The HF card's aggregate `cc-by-4.0` tag does not hold for every task. Of the 12 ToS/privacy tasks, only `unfair_tos` and `privacy_policy_qa` allow commercial use. The other 10 (`privacy_policy_entailment` and the 9 `opp115_*` tasks) are non-commercial and conflict with HR1 for product use: do not use them in, or to tune or evaluate, the commercial product without a separate licence from the rights holders. Sources: each task's `tasks/<task>/README.md` in https://github.com/HazyResearch/legalbench (commit `b46bf4ffae90524b2b72aaa30e7745fe9db64481`) and https://huggingface.co/datasets/nguha/legalbench (revision `daec8237410aa23e3faf4bc41ad8b3a7e1696826`), checked 2026-10-10.
+- **EUR-Lex**: CC BY 4.0 under Decision 2011/833/EU. Source: https://commission.europa.eu/legal-notice_en, checked 2026-10-10.
 
 ### L6: no-pile-of-law
 rule: Pile of Law is CC-BY-NC-SA-4.0 (non-commercial); do NOT use for commercial product
