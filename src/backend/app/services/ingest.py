@@ -39,6 +39,8 @@ except ImportError:  # Optional OCR dependency
 from striprtf.striprtf import rtf_to_text
 
 from ..config import Settings, settings
+from ..exceptions import InvalidTextError
+from ..schemas import is_valid_utf8
 
 
 def _normalize_text(text: str) -> str:
@@ -115,13 +117,38 @@ def _preserve_rtf_delimiter_spaces(text: str) -> str:
 def _extract_rtf(data: bytes) -> str:
     raw = _decode_bytes(data)
     raw = _preserve_rtf_delimiter_spaces(raw)
-    return rtf_to_text(raw)
+    text = rtf_to_text(raw)
+    # #184: RTF writes a non-BMP character (an emoji) as two ``\uN`` escapes,
+    # one per UTF-16 half, and striprtf emits each half as its own code point.
+    # A UTF-16 round trip joins every valid high+low pair into one character;
+    # surrogatepass keeps an unpaired half as-is so that
+    # ``extract_text_from_bytes`` rejects it instead of it failing downstream.
+    return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "surrogatepass")
 
 
 _ALLOWED_EXTENSIONS = {".txt", ".md", ".html", ".htm", ".pdf", ".docx", ".rtf"}
 
 
 def extract_text_from_bytes(
+    filename: str,
+    content_type: Optional[str],
+    data: bytes,
+) -> str:
+    """Extract the text of an uploaded or fetched document.
+
+    #184: the one exit for upload and fetch text, so the UTF-8 check runs here,
+    on the full text, before ``analyze_text`` truncates it to
+    ``max_input_chars`` (a check after truncation would miss a surrogate past
+    the limit). Raises ``InvalidTextError`` (fixed message, no echo) when the
+    text holds an unpaired surrogate.
+    """
+    text = _extract_text(filename, content_type, data)
+    if not is_valid_utf8(text):
+        raise InvalidTextError()
+    return text
+
+
+def _extract_text(
     filename: str,
     content_type: Optional[str],
     data: bytes,
@@ -595,7 +622,8 @@ async def fetch_url_text(url: str) -> str:
     ``url_fetch_max_redirects``, ``url_fetch_max_bytes`` and
     ``url_fetch_timeout_s`` (one total deadline, separate from the LLM
     inference budget ``request_timeout_s``). Raises UnsafeUrlError for policy
-    refusals and UrlFetchError for fetch failures.
+    refusals, UrlFetchError for fetch failures and InvalidTextError when the
+    fetched text holds an unpaired surrogate (#184).
     """
     cfg = settings
     try:
