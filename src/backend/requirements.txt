@@ -1,4 +1,4 @@
-fastapi
+fastapi>=0.121.0  # Depends(scope=...) in main.py (#133)
 httpx
 beautifulsoup4
 pytesseract

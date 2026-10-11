@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import math
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -104,6 +105,23 @@ def _parse_top_k(raw: Optional[str]) -> int:
     if value < 1:
         raise ValueError(f"LEGAL_KB_TOP_K must be an integer >= 1, got {raw!r}")
     return value
+
+
+# Strict integer env format: ASCII digits only. ``int()`` alone would accept
+# whitespace, ``_`` separators and non-ASCII digits (fullwidth, Arabic-Indic).
+_ASCII_INT_RE = re.compile(r"[0-9]{1,9}")
+
+
+def _env_int(name: str, default: str) -> int:
+    """Parse an integer env var strictly; raise naming the variable.
+
+    Range rules live in ``validate_security_settings`` so they also cover
+    ``dataclasses.replace``.
+    """
+    raw = os.getenv(name, default)
+    if not _ASCII_INT_RE.fullmatch(raw):
+        raise ValueError(f"{name} must be a non-negative integer in ASCII digits")
+    return int(raw)
 
 
 @dataclass(frozen=True)
@@ -220,16 +238,69 @@ class Settings:
         )
     )
     watchlist_refresh_seconds: int = int(os.getenv("WATCHLIST_REFRESH_SECONDS", "0"))
-    # Optional API key for endpoint authentication.  Set API_KEY env var in
-    # production.  Empty string disables auth (default: disabled for local dev).
-    api_key: str = os.getenv("API_KEY", "")
     # Maximum pages to process per PDF when OCR is involved.
     max_pdf_pages: int = int(os.getenv("MAX_PDF_PAGES", "100"))
+
+    # ── API key auth and rate limiting (#133) ───────────────────────────────
+    # Checked by validate_security_settings() in __post_init__ (import and
+    # dataclasses.replace fail closed) and again on every request by
+    # app.security, which answers 503 if the settings in force are invalid.
+    #
+    # Deployment mode. Unset (None) or "railway" means a key is required; only
+    # the exact value "local" with a loopback BACKEND_HOST may run keyless,
+    # and then only loopback peers are served.
+    deploy_env: Optional[str] = os.getenv("DEPLOY_ENV")
+    # The backend key, sent by clients in X-API-Key. repr=False keeps it out
+    # of every repr/str of Settings; validation messages never echo it.
+    api_key: str = field(default=os.getenv("API_KEY", ""), repr=False)
+    # Minimum key length; may be raised, never below API_KEY_MIN_LENGTH_FLOOR.
+    api_key_min_length: int = _env_int("API_KEY_MIN_LENGTH", "32")
+    # Address the backend binds to (run.sh passes the same value to uvicorn).
+    # Unset means unknown, which never counts as loopback.
+    bind_host: str = os.getenv("BACKEND_HOST", "")
+    # Rates are "<N>/<second|minute|hour|day>" fixed windows.
+    # Every route except /health, keyed by TCP peer, checked before the key.
+    # Behind railtail every remote request shares the proxy's peer address,
+    # so this is an aggregate ceiling for all reviewers together.
+    rate_limit_pre_auth: str = os.getenv("RATE_LIMIT_PRE_AUTH", "120/minute")
+    # Analysis (LLM) routes, after auth, keyed by client identity; a batch
+    # costs one token per item.
+    rate_limit_per_client: str = os.getenv("RATE_LIMIT_PER_CLIENT", "5/minute")
+    # Analysis routes, after auth, one ceiling for the key across clients.
+    rate_limit_per_key: str = os.getenv("RATE_LIMIT_PER_KEY", "60/minute")
+    # /health only, keyed by peer, separate from every other bucket.
+    rate_limit_health: str = os.getenv("RATE_LIMIT_HEALTH", "60/minute")
+    # Entry cap for every limiter store; the oldest entry is evicted at the cap.
+    rate_limit_max_tracked_clients: int = _env_int("RATE_LIMIT_MAX_TRACKED_CLIENTS", "10000")
+    # IPv6 clients are grouped by this prefix length (one /64 is one client).
+    rate_limit_ipv6_prefix: int = _env_int("RATE_LIMIT_IPV6_PREFIX", "64")
+    # Proxies whose client-identity header is trusted, and that header's name.
+    # Both or neither. The header is read only from a peer inside these CIDRs
+    # on a request with a valid key; unparseable values fall back to the peer.
+    trusted_proxy_cidrs: Tuple[str, ...] = field(
+        default_factory=lambda: tuple(_split_env_list("RATE_LIMIT_TRUSTED_PROXY_CIDRS", ""))
+    )
+    client_identity_header: str = os.getenv("RATE_LIMIT_CLIENT_IP_HEADER", "")
+    # Read from the same variable uvicorn uses, so a catch-all ("*") set in
+    # the environment stops startup. uvicorn's --forwarded-allow-ips CLI flag
+    # is invisible here; run.sh passes --no-proxy-headers instead.
+    forwarded_allow_ips: str = os.getenv("FORWARDED_ALLOW_IPS", "")
+    # Analyses in flight at once; an extra request gets an immediate 429.
+    max_concurrent_analyses: int = _env_int("MAX_CONCURRENT_ANALYSES", "2")
+    # Retry-After (seconds) sent with the concurrency-cap 429. 1..3600.
+    concurrency_retry_after_s: int = _env_int("CONCURRENCY_RETRY_AFTER_S", "5")
+    # Items accepted by one /analyze/batch call (422 above it). Each item costs
+    # one token from every rate in BATCH_CHARGED_RATES, so the cap may not
+    # exceed any of their limits (5 matches the default RATE_LIMIT_PER_CLIENT).
+    max_batch_items: int = _env_int("MAX_BATCH_ITEMS", "5")
 
     def __post_init__(self) -> None:
         # Fail closed at load (and on dataclasses.replace) on bad URL-fetch
         # limits: a broken SSRF config must stop startup, not weaken the guard.
         _validate_url_fetch_settings(self)
+        # Same for auth and rate limits (#133 ruling 3).
+        validate_security_settings(self)
+        object.__setattr__(self, "trusted_proxy_cidrs", tuple(self.trusted_proxy_cidrs))
 
 
 def _is_int(value: object) -> bool:
@@ -282,6 +353,190 @@ def _validate_url_fetch_settings(s: Settings) -> None:
     # Store immutable copies so a caller's list cannot change the live config.
     object.__setattr__(s, "url_fetch_allowed_schemes", tuple(schemes))
     object.__setattr__(s, "url_fetch_blocked_networks", tuple(networks))
+
+
+# ── #133 security settings ────────────────────────────────────────────────────
+
+# Ruling 2: keys are at least 32 ASCII characters. API_KEY_MIN_LENGTH may raise
+# the minimum, never lower it. A security floor, not a tunable.
+API_KEY_MIN_LENGTH_FLOOR = 32
+# Deployment modes. Unset means "not local" (auth required).
+DEPLOY_ENVS = frozenset({"local", "railway"})
+# Seconds per rate period (the rate format's own vocabulary).
+RATE_PERIOD_SECONDS = {"second": 1, "minute": 60, "hour": 3600, "day": 86400}
+# "<N>/<unit>", N a positive ASCII integer. [0-9] is ASCII-only in ``re``;
+# ``\d`` would admit fullwidth and Arabic-Indic digits. fullmatch, so no
+# trailing newline slips past a ``$``.
+_RATE_RE = re.compile(r"([1-9][0-9]{0,8})/(second|minute|hour|day)")
+# RFC 9110 header field-name token: ASCII only, no space, colon, CR, LF or NUL.
+_HEADER_TOKEN_RE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+# Rates /analyze/batch charges one token per item (security.batch_admission).
+# A batch cap above any of these limits could never be admitted.
+BATCH_CHARGED_RATES = ("rate_limit_per_client", "rate_limit_per_key")
+# The concurrency 429's Retry-After must stay within an hour.
+_CONCURRENCY_RETRY_AFTER_MAX_S = 3600
+# Environment variable behind each field, so messages name both.
+_ENV_NAMES = {
+    "deploy_env": "DEPLOY_ENV",
+    "api_key": "API_KEY",
+    "api_key_min_length": "API_KEY_MIN_LENGTH",
+    "bind_host": "BACKEND_HOST",
+    "rate_limit_pre_auth": "RATE_LIMIT_PRE_AUTH",
+    "rate_limit_per_client": "RATE_LIMIT_PER_CLIENT",
+    "rate_limit_per_key": "RATE_LIMIT_PER_KEY",
+    "rate_limit_health": "RATE_LIMIT_HEALTH",
+    "rate_limit_max_tracked_clients": "RATE_LIMIT_MAX_TRACKED_CLIENTS",
+    "rate_limit_ipv6_prefix": "RATE_LIMIT_IPV6_PREFIX",
+    "trusted_proxy_cidrs": "RATE_LIMIT_TRUSTED_PROXY_CIDRS",
+    "client_identity_header": "RATE_LIMIT_CLIENT_IP_HEADER",
+    "forwarded_allow_ips": "FORWARDED_ALLOW_IPS",
+    "max_concurrent_analyses": "MAX_CONCURRENT_ANALYSES",
+    "concurrency_retry_after_s": "CONCURRENCY_RETRY_AFTER_S",
+    "max_batch_items": "MAX_BATCH_ITEMS",
+}
+
+
+def _label(name: str) -> str:
+    return f"{name} ({_ENV_NAMES[name]})"
+
+
+def parse_rate(value: object) -> Optional[Tuple[int, int]]:
+    """Return ``(limit, period_seconds)`` for a valid rate string, else None."""
+    if not isinstance(value, str):
+        return None
+    match = _RATE_RE.fullmatch(value)
+    if match is None:
+        return None
+    return int(match.group(1)), RATE_PERIOD_SECONDS[match.group(2)]
+
+
+def is_loopback_literal(host: object) -> bool:
+    """True only for an IP literal in a loopback range (no names, no scopes)."""
+    if not isinstance(host, str) or not host.isascii():
+        return False
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _check_int(s: Settings, name: str, low: int, high: Optional[int] = None) -> None:
+    value = getattr(s, name)
+    if not _is_int(value) or value < low or (high is not None and value > high):
+        bound = f"between {low} and {high}" if high is not None else f">= {low}"
+        raise ValueError(f"{_label(name)} must be an integer {bound}")
+
+
+def _check_network_list(name: str, entries: object, *, strict: bool) -> None:
+    """Every entry an IP network other than a catch-all /0."""
+    if not isinstance(entries, (list, tuple)):
+        raise ValueError(f"{_label(name)} must be a list of IP networks")
+    for entry in entries:
+        try:
+            if not isinstance(entry, str) or not entry.isascii():
+                raise ValueError
+            net = ipaddress.ip_network(entry, strict=strict)
+        except ValueError:
+            raise ValueError(
+                f"{_label(name)} entries must be IP addresses or CIDRs"
+            ) from None
+        if net.prefixlen == 0:
+            raise ValueError(f"{_label(name)} must not contain a catch-all /0 network")
+
+
+def _check_api_key(s: Settings) -> None:
+    key = s.api_key
+    if key == "":
+        if s.deploy_env == "local" and is_loopback_literal(s.bind_host):
+            return
+        if s.deploy_env == "local":
+            raise ValueError(
+                "API_KEY is required: DEPLOY_ENV=local runs without a key only when "
+                "bind_host (BACKEND_HOST) is a loopback address such as 127.0.0.1"
+            )
+        raise ValueError(
+            "API_KEY is required unless DEPLOY_ENV=local with a loopback BACKEND_HOST"
+        )
+    # Allowlist: printable ASCII without space (0x21-0x7E). Rejects edge
+    # whitespace, control characters, DEL, non-ASCII and lone surrogates.
+    # The messages never include the value.
+    if not all("\x21" <= ch <= "\x7e" for ch in key):
+        raise ValueError(
+            f"{_label('api_key')} must be printable ASCII with no whitespace or "
+            "control characters"
+        )
+    if len(key) < s.api_key_min_length:
+        raise ValueError(
+            f"{_label('api_key')} is shorter than api_key_min_length "
+            f"({s.api_key_min_length} characters)"
+        )
+
+
+def validate_security_settings(s: Settings) -> None:
+    """Raise ValueError (naming the field and env var) on any invalid #133 setting.
+
+    Pure check: called from ``Settings.__post_init__`` and, per request, by
+    ``app.security`` so settings altered after construction still fail closed.
+    """
+    if s.deploy_env is not None and (
+        not isinstance(s.deploy_env, str) or s.deploy_env not in DEPLOY_ENVS
+    ):
+        raise ValueError(
+            f"{_label('deploy_env')} must be unset, 'local' or 'railway' (exact, lower case)"
+        )
+    _check_int(s, "api_key_min_length", API_KEY_MIN_LENGTH_FLOOR)
+    _check_int(s, "rate_limit_max_tracked_clients", 1)
+    _check_int(s, "rate_limit_ipv6_prefix", 1, 128)
+    _check_int(s, "max_concurrent_analyses", 1)
+    _check_int(s, "concurrency_retry_after_s", 1, _CONCURRENCY_RETRY_AFTER_MAX_S)
+    _check_int(s, "max_batch_items", 1)
+    for name in (
+        "rate_limit_pre_auth",
+        "rate_limit_per_client",
+        "rate_limit_per_key",
+        "rate_limit_health",
+    ):
+        if parse_rate(getattr(s, name)) is None:
+            raise ValueError(
+                f"{_label(name)} must look like '<N>/<second|minute|hour|day>' "
+                "with N a positive integer"
+            )
+    for name in BATCH_CHARGED_RATES:
+        limit, _period = parse_rate(getattr(s, name)) or (0, 0)
+        if s.max_batch_items > limit:
+            raise ValueError(
+                f"{_label('max_batch_items')} ({s.max_batch_items}) exceeds the "
+                f"{limit} tokens per window of {_label(name)}; each batch item "
+                "costs one token, so a full batch could never be admitted. "
+                "Lower MAX_BATCH_ITEMS or raise the rate"
+            )
+    for name in ("bind_host", "forwarded_allow_ips", "client_identity_header", "api_key"):
+        if not isinstance(getattr(s, name), str):
+            raise ValueError(f"{_label(name)} must be a string")
+    forwarded = s.forwarded_allow_ips
+    if forwarded != "":
+        # Allowlist, not a "*" deny-list: every comma entry must be an IP or
+        # CIDR, so "*", " * ", "*\n" and unix-socket globs are all refused.
+        _check_network_list(
+            "forwarded_allow_ips",
+            [part.strip() for part in forwarded.split(",")],
+            strict=False,
+        )
+    _check_network_list("trusted_proxy_cidrs", s.trusted_proxy_cidrs, strict=True)
+    header = s.client_identity_header
+    if header and (
+        not _HEADER_TOKEN_RE.fullmatch(header) or header.lower() == "x-api-key"
+    ):
+        raise ValueError(
+            f"{_label('client_identity_header')} must be an ASCII header name "
+            "(no spaces, colons or control characters) other than X-API-Key"
+        )
+    if bool(header) != bool(s.trusted_proxy_cidrs):
+        raise ValueError(
+            f"{_label('client_identity_header')} and {_label('trusted_proxy_cidrs')} "
+            "must be set together or not at all"
+        )
+    _check_api_key(s)
 
 
 settings = Settings()

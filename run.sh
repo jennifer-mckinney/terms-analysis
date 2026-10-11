@@ -17,7 +17,11 @@ fi
 
 STREAMLIT_PORT="${STREAMLIT_PORT:-8501}"
 BACKEND_PORT="${BACKEND_PORT:-9000}"
-BACKEND_HOST="${BACKEND_HOST:-0.0.0.0}"
+# #133: loopback by default. The backend refuses to start without API_KEY
+# unless DEPLOY_ENV=local and the bind is loopback; set BACKEND_HOST to a
+# non-loopback address only together with API_KEY.
+BACKEND_HOST="${BACKEND_HOST:-127.0.0.1}"
+DEPLOY_ENV="${DEPLOY_ENV:-local}"
 # Streamlit UI feature flag: v2 (default, issue #19 plain-language redesign) or v1 (legacy)
 STREAMLIT_UI="${STREAMLIT_UI:-v2}"
 case "$STREAMLIT_UI" in
@@ -60,6 +64,9 @@ export MODEL_WORLD
 export MODEL_EU
 export ALLOWED_ORIGINS
 export API_BASE_URL
+# The backend validates its own bind (BACKEND_HOST) and deployment mode.
+export BACKEND_HOST
+export DEPLOY_ENV
 
 echo "Starting Terms & Policies Reviewer..."
 echo "UI (Streamlit $STREAMLIT_UI -> $STREAMLIT_ENTRY): http://localhost:$STREAMLIT_PORT"
@@ -87,7 +94,7 @@ if [[ -f "$APP_DIR/requirements.txt" ]]; then
 fi
 
 echo "Starting backend..."
-"$VENV_PATH/bin/python" -m uvicorn app.main:app --host "$BACKEND_HOST" --port "$BACKEND_PORT" --reload --app-dir "$BACKEND_DIR" &
+"$VENV_PATH/bin/python" -m uvicorn app.main:app --host "$BACKEND_HOST" --port "$BACKEND_PORT" --no-proxy-headers --reload --app-dir "$BACKEND_DIR" &
 BACKEND_PID=$!
 
 echo "Starting UI (Streamlit $STREAMLIT_UI: $STREAMLIT_ENTRY)..."
