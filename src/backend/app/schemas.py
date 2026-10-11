@@ -245,7 +245,34 @@ class LLMAnswer(BaseModel):
         return self
 
 
-class AnalyzeRequest(BaseModel):
+# #184: the one message for a request string that is not valid Unicode text.
+# Fixed text, so the 422 never echoes the offending value.
+INVALID_TEXT_MESSAGE = "must be valid Unicode text (no unpaired surrogate U+D800-U+DFFF)"
+
+
+class InboundModel(BaseModel):
+    """Base for every request body model: no string field may hold a lone
+    surrogate (#184).
+
+    ``json.loads`` turns the escape ``"\\ud800"`` (or its raw CESU-8 bytes)
+    into a lone surrogate, a legal Python ``str`` that can't be encoded.
+    Pydantic only rejects it on constrained fields (``string_unicode``); a
+    plain ``str``/``Optional[str]`` passes it straight to the handler. This
+    one validator covers every field of every subclass, present and future,
+    using the one UTF-8 rule ``is_valid_utf8``. Non-string values pass:
+    Literal, list and int fields already fail type validation on a
+    surrogate, and nested models are ``InboundModel`` subclasses themselves.
+    """
+
+    @field_validator("*", mode="after")
+    @classmethod
+    def _text_is_valid_unicode(cls, value: Any) -> Any:
+        if isinstance(value, str) and not is_valid_utf8(value):
+            raise ValueError(INVALID_TEXT_MESSAGE)
+        return value
+
+
+class AnalyzeRequest(InboundModel):
     text: str = Field(..., min_length=1)
     name: Optional[str] = None
     doc_type: Optional[DocType] = None
@@ -273,7 +300,7 @@ class AnalyzeRequest(BaseModel):
         return v
 
 
-class AnalyzeUrlRequest(BaseModel):
+class AnalyzeUrlRequest(InboundModel):
     url: str = Field(..., min_length=4)
     name: Optional[str] = None
     doc_type: Optional[DocType] = None
@@ -651,7 +678,7 @@ class ReviewItemPayload(BaseModel):
     updated_at: datetime
 
 
-class ReviewUpdate(BaseModel):
+class ReviewUpdate(InboundModel):
     status: Literal["approved", "rejected"]
     notes: Optional[str] = None
 
@@ -712,7 +739,7 @@ class WatchlistItemPayload(BaseModel):
     )
 
 
-class WatchlistCreateRequest(BaseModel):
+class WatchlistCreateRequest(InboundModel):
     """Create a watchlist entry. Subject is ``vendor`` + ``source_url`` (not
     ``analysis_id``). Optional fields land from the OE-003 merge — see
     ``docs/reports/user-decision-brief-2026-07-03.md`` A3.
@@ -756,7 +783,7 @@ class WatchlistCreateRequest(BaseModel):
         return v
 
 
-class InferRequest(BaseModel):
+class InferRequest(InboundModel):
     """Request to infer jurisdiction, doc_type, and industry from URL and/or text."""
     url: Optional[str] = Field(default=None, description="Source URL (used for TLD signals)")
     text: Optional[str] = Field(
@@ -783,7 +810,7 @@ class InferResponse(BaseModel):
     detected_signals: dict = Field(default_factory=dict, description="Human-readable list of which signals fired, for transparency")
 
 
-class BatchItem(BaseModel):
+class BatchItem(InboundModel):
     """Individual item for batch analysis (URL or file reference)"""
     url: Optional[str] = Field(default=None, description="URL to analyze")
     name: Optional[str] = Field(default=None, description="Display name for document")
@@ -805,7 +832,7 @@ class BatchItem(BaseModel):
         return v
 
 
-class AnalyzeBatchRequest(BaseModel):
+class AnalyzeBatchRequest(InboundModel):
     """Request for batch analysis of multiple documents"""
     items: List[BatchItem] = Field(..., min_items=1, description="Documents to analyze")
     industry: Optional[IndustryProfile] = None

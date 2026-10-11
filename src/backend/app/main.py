@@ -13,6 +13,7 @@ from uuid import uuid4
 from xml.sax.saxutils import escape as _xml_escape
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse, Response
@@ -21,7 +22,7 @@ from sqlalchemy.orm import Session
 from . import security
 from .config import settings
 from .database import db_session, get_db, init_db
-from .exceptions import CorpusMismatchError
+from .exceptions import CorpusMismatchError, InvalidTextError
 from .models import Analysis, PolicySnapshot, ReviewItem, WatchlistItem
 from .schemas import (
     AnalysisPayload,
@@ -143,6 +144,27 @@ async def corpus_mismatch_handler(
         content={"detail": f"Corpus version mismatch on: {exc.dimension}"},
         headers={"X-Corpus-Mismatch": exc.dimension},
     )
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """422 with the same ``{"detail": [{loc, msg, type}, ...]}`` shape as
+    FastAPI's default, minus ``input`` and ``ctx`` (#184).
+
+    The default echoes the offending ``input``: a lone surrogate there can't
+    be encoded, so the client got a 500 instead of the 422, and any other
+    value (document text included) was reflected back (CWE-209). ``ctx`` can
+    carry raw values too. ``loc`` (field names, list indexes), ``msg`` (fixed
+    per error type or our own fixed messages) and ``type`` come from the
+    schema, never from the request.
+    """
+    detail = [
+        {"loc": list(err["loc"]), "msg": err["msg"], "type": err["type"]}
+        for err in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": detail})
 
 
 @app.get(security.HEALTH_PATH)
@@ -471,6 +493,10 @@ async def analyze_url(request: AnalyzeUrlRequest, db: Session = Depends(get_db))
     )
     try:
         text = await fetch_url_text(request.url)
+    except InvalidTextError as exc:
+        # #184: the fetch succeeded but the text is not valid Unicode. Say so
+        # (F8), with the fixed message; never the "could not fetch" one.
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     except ValueError as exc:
         return _fetch_failure_response(
             400,
@@ -539,7 +565,12 @@ async def analyze_file(
             raise HTTPException(
                 status_code=413, detail="File exceeds maximum upload size"
             )
-    text = extract_text_from_bytes(file.filename, file.content_type, data)
+    try:
+        text = extract_text_from_bytes(file.filename, file.content_type, data)
+    except InvalidTextError as exc:
+        # #184: the upload holds an unpaired surrogate (an RTF ``\uN`` escape).
+        # Fixed message, no echo; checked on the full text, before truncation.
+        raise HTTPException(status_code=422, detail=str(exc)) from None
     if not text:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
