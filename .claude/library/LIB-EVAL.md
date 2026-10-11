@@ -8,7 +8,7 @@ status (2026-10-11, #153): "spec-rubric" = the human-scored rubric in `docs/spec
 ## spec-rubric
 
 ### E1: rubric-scale-and-thresholds
-rule: the spec (`docs/specs/terms_reviewer_rubric.md`, Scoring Sheet) is 8 weighted categories, 1-5 per category, pass threshold >= 4.2 average, critical blocker if any of Legal Signal, AI Law Signal, Privacy or Accessibility scores <= 2
+rule: the spec (`docs/specs/terms_reviewer_rubric.md`, Scoring Sheet) is 8 weighted categories, 1-5 per category, pass threshold >= 4.2 average, critical blocker if any criterion <= 2 in Legal Signal, AI Law Signal, Privacy, or Accessibility
 scope: qualitative design review, not what backend computes today
 because: weights below must equal the spec Scoring Sheet; `tests/test_docs_rubric_parity.py` fails on any drift
 
@@ -26,6 +26,7 @@ because: weights below must equal the spec Scoring Sheet; `tests/test_docs_rubri
 ## computed-rubric
 
 label: heuristic-proxy
+empty-response: `null` (HTTP 200) when there are no analysis records
 
 ### E2: computed-scale-is-0-to-10
 rule: `_compute_rubric_scores()` uses 0-10 scale, NOT 1-5
