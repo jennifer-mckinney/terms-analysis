@@ -18,6 +18,15 @@ What card #153 promises, and the test that holds each promise:
 - #48: the spec rubric anchors ``GET /rubric``. ``overall`` is the
   Scoring-Sheet-weighted sum of the category scores
   (``test_rubric_endpoint_overall_is_spec_weighted``).
+- PR #335 r1: LIB-EVAL documents what ``GET /rubric`` returns on an empty
+  database, as one ``empty-response: `<json>``` line in ``## computed-rubric``.
+  The documented JSON must equal what the endpoint actually returns with no
+  analysis records (``test_lib_eval_documents_rubric_empty_database_response``).
+- PR #335 r1: the critical-blocker rule is criterion-level, as in the spec.
+  The spec's ``**Critical blockers:**`` clause and every LIB-EVAL line that
+  mentions a blocker are parsed by one grammar, ``any <unit> <= N in <names>``,
+  and must agree on unit, threshold and the Scoring Sheet categories named
+  (``test_lib_eval_blocker_rule_matches_spec``).
 
 Name normalisation. The spec names categories in prose ("AI Law Signal
 Quality"); ``RubricScores`` names fields in camelCase (``aiLawSignalQuality``).
@@ -41,6 +50,7 @@ executed as Python: a tree walker accepts numbers, allowlisted names,
 from __future__ import annotations
 
 import ast
+import json
 import math
 import operator
 import re
@@ -73,6 +83,12 @@ SPEC_TOTAL_LABEL = "**Total**"
 LIB_EVAL_SPEC_HEADING = "## spec-rubric"
 LIB_EVAL_COMPUTED_HEADING = "## computed-rubric"
 LIB_EVAL_PROXY_LABEL = "label: heuristic-proxy"
+# LIB-EVAL key for the documented empty-database body of GET /rubric.
+LIB_EVAL_EMPTY_KEY = "empty-response:"
+# The spec's blocker clause label, and the word that marks a LIB-EVAL line as
+# stating a blocker rule (every such line must parse; none may be prose-only).
+SPEC_BLOCKER_LABEL = "**Critical blockers:**"
+BLOCKER_TRIGGER = "blocker"
 SIGNAL_FENCE_OPEN = "```python"
 FENCE = "```"
 
@@ -422,6 +438,108 @@ def _require_label(section: list[tuple[str, bool]], label: str, where: str) -> N
 
 
 # --------------------------------------------------------------------------
+# LIB-EVAL empty-database response (PR #335 r1, finding 1)
+# --------------------------------------------------------------------------
+
+_EMPTY_RESPONSE = re.compile(re.escape(LIB_EVAL_EMPTY_KEY) + r" `([^`]+)`(?: \S.*)?")
+
+
+def _reject_json_constant(name: str) -> object:
+    raise RubricDocError(f"JSON constant {_show(name)} is not a JSON value")
+
+
+def _lib_eval_empty_response(text: str) -> object:
+    """The JSON body LIB-EVAL documents for GET /rubric with no analysis records.
+
+    Exactly one ``empty-response: `<json>``` line, outside code, in
+    ``## computed-rubric``. The first code span is parsed as strict JSON (no
+    NaN/Infinity); prose may follow it.
+    """
+    where = f"{LIB_EVAL} {LIB_EVAL_COMPUTED_HEADING}"
+    section = _section(text, LIB_EVAL_COMPUTED_HEADING, LIB_EVAL)
+    hits = [line for line, fenced in section if not fenced and line.startswith(LIB_EVAL_EMPTY_KEY)]
+    if len(hits) != 1:
+        raise RubricDocError(
+            f"{where}: needs one '{LIB_EVAL_EMPTY_KEY} `<json>`' line outside code documenting what "
+            f"GET {RUBRIC_PATH} returns with no analysis records; found {len(hits)}"
+        )
+    match = _EMPTY_RESPONSE.fullmatch(hits[0])
+    if match is None:
+        raise RubricDocError(f"{where}: {_show(hits[0])} must be '{LIB_EVAL_EMPTY_KEY} `<json>`' then optional prose")
+    try:
+        return json.loads(match.group(1), parse_constant=_reject_json_constant)
+    except (ValueError, RecursionError) as exc:
+        raise RubricDocError(f"{where}: {_show(match.group(1))} is not strict JSON") from exc
+
+
+# --------------------------------------------------------------------------
+# Critical-blocker rule (PR #335 r1, finding 2): one grammar for both docs
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Blocker:
+    unit: str  # what is scored: "criterion" in the spec today
+    threshold: int  # a score <= threshold blocks
+    categories: frozenset[str]  # Scoring Sheet names the rule covers
+
+
+# "any <unit> <= N in A, B, or C". ASCII digits only, at most 3 (no int bomb).
+_BLOCKER_CLAUSE = re.compile(r"any (?P<unit>[a-z]+) (?:≤|<=) ?(?P<threshold>[0-9]{1,3}) in (?P<names>[^.;]+)")
+_BLOCKER_LIST_SPLIT = re.compile(r",(?: or)? | or ")
+
+
+def _blocker_category(name: str, sheet_names: Sequence[str], where: str) -> str:
+    """A name in the clause is a Scoring Sheet name or a unique whole-word prefix of one."""
+    name = unicodedata.normalize("NFC", name)
+    hits = [s for s in sheet_names if s == name or s.startswith(name + " ")]
+    if not name or len(hits) != 1:
+        raise RubricDocError(f"{where}: blocker category {_show(name)} names {len(hits)} Scoring Sheet categories")
+    return hits[0]
+
+
+def _blocker_match(text: str, sheet_names: Sequence[str], where: str) -> tuple[Blocker, int]:
+    """Parse the one blocker clause in ``text``; return it and where it ends. Zero or several fail closed."""
+    matches = list(_BLOCKER_CLAUSE.finditer(text))
+    if len(matches) != 1:
+        raise RubricDocError(
+            f"{where}: {_show(text)} must state the blocker as 'any <unit> <= N in <categories>' "
+            f"exactly once; found {len(matches)}"
+        )
+    match = matches[0]
+    parts = _BLOCKER_LIST_SPLIT.split(match.group("names").rstrip(" "))
+    categories = [_blocker_category(part, sheet_names, where) for part in parts]
+    if len(set(categories)) != len(categories):
+        raise RubricDocError(f"{where}: blocker names a category twice")
+    return Blocker(match.group("unit"), int(match.group("threshold")), frozenset(categories)), match.end()
+
+
+def _blocker_in(text: str, sheet_names: Sequence[str], where: str) -> Blocker:
+    return _blocker_match(text, sheet_names, where)[0]
+
+
+def _spec_blocker(text: str, sheet_names: Sequence[str]) -> Blocker:
+    """The spec's ``**Critical blockers:**`` clause: one label, outside code, ending the line."""
+    hits = [line for line, fenced in _lines(text, SPEC_RUBRIC) if not fenced and SPEC_BLOCKER_LABEL in line]
+    if len(hits) != 1 or hits[0].count(SPEC_BLOCKER_LABEL) != 1:
+        raise RubricDocError(f"{SPEC_RUBRIC}: needs {SPEC_BLOCKER_LABEL!r} exactly once outside code")
+    clause = hits[0].split(SPEC_BLOCKER_LABEL, 1)[1]
+    blocker, end = _blocker_match(clause, sheet_names, SPEC_RUBRIC)
+    tail = clause[end:].strip(" ")
+    if tail not in ("", "."):
+        raise RubricDocError(f"{SPEC_RUBRIC}: unexpected text {_show(tail)} after the blocker clause")
+    return blocker
+
+
+def _lib_eval_blockers(text: str, sheet_names: Sequence[str]) -> list[Blocker]:
+    """Every LIB-EVAL line outside code that mentions a blocker, parsed. None is a failure."""
+    lines = [line for line, fenced in _lines(text, LIB_EVAL) if not fenced and BLOCKER_TRIGGER in line.casefold()]
+    if not lines:
+        raise RubricDocError(f"{LIB_EVAL}: states no {BLOCKER_TRIGGER} rule; restate the spec's {SPEC_BLOCKER_LABEL}")
+    return [_blocker_in(line, sheet_names, LIB_EVAL) for line in lines]
+
+
+# --------------------------------------------------------------------------
 # Formula arithmetic: an allowlisted tree walker; doc text is never executed
 # --------------------------------------------------------------------------
 
@@ -701,6 +819,39 @@ def test_rubric_endpoint_overall_is_spec_weighted(vector: str, app_client: TestC
     )
 
 
+def test_lib_eval_documents_rubric_empty_database_response(app_client: TestClient, db_session: Session) -> None:
+    """PR #335 r1 finding 1: LIB-EVAL says what /rubric returns with no records, and it is true.
+
+    The expected body is not restated here: it is whatever the endpoint returns
+    on an empty database, so the doc follows the code if the contract changes.
+    """
+    assert db_session.query(Analysis).count() == 0, "precondition: the database must be empty"
+    response = app_client.get(RUBRIC_PATH)
+    assert response.status_code == 200, f"GET {RUBRIC_PATH} on an empty database returned {response.status_code}"
+    actual = response.json()
+    documented = _lib_eval_empty_response(_read_doc(LIB_EVAL))
+    # Type check too: 0 == False and 1.0 == 1 would otherwise pass.
+    assert type(documented) is type(actual) and documented == actual, (
+        f"{LIB_EVAL} documents {_show(json.dumps(documented))} for an empty database; "
+        f"GET {RUBRIC_PATH} returns {_show(json.dumps(actual))}"
+    )
+
+
+def test_lib_eval_blocker_rule_matches_spec() -> None:
+    """PR #335 r1 finding 2: every LIB-EVAL blocker statement equals the spec's clause.
+
+    Unit (criterion vs category), threshold and covered categories all come
+    from the spec's ``**Critical blockers:**`` line, resolved against the
+    Scoring Sheet; nothing is restated here.
+    """
+    spec_text = _read_doc(SPEC_RUBRIC)
+    sheet_names = [name for name, _ in _spec_sheet_rows(spec_text)]
+    spec = _spec_blocker(spec_text, sheet_names)
+    lib_eval = _lib_eval_blockers(_read_doc(LIB_EVAL), sheet_names)
+    differing = [blocker for blocker in lib_eval if blocker != spec]
+    assert not differing, f"{LIB_EVAL} blocker rule differs from {SPEC_RUBRIC} {spec}: {differing}"
+
+
 # --------------------------------------------------------------------------
 # Parser vectors (QUALITY-BAR R2): accept and reject rows per parser
 # --------------------------------------------------------------------------
@@ -772,6 +923,33 @@ def _clamp10(value: float) -> float:
 def _label_in(extra: Sequence[str], spec_rows: Sequence[str] = ()) -> None:
     text = _mini_lib_eval(spec_rows, _ONE_ROW, extra=extra)
     _require_label(_section(text, LIB_EVAL_COMPUTED_HEADING, "v"), LIB_EVAL_PROXY_LABEL, "v")
+
+
+def _empty_in(extra: Sequence[str], spec_rows: Sequence[str] = ()) -> object:
+    return _lib_eval_empty_response(_mini_lib_eval(spec_rows, _ONE_ROW, extra=extra))
+
+
+_EMPTY_NULL = f"{LIB_EVAL_EMPTY_KEY} `null`"
+
+# Blocker vectors resolve against this mini Scoring Sheet. "Alpha" is an
+# ambiguous prefix; "Beta" a unique whole-word prefix of "Beta Gamma".
+_BLOCKER_SHEET: tuple[str, ...] = ("Alpha One", "Alpha Two", "Beta Gamma", "Delta")
+_BLOCKER_EXPECTED = Blocker("criterion", 2, frozenset({"Alpha One", "Beta Gamma", "Delta"}))
+_SPEC_BLOCKER_LINE = (
+    f"**Pass threshold:** ≥4.2 average. {SPEC_BLOCKER_LABEL} any criterion ≤2 in Alpha One, Beta, or Delta."
+)
+
+
+def _spec_blk(*lines: str) -> Blocker:
+    return _spec_blocker(LINE_SEPARATOR.join((_MINI_SPEC, *lines)), _BLOCKER_SHEET)
+
+
+def _line_blk(line: str) -> Blocker:
+    return _blocker_in(line, _BLOCKER_SHEET, "v")
+
+
+def _lib_blk(*lines: str) -> list[Blocker]:
+    return _lib_eval_blockers(LINE_SEPARATOR.join(("# LIB-EVAL", LIB_EVAL_SPEC_HEADING, *lines)), _BLOCKER_SHEET)
 
 
 @dataclass(frozen=True)
@@ -1035,10 +1213,129 @@ VECTORS: tuple[Vector, ...] = (
     Vector("signal-run", "def", lambda: _run_signal_block("def f():\n    pass", {"x": 1.0}, _ident), REJECT),
     Vector("signal-run", "unknown-name", lambda: _run_signal_block("a = y", {"x": 1.0}, _ident), REJECT),
     Vector("signal-run", "deep", lambda: _run_signal_block("a = " + "1+" * 200_000 + "1", {"x": 1.0}, _ident), REJECT),
+    # _lib_eval_empty_response (PR #335 r1 finding 1)
+    Vector("empty-response", "null", lambda: _empty_in([_EMPTY_NULL]), None),
+    Vector(
+        "empty-response",
+        "null-then-prose",
+        lambda: _empty_in([f"{_EMPTY_NULL} (HTTP 200) when there are no analysis records"]),
+        None,
+    ),
+    Vector("empty-response", "object", lambda: _empty_in([f"{LIB_EVAL_EMPTY_KEY} `{{}}`"]), {}),
+    Vector("empty-response", "absent", lambda: _empty_in([]), REJECT),
+    Vector("empty-response", "twice", lambda: _empty_in([_EMPTY_NULL, _EMPTY_NULL]), REJECT),
+    Vector("empty-response", "only-inside-code", lambda: _empty_in([FENCE, _EMPTY_NULL, FENCE]), REJECT),
+    Vector("empty-response", "other-section", lambda: _empty_in([], spec_rows=[_EMPTY_NULL]), REJECT),
+    Vector("empty-response", "key-case-variant", lambda: _empty_in(["Empty-response: `null`"]), REJECT),
+    Vector("empty-response", "no-code-span", lambda: _empty_in([f"{LIB_EVAL_EMPTY_KEY} null"]), REJECT),
+    Vector("empty-response", "prose-glued-to-span", lambda: _empty_in([f"{_EMPTY_NULL}x"]), REJECT),
+    Vector("empty-response", "python-none", lambda: _empty_in([f"{LIB_EVAL_EMPTY_KEY} `None`"]), REJECT),
+    Vector("empty-response", "lookalike-null", lambda: _empty_in([f"{LIB_EVAL_EMPTY_KEY} `nuII`"]), REJECT),
+    Vector("empty-response", "nan-constant", lambda: _empty_in([f"{LIB_EVAL_EMPTY_KEY} `NaN`"]), REJECT),
+    Vector("empty-response", "two-values", lambda: _empty_in([f"{LIB_EVAL_EMPTY_KEY} `null null`"]), REJECT),
+    Vector(
+        "empty-response",
+        "u2028-forged",
+        lambda: _empty_in([f"see below {_EMPTY_NULL}"]),
+        REJECT,
+    ),
+    Vector(
+        "empty-response",
+        "deep-nesting",
+        lambda: _empty_in([f"{LIB_EVAL_EMPTY_KEY} `{'[' * 200_000}{']' * 200_000}`"]),
+        REJECT,
+    ),
+    Vector("empty-response", "huge-int", lambda: _empty_in([f"{LIB_EVAL_EMPTY_KEY} `{'1' * 2_000_000}`"]), REJECT),
+    # _spec_blocker (PR #335 r1 finding 2): the spec's labelled clause
+    Vector("blocker-spec", "spec-form", lambda: _spec_blk(_SPEC_BLOCKER_LINE), _BLOCKER_EXPECTED),
+    Vector(
+        "blocker-spec",
+        "ascii-le-no-oxford-comma",
+        lambda: _spec_blk(f"{SPEC_BLOCKER_LABEL} any criterion <= 2 in Alpha One, Beta or Delta"),
+        _BLOCKER_EXPECTED,
+    ),
+    Vector("blocker-spec", "label-missing", lambda: _spec_blk("any criterion ≤2 in Delta."), REJECT),
+    Vector("blocker-spec", "label-twice", lambda: _spec_blk(_SPEC_BLOCKER_LINE, _SPEC_BLOCKER_LINE), REJECT),
+    Vector(
+        "blocker-spec",
+        "label-twice-in-line",
+        lambda: _spec_blk(f"{_SPEC_BLOCKER_LINE} {SPEC_BLOCKER_LABEL}"),
+        REJECT,
+    ),
+    Vector("blocker-spec", "label-only-inside-code", lambda: _spec_blk(FENCE, _SPEC_BLOCKER_LINE, FENCE), REJECT),
+    Vector("blocker-spec", "text-after-clause", lambda: _spec_blk(f"{_SPEC_BLOCKER_LINE} Also more."), REJECT),
+    Vector(
+        "blocker-spec",
+        "u2028-forged",
+        lambda: _spec_blk(f"{SPEC_BLOCKER_LABEL} any criterion ≤2 in Delta."),
+        REJECT,
+    ),
+    # _blocker_in: the one grammar both docs are parsed with
+    Vector(
+        "blocker-line",
+        "unit-is-captured-not-assumed",
+        lambda: _line_blk("critical blocker if any category <= 2 in Alpha One"),
+        Blocker("category", 2, frozenset({"Alpha One"})),
+    ),
+    Vector(
+        "blocker-line",
+        "whole-word-prefix",
+        lambda: _line_blk("any criterion <= 3 in Beta"),
+        Blocker("criterion", 3, frozenset({"Beta Gamma"})),
+    ),
+    Vector(
+        "blocker-line",
+        "category-level-phrasing",
+        lambda: _line_blk("critical blocker if any of Alpha One, Beta or Delta scores <= 2"),
+        REJECT,
+    ),
+    Vector("blocker-line", "ambiguous-prefix", lambda: _line_blk("any criterion <= 2 in Alpha"), REJECT),
+    Vector("blocker-line", "part-word-prefix", lambda: _line_blk("any criterion <= 2 in Bet"), REJECT),
+    Vector("blocker-line", "unknown-name", lambda: _line_blk("any criterion <= 2 in Epsilon"), REJECT),
+    Vector("blocker-line", "cyrillic-e", lambda: _line_blk("any criterion <= 2 in B\u0435ta"), REJECT),
+    Vector("blocker-line", "nbsp-in-name", lambda: _line_blk("any criterion <= 2 in Alpha\u00a0One"), REJECT),
+    Vector("blocker-line", "fullwidth-threshold", lambda: _line_blk("any criterion <= ２ in Delta"), REJECT),
+    Vector("blocker-line", "lookalike-le", lambda: _line_blk("any criterion ≦2 in Delta"), REJECT),
+    Vector("blocker-line", "two-clauses", lambda: _line_blk("any criterion <= 2 in Delta; any category <= 1 in Beta"), REJECT),
+    Vector("blocker-line", "duplicate-category", lambda: _line_blk("any criterion <= 2 in Beta, Beta Gamma"), REJECT),
+    Vector("blocker-line", "empty-item", lambda: _line_blk("any criterion <= 2 in Beta, , Delta"), REJECT),
+    Vector("blocker-line", "and-conjunction", lambda: _line_blk("any criterion <= 2 in Beta and Delta"), REJECT),
+    Vector("blocker-line", "threshold-int-bomb", lambda: _line_blk(f"any criterion <= {'9' * 2_000_000} in Delta"), REJECT),
+    Vector("blocker-line", "huge-name", lambda: _line_blk(f"any criterion <= 2 in {'A' * 2_000_000}"), REJECT),
+    # _lib_eval_blockers: every mention outside code must parse; none is a failure
+    Vector(
+        "blocker-lib",
+        "every-mention-parsed",
+        lambda: _lib_blk("rule: blocker if any criterion <= 2 in Delta", "Critical Blocker: any category <= 1 in Beta"),
+        [Blocker("criterion", 2, frozenset({"Delta"})), Blocker("category", 1, frozenset({"Beta Gamma"}))],
+    ),
+    Vector("blocker-lib", "none", lambda: _lib_blk("rule: any criterion <= 2 in Delta"), REJECT),
+    Vector("blocker-lib", "only-inside-code", lambda: _lib_blk(FENCE, "blocker: any criterion <= 2 in Delta", FENCE), REJECT),
+    Vector(
+        "blocker-lib",
+        "second-prose-mention",
+        lambda: _lib_blk("blocker: any criterion <= 2 in Delta", "Blockers are described above."),
+        REJECT,
+    ),
 )
 
 PARSERS = frozenset(
-    {"weight", "mapping", "sheet", "headings", "lib-spec", "computed", "signal-block", "label", "formula", "signal-run"}
+    {
+        "weight",
+        "mapping",
+        "sheet",
+        "headings",
+        "lib-spec",
+        "computed",
+        "signal-block",
+        "label",
+        "formula",
+        "signal-run",
+        "empty-response",
+        "blocker-spec",
+        "blocker-line",
+        "blocker-lib",
+    }
 )
 
 
@@ -1118,6 +1415,12 @@ def test_rubric_doc_errors_are_ascii_and_path_free(tmp_path: Path) -> None:
         lambda: _parse_weight(hostile, "v"),
         lambda: _compute(hostile, _SIGNAL_NAMES, _ident),
         lambda: _read_doc("missing.md", tmp_path),
+        lambda: _line_blk(hostile),
+        lambda: _line_blk(f"any criterion <= 2 in {hostile}"),
+        # Doc-level parsers reject control and bidi characters before echoing,
+        # so feed them printable oversized text to exercise truncation.
+        lambda: _spec_blk(f"{SPEC_BLOCKER_LABEL} any criterion <= 2 in Delta. {'EVIL' + 'X' * 500}"),
+        lambda: _empty_in([f"{LIB_EVAL_EMPTY_KEY} `{'EVIL' + 'X' * 500}`"]),
     )
     for run in runs:
         with pytest.raises(RubricDocError) as caught:
