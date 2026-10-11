@@ -51,8 +51,9 @@ because: CVE-2024-24762, CVE-2024-53981 patched at that version
 
 ### S3: RAG-uses-existing-LLM-client
 rule: RAG pipeline (`services/legal_kb.py`, `services/embedding.py`) uses packages above + existing LocalAI client for dense embeddings
-forbidden: sentence-transformers, torch, FAISS, onnxruntime, sqlite-vec
-because: those were evaluated candidates, not shipped stack (see LIB-LEGAL)
+forbidden: torch, FAISS
+because: torch is rejected under S5; FAISS is rejected under LIB-LEGAL L5 (no ANN, plan R2)
+note: onnxruntime, sentence-transformers[onnx] and sqlite-vec (exact mode only; ANN modes stay banned under plan R-1) are approved for the product by owner decision 2026-10-11 (#152), HR2b judged on licence per plan R1; see LIB-LEGAL. None is shipped yet, and adoption still needs an HR3 grade (A or above) via `/dependency-audit`
 
 ## test-deps
 

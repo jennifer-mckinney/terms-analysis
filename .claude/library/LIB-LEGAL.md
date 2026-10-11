@@ -3,7 +3,7 @@ loads: on-trigger
 scope: project
 xref: [[LIB-STACK]] [[LIB-ARCH]] [[LIB-RULES]] [[.claude/CLAUDE.md#hard-requirements]]
 
-status: LLM/Embedding/Inference tables below describe an evaluated *candidate* stack. Shipped LLM = LocalAI + Apertus-8B/EuroLLM-22B (`services/localai.py`). Shipped legal-KB embeddings reuse `LocalAIClient.embed()` — no separate sentence-transformers/onnxruntime pipeline. Vector Store, REJECTED, and RAG Architecture sections ARE accurate to current implementation.
+status: LLM/Embedding/Inference tables below describe an evaluated *candidate* stack. Shipped LLM = LocalAI + Apertus-8B/EuroLLM-22B (`services/localai.py`). Shipped legal-KB embeddings reuse `LocalAIClient.embed()`; no sentence-transformers/onnxruntime pipeline is shipped yet, although both are approved (see inference-backend). Vector Store, REJECTED, and RAG Architecture sections ARE accurate to current implementation.
 
 ## approval-policy
 
@@ -46,10 +46,12 @@ rule: only Ollama CLI approved; GUI/Turbo/cloud REJECTED
 
 ## inference-backend
 
+Approved by owner decision 2026-10-11 (#152), HR2b judged on licence per plan R1. For each row, adoption still needs an HR3 grade (A or above) via `/dependency-audit`.
+
 | Tool | License | Origin | Notes |
 |------|---------|--------|-------|
-| **onnxruntime** | MIT | Microsoft | Runs ONNX-exported models; no PyTorch needed |
-| sentence-transformers[onnx] | Apache 2.0 | UKP Lab (Germany) | Wraps onnxruntime with HuggingFace model support |
+| **onnxruntime** | MIT | Microsoft | Runs ONNX-exported models; no PyTorch needed at runtime |
+| sentence-transformers[onnx] | Apache 2.0 | UKP Lab (Germany) | Wraps onnxruntime with HuggingFace model support. Condition: requires torch (Requires-Dist `torch>=2.2`, v6.1.0); usable only after the torch ruling (LIB-STACK S5) is revisited; open owner card |
 
 ## vector-store
 
@@ -61,7 +63,7 @@ because: legal risk findings — approximate NN introduces false negatives = mis
 | Tool | License | Search | Notes |
 |------|---------|--------|-------|
 | **numpy exhaustive** | BSD | Exact | Zero new deps. `np.dot(query, corpus.T)`. Correct for <50K chunks. Primary. |
-| sqlite-vec | MIT | Exact | SQLite extension by Alex Garcia (independent). Use if corpus > 100K chunks. |
+| sqlite-vec | MIT | Exact | SQLite extension by Alex Garcia (independent). Exact mode only; ANN modes stay banned (plan R-1). Approved by owner decision 2026-10-11 (#152), HR2b judged on licence per plan R1; adoption still needs an HR3 grade (A or above) via `/dependency-audit`. Use if corpus > 100K chunks. |
 
 ## rejected-tools
 
@@ -72,7 +74,7 @@ because: legal risk findings — approximate NN introduces false negatives = mis
 | Voyage Law 2 | Proprietary API-only; fails open-source + local-only |
 | Ollama GUI/Turbo | Unclear license (GUI), proprietary (Turbo) |
 | FAISS / faiss-cpu | Meta origin; fails no-Meta requirement |
-| torch / PyTorch | Meta origin (donated to Linux Foundation but Meta-created); use onnxruntime instead |
+| torch / PyTorch | Meta origin (donated to Linux Foundation but Meta-created); rejected under LIB-STACK S5 until that ruling is revisited. ONNX-exported models run on onnxruntime without it |
 | BAAI/bge-m3 | Beijing Academy of AI — Chinese government-affiliated |
 | Qwen / Qwen3-* | Alibaba (Chinese company); fails no-Chinese-company requirement |
 | Any HNSW-based vector store | Approximate search; unacceptable for legal risk analysis |
@@ -130,7 +132,7 @@ rule: Pile of Law is CC-BY-NC-SA-4.0 (non-commercial); do NOT use for commercial
 
 | Service | File | Purpose |
 |---------|------|---------|
-| `embedding.py` | `src/backend/app/services/` | Doc-chunk BM25 + dense + RRF ensemble (not yet wired into `analyzer.py`) |
+| `embedding.py` | `src/backend/app/services/` | Chunking, BM25 and RRF primitives imported by `legal_kb.py`; its doc-chunk ensemble `select_relevant_chunks` has no caller in `app/` yet |
 | `legal_kb.py` | `src/backend/app/services/` | Legal KB: corpus parser, numpy exhaustive index builder, BM25/RRF retrieval — wired into `analyzer.py::analyze_text()` |
 | `localai.py` | `src/backend/app/services/` | LLM client targeting LocalAI (Apertus-8B/EuroLLM-22B); never named `lm_studio.py` in actual codebase |
 
