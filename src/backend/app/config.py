@@ -231,10 +231,17 @@ class Settings:
     max_input_chars: int = int(os.getenv("MAX_INPUT_CHARS", "50000"))
     # 10 MB default upload limit (H5)
     max_upload_bytes: int = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
-    allowed_origins: List[str] = field(
-        default_factory=lambda: _split_env_list(
-            "ALLOWED_ORIGINS",
-            "http://localhost:8000,http://127.0.0.1:8000",
+    # CORS allowlist (#135), passed as-is to CORSMiddleware with
+    # allow_credentials=True. Each entry is one serialised browser origin,
+    # "scheme://host[:port]"; "*" is never accepted and http is allowed only
+    # for loopback hosts. Validated and frozen to a tuple in __post_init__, so
+    # the middleware's copy cannot be widened in place. Empty closes CORS.
+    allowed_origins: Tuple[str, ...] = field(
+        default_factory=lambda: tuple(
+            _split_env_list(
+                "ALLOWED_ORIGINS",
+                "http://localhost:8000,http://127.0.0.1:8000",
+            )
         )
     )
     watchlist_refresh_seconds: int = int(os.getenv("WATCHLIST_REFRESH_SECONDS", "0"))
@@ -298,6 +305,9 @@ class Settings:
         # Fail closed at load (and on dataclasses.replace) on bad URL-fetch
         # limits: a broken SSRF config must stop startup, not weaken the guard.
         _validate_url_fetch_settings(self)
+        # Same for the CORS allowlist (#135): a credentialed wildcard or a
+        # plain-http remote origin must stop startup.
+        _validate_allowed_origins(self)
         # Same for auth and rate limits (#133 ruling 3).
         validate_security_settings(self)
         object.__setattr__(self, "trusted_proxy_cidrs", tuple(self.trusted_proxy_cidrs))
@@ -393,6 +403,7 @@ _ENV_NAMES = {
     "max_concurrent_analyses": "MAX_CONCURRENT_ANALYSES",
     "concurrency_retry_after_s": "CONCURRENCY_RETRY_AFTER_S",
     "max_batch_items": "MAX_BATCH_ITEMS",
+    "allowed_origins": "ALLOWED_ORIGINS",
 }
 
 
@@ -537,6 +548,111 @@ def validate_security_settings(s: Settings) -> None:
             "must be set together or not at all"
         )
     _check_api_key(s)
+
+
+# ── #135 CORS origin allowlist ────────────────────────────────────────────────
+
+# Origin schemes CORS serves. http is further limited to CORS_LOOPBACK_HOSTS.
+CORS_ORIGIN_SCHEMES = frozenset({"http", "https"})
+# Hosts that may use plain http, in the form a browser puts in the Origin
+# header. A security rule, not a tunable: every other host needs https.
+CORS_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]"})
+# Ports a browser drops when it serialises an origin (RFC 6454 section 6.1),
+# so an entry spelling one out could never match a request.
+_CORS_DEFAULT_PORTS = {"http": 80, "https": 443}
+# Protocol limits: highest TCP port, longest DNS name (RFC 1035).
+_PORT_MAX = 65535
+_DNS_NAME_MAX = 253
+# One serialised origin: scheme://host[:port] in lower-case ASCII and nothing
+# else. The host is dot-separated labels (DNS names and dotted IPv4) or a
+# bracketed IPv6 literal; both are checked further in _origin_error. Every
+# repeated group starts with its own delimiter, so matching is linear, and
+# fullmatch keeps a trailing newline from passing.
+_ORIGIN_RE = re.compile(
+    r"(?P<scheme>[a-z][a-z0-9+.-]*)://"
+    r"(?P<host>[a-z0-9-]+(?:\.[a-z0-9-]+)*|\[[0-9a-f:]+\])"
+    r"(?::(?P<port>[1-9][0-9]{0,4}))?"
+)
+_DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+# A browser parses a host whose last label is numeric (decimal or 0x hex) as
+# IPv4 (WHATWG URL host parser), so such a host must be canonical dotted IPv4.
+_NUMERIC_LABEL_RE = re.compile(r"[0-9]+|0x[0-9a-f]*")
+
+
+def _host_error(host: str) -> Optional[str]:
+    """Why ``host`` is not the browser-serialised form of a host, or None."""
+    if host.startswith("["):
+        try:
+            canonical = f"[{ipaddress.IPv6Address(host[1:-1])}]"
+        except ValueError:
+            return "has an invalid IPv6 address"
+        return None if canonical == host else "must write the IPv6 address in canonical form"
+    labels = host.split(".")
+    if len(host) > _DNS_NAME_MAX or not all(_DNS_LABEL_RE.fullmatch(lb) for lb in labels):
+        return "has an invalid host name"
+    if _NUMERIC_LABEL_RE.fullmatch(labels[-1]):
+        # IPv4Address accepts only canonical dotted decimal (four octets, no
+        # leading zeros, no hex), which is exactly the browser's form.
+        try:
+            ipaddress.IPv4Address(host)
+        except ValueError:
+            return "has a numeric host that is not a canonical dotted IPv4 address"
+    return None
+
+
+def _origin_error(entry: object) -> Optional[str]:
+    """Why ``entry`` may not be a CORS origin, or None if it may.
+
+    The reason never contains the entry, so a hostile value (control or bidi
+    characters, a lone surrogate, megabytes of text) cannot reach a log.
+    """
+    if not isinstance(entry, str):
+        return "must be a string"
+    if "*" in entry:
+        return (
+            "contains '*'; a wildcard is never allowed with credentialed CORS, "
+            "list each origin instead"
+        )
+    match = _ORIGIN_RE.fullmatch(entry)
+    if match is None:
+        return (
+            "must be one origin, scheme://host[:port], in lower-case ASCII with "
+            "no path (not even a trailing '/'), query, fragment, userinfo or "
+            "whitespace"
+        )
+    scheme, host, port = match.group("scheme", "host", "port")
+    if scheme not in CORS_ORIGIN_SCHEMES or (
+        scheme == "http" and host not in CORS_LOOPBACK_HOSTS
+    ):
+        return (
+            "must use https; http is allowed only for "
+            + ", ".join(sorted(CORS_LOOPBACK_HOSTS))
+        )
+    reason = _host_error(host)
+    if reason is not None:
+        return reason
+    if port is not None and int(port) > _PORT_MAX:
+        return f"has a port above {_PORT_MAX}"
+    if port is not None and int(port) == _CORS_DEFAULT_PORTS[scheme]:
+        return "spells out the scheme's default port, which browsers omit; drop it"
+    return None
+
+
+def _validate_allowed_origins(s: Settings) -> None:
+    """Raise ValueError on any invalid CORS origin; store the list as a tuple.
+
+    Called from ``Settings.__post_init__``, so import and
+    ``dataclasses.replace`` both fail closed. The tuple is the object
+    CORSMiddleware keeps, so the validated allowlist cannot be widened later.
+    """
+    origins = s.allowed_origins
+    if not isinstance(origins, (list, tuple)):
+        raise ValueError(f"{_label('allowed_origins')} must be a list of origin strings")
+    for index, entry in enumerate(origins, start=1):
+        reason = _origin_error(entry)
+        if reason is not None:
+            raise ValueError(f"{_label('allowed_origins')} entry {index} {reason}")
+    object.__setattr__(s, "allowed_origins", tuple(origins))
 
 
 settings = Settings()
