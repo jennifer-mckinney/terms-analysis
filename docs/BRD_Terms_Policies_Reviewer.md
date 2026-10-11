@@ -925,7 +925,7 @@ The two constraints below are non-negotiable operating requirements for the tool
 - [ ] Improve detection accuracy to 85%+ F1 score
 - [ ] Complete all 6 document format parsers
 - [ ] Implement caching and performance optimization
-- [ ] Build PDF export functionality
+- [x] Build PDF export functionality
 - [ ] Create comprehensive test suite (500+ examples)
 - [ ] Third-party legal accuracy audit
 - [ ] Write user documentation
@@ -997,7 +997,7 @@ The two constraints below are non-negotiable operating requirements for the tool
 **Goal:** Add differentiating features and improve retention.
 
 **Key Deliverables:**
-- [ ] Watchlist monitoring with change detection
+- [x] Watchlist monitoring with change detection
 - [ ] Vendor comparison (side-by-side)
 - [ ] API launch with documentation
 - [ ] CSV/JSON export options

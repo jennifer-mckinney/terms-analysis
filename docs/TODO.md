@@ -1,4 +1,9 @@
-# TODO
+# Sprint 2025-11-01 to 2025-12-31
+
+Closed sprint list for the first build sprint (first commit to the commit that
+added this file). It is not the roadmap. The single roadmap is the
+[BRD Implementation Roadmap](BRD_Terms_Policies_Reviewer.md#implementation-roadmap);
+track new work there or on the GitHub project board.
 
 ## High Priority
 - [x] Persist raw document text with line offsets for Verify view highlighting.
