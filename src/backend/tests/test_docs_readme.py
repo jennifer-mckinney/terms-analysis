@@ -33,6 +33,7 @@ import re
 import sys
 import unicodedata
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import Callable, get_args
 
@@ -585,6 +586,256 @@ def test_hr9_grades_match_analyzer_grade(hr9_entries: list[tuple[str, str, float
                   if _grade(p) != _hr9_grade(hr9_entries, p)]
     assert not mismatched, f"analyzer._grade disagrees with HR9 at {mismatched}"
     assert {_grade(p) for p in probes} == {g for g, _, _ in hr9_entries}
+
+
+# --------------------------------------------------------------------------
+# Grade bands: each README row's score band grades as that row says (#144)
+# --------------------------------------------------------------------------
+
+# Numbers are ASCII-only (re.ASCII): non-ASCII digits, exponents, nan and inf
+# are refused rather than read as a band.
+_NUM = r"(\d+(?:\.\d+)?|\.\d+)"
+_LOWER_OPS: dict[str, bool] = {">=": True, "≥": True, ">": False}
+_UPPER_OPS: dict[str, bool] = {"<=": True, "≤": True, "<": False}
+_OP = r"(>=|≥|>|<=|≤|<)"
+_BAND_ONE_SIDED = re.compile(rf"{_OP}\s*{_NUM}", re.ASCII)
+_BAND_RANGE = re.compile(rf"{_NUM}\s*(?:-|–|—|to)\s*{_NUM}", re.ASCII)
+_BAND_PAIR = re.compile(rf"(>=|≥|>)\s*{_NUM}\s*(?:,|and|&)\s*(<=|≤|<)\s*{_NUM}", re.ASCII)
+_BAND_CHAIN = re.compile(rf"{_NUM}\s*(<=|≤|<)\s*[A-Za-z]+\s*(<=|≤|<)\s*{_NUM}", re.ASCII)
+
+
+@dataclass(frozen=True)
+class Band:
+    """An interval of scores; ``None`` is an open end."""
+
+    lower: Decimal | None
+    lower_inclusive: bool
+    upper: Decimal | None
+    upper_inclusive: bool
+
+
+def _parse_band(cell: str) -> Band:
+    """Read a score band cell; anything that is not a band raises (fail closed).
+
+    Forms: ``>= a`` / ``> a`` / ``< b`` / ``<= b``; ``a - b`` (both ends
+    inclusive, as a reader takes it); ``>= a and < b``; ``a <= x < b``.
+    """
+    text = " ".join(_MARKUP.sub("", cell).split())
+    band: Band | None = None
+    if match := _BAND_ONE_SIDED.fullmatch(text):
+        op, num = match.group(1), Decimal(match.group(2))
+        if op in _LOWER_OPS:
+            band = Band(num, _LOWER_OPS[op], None, False)
+        else:
+            band = Band(None, False, num, _UPPER_OPS[op])
+    elif match := _BAND_RANGE.fullmatch(text):
+        band = Band(Decimal(match.group(1)), True, Decimal(match.group(2)), True)
+    elif match := _BAND_PAIR.fullmatch(text):
+        band = Band(Decimal(match.group(2)), _LOWER_OPS[match.group(1)],
+                    Decimal(match.group(4)), _UPPER_OPS[match.group(3)])
+    elif match := _BAND_CHAIN.fullmatch(text):
+        band = Band(Decimal(match.group(1)), _UPPER_OPS[match.group(2)],
+                    Decimal(match.group(4)), _UPPER_OPS[match.group(3)])
+    if band is None:
+        raise DocCheckError(f"score band {_show(cell)} is not a band this check can read")
+    if band.lower is not None and band.upper is not None and band.lower >= band.upper:
+        raise DocCheckError(f"score band {_show(cell)} is empty or reversed")
+    return band
+
+
+def _band_coverage_problems(bands: list[Band], lo: Decimal, hi: Decimal) -> list[str]:
+    """Gaps and overlaps of ``bands`` over the closed range [lo, hi]."""
+    if not bands:
+        return ["no bands"]
+    ordered = sorted(bands, key=lambda b: (b.lower is not None, b.lower or Decimal(0)))
+    problems: list[str] = []
+    first, last = ordered[0], ordered[-1]
+    if first.lower is not None and (first.lower > lo or (first.lower == lo and not first.lower_inclusive)):
+        problems.append(f"nothing covers the bottom of the range {lo}")
+    if last.upper is not None and (last.upper < hi or (last.upper == hi and not last.upper_inclusive)):
+        problems.append(f"nothing covers the top of the range {hi}")
+    for below, above in zip(ordered, ordered[1:]):
+        if below.upper is None or above.lower is None:
+            problems.append("two bands are open-ended on the same side")
+        elif below.upper < above.lower or (
+            below.upper == above.lower and not (below.upper_inclusive or above.lower_inclusive)
+        ):
+            problems.append(f"gap between {below.upper} and {above.lower}")
+        elif below.upper > above.lower or (below.upper_inclusive and above.lower_inclusive):
+            problems.append(f"bands overlap at {above.lower}")
+    return problems
+
+
+def _grade_pieces(cell: str) -> frozenset[str]:
+    stripped = _MARKUP.sub("", _PARENTHETICAL.sub("", cell))
+    return frozenset(p.strip() for p in _GRADE_SEPARATORS.split(stripped) if p.strip())
+
+
+def _irp_scale() -> tuple[Decimal, Decimal, Decimal]:
+    """(factor, low, high): the IRP range and how it maps to _grade's input.
+
+    Derived, not restated (F13): the range from ``Finding.irp_score``'s
+    bounds, the factor from ``calculate_risk_score`` on one finding, checked
+    linear so a README IRP band maps to one _grade band.
+    """
+    from app.schemas import Finding
+    from app.services.analyzer import calculate_risk_score
+
+    bounds = {type(m).__name__: m for m in Finding.model_fields["irp_score"].metadata}
+    if "Ge" not in bounds or "Le" not in bounds:
+        raise DocCheckError("Finding.irp_score has no [ge, le] bounds to check coverage against")
+    lo, hi = Decimal(str(bounds["Ge"].ge)), Decimal(str(bounds["Le"].le))
+
+    def score(irp: Decimal) -> Decimal:
+        one = Finding.model_construct(irp_score=float(irp), severity="High")
+        return Decimal(str(calculate_risk_score([one])))
+
+    factor = (score(hi) - score(lo)) / (hi - lo)
+    mid = (lo + hi) / 2
+    if score(lo) != lo * factor or score(mid) != mid * factor:
+        raise DocCheckError("calculate_risk_score is not IRP times a constant; rescale this check")
+    return factor, lo, hi
+
+
+def _band_probes(band: Band, lo: Decimal, hi: Decimal, factor: Decimal) -> tuple[float, float, float]:
+    """(lower, upper, midpoint) on _grade's scale, open ends clamped to [lo, hi]."""
+    low = lo if band.lower is None or band.lower < lo else band.lower
+    high = hi if band.upper is None or band.upper > hi else band.upper
+    low_in = band.lower is None or band.lower < lo or band.lower_inclusive
+    high_in = band.upper is None or band.upper > hi or band.upper_inclusive
+    first = float(low * factor) if low_in else math.nextafter(float(low * factor), math.inf)
+    last = float(high * factor) if high_in else math.nextafter(float(high * factor), -math.inf)
+    return first, last, float((low + high) / 2 * factor)
+
+
+def test_readme_grade_bands_match_analyzer_grade(
+    readme: str, hr9_entries: list[tuple[str, str, float]]
+) -> None:
+    """Each Risk Scoring row grades as ``analyzer._grade`` does across its band.
+
+    The README states IRP (``Finding.irp_score``'s range); ``_grade`` takes
+    ``calculate_risk_score``'s mean IRP times the derived factor. Per row:
+    ``_grade`` at the lower bound, upper bound (just below an exclusive one)
+    and midpoint is a grade the row lists; and every grade the row lists is one
+    ``_grade`` gives somewhere in the band (HR9 thresholds are the only places
+    it changes; ``test_hr9_grades_match_analyzer_grade`` pins that). The rows
+    cover the whole range with no gap or overlap.
+    """
+    from app.services.analyzer import _grade
+
+    factor, lo, hi = _irp_scale()
+    thresholds = sorted({t for _, _, t in hr9_entries})
+    section = _find_section(readme, RISK_SCORING_HEADING)
+    checked = 0
+    problems: list[str] = []
+    for table in _tables(section):
+        grade_col = _column(table, r"\bgrades?\b")
+        score_col = _column(table, r"\birp\b")
+        if grade_col is None:
+            continue
+        if score_col is None:
+            raise DocCheckError("README grade table has no IRP score column to read bands from")
+        assert table.rows, "README Risk Scoring grade table has no rows"
+        bands: list[Band] = []
+        for row in table.rows:
+            band_cell = row[score_col] if score_col < len(row) else ""
+            grade_cell = row[grade_col] if grade_col < len(row) else ""
+            band = _parse_band(band_cell)
+            bands.append(band)
+            listed = _grade_pieces(grade_cell)
+            first, last, mid = _band_probes(band, lo, hi, factor)
+            if first > last:
+                problems.append(f"row {_show(band_cell)} lies outside the IRP range [{lo}, {hi}]")
+                continue
+            for where, probe in (("lower bound", first), ("upper bound", last), ("midpoint", mid)):
+                if _grade(probe) not in listed:
+                    problems.append(
+                        f"row {_show(band_cell)}: _grade({probe}) at the {where} is "
+                        f"{_grade(probe)!r}, not one of {sorted(listed)}"
+                    )
+            given = {_grade(p) for p in (first, last, mid, *(t for t in thresholds if first < t <= last))}
+            if listed - given:
+                problems.append(
+                    f"row {_show(band_cell)} lists {sorted(listed - given)}, which _grade "
+                    f"never gives in that band (it gives {sorted(given)})"
+                )
+            checked += 1
+        problems += [f"IRP range [{lo}, {hi}]: {p}" for p in _band_coverage_problems(bands, lo, hi)]
+    assert checked, "README Risk Scoring section has no grade table with score bands"
+    assert not problems, "README grade bands contradict analyzer._grade:\n" + "\n".join(problems)
+
+
+@pytest.mark.parametrize(
+    ("cell", "band"),
+    [
+        (">= 0.75", Band(Decimal("0.75"), True, None, False)),
+        ("≥ .75", Band(Decimal("0.75"), True, None, False)),
+        ("**> 0.75**", Band(Decimal("0.75"), False, None, False)),
+        ("< 0.45", Band(None, False, Decimal("0.45"), False)),
+        ("≤0.45", Band(None, False, Decimal("0.45"), True)),
+        ("0.45 - 0.74", Band(Decimal("0.45"), True, Decimal("0.74"), True)),
+        ("0.45–0.74", Band(Decimal("0.45"), True, Decimal("0.74"), True)),
+        ("0.45 to 0.74", Band(Decimal("0.45"), True, Decimal("0.74"), True)),
+        (">= 0.45 and < 0.75", Band(Decimal("0.45"), True, Decimal("0.75"), False)),
+        ("> 0.45, <= 0.75", Band(Decimal("0.45"), False, Decimal("0.75"), True)),
+        ("0.45 <= IRP < 0.75", Band(Decimal("0.45"), True, Decimal("0.75"), False)),
+        ("0.45 < x <= 0.75", Band(Decimal("0.45"), False, Decimal("0.75"), True)),
+    ],
+)
+def test_band_parser_reads_bands(cell: str, band: Band) -> None:
+    assert _parse_band(cell) == band
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        "", "  ", "n/a", "High", ">=", "0.75 -", "- 0.75", "about 0.5", "0.75+",
+        "0.74 - 0.45", "0.5 - 0.5", ">= 0.5 and < 0.5", "0.5 < x < 0.4",
+        "＞= 0.75", ">= ０.７５", ">= ٠.٧٥", ">= 0.7​5", ">= 0.7\x005",
+        ">= 7.5e-1", ">= nan", ">= inf", "<= -0.1", ">= 0.75\n# Heading",
+        ">= 0.75 < 0.5", "0.45 - 0.74 - 0.9", "0 to < 1", "9" * 10_000,
+    ],
+    ids=_show,
+)
+def test_band_parser_fails_loudly(cell: str) -> None:
+    with pytest.raises(DocCheckError):
+        _parse_band(cell)
+
+
+def test_band_parser_error_message_is_safe() -> None:
+    with pytest.raises(DocCheckError) as raised:
+        _parse_band("\x1b[31m" + "x" * 10_000)
+    message = str(raised.value)
+    assert "\x1b" not in message and len(message) < 4 * SHOW_LIMIT
+
+
+def _b(cell: str) -> Band:
+    return _parse_band(cell)
+
+
+@pytest.mark.parametrize(
+    ("cells", "expected"),
+    [
+        (["< 0.45", ">= 0.45 and < 0.75", ">= 0.75"], []),
+        ([">= 0.75", "< 0.45", "0.45 <= x < 0.75"], []),  # order-free
+        (["<= 1"], []),
+        (["0 - 1"], []),
+        (["< 0.45", "0.45 - 0.74", ">= 0.75"], ["gap between 0.74 and 0.75"]),
+        (["< 0.45", "> 0.45"], ["gap between 0.45 and 0.45"]),
+        (["<= 0.45", ">= 0.45"], ["bands overlap at 0.45"]),
+        (["< 0.5", ">= 0.4"], ["bands overlap at 0.4"]),
+        (["> 0", "<= 1"], ["bands overlap at 0"]),
+        (["< 0.5", ">= 0.5", ">= 0.7"], ["two bands are open-ended on the same side"]),
+        (["< 0.5", "< 0.7", ">= 0.7"], ["two bands are open-ended on the same side"]),
+        (["> 0 and <= 1"], ["nothing covers the bottom of the range 0"]),
+        (["0.1 - 1"], ["nothing covers the bottom of the range 0"]),
+        (["0 - 0.9"], ["nothing covers the top of the range 1"]),
+        ([], ["no bands"]),
+    ],
+)
+def test_band_coverage_vectors(cells: list[str], expected: list[str]) -> None:
+    """Range [0, 1] here is a fixture of the helper, not the IRP range."""
+    assert _band_coverage_problems([_b(c) for c in cells], Decimal(0), Decimal(1)) == expected
 
 
 def test_readme_text_is_clean_utf8(readme: str) -> None:
