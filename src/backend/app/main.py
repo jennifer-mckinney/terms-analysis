@@ -102,6 +102,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
+    # #135: a tuple validated in Settings.__post_init__ (never "*", https
+    # except loopback), so the middleware's reference cannot be widened later.
     allow_origins=settings.allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE"],

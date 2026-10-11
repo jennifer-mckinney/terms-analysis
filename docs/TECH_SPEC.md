@@ -642,7 +642,7 @@ Optional HMAC-compare API key [`main.py:70` `_verify_api_key`]. `API_KEY` env va
 
 ### 6.2 CORS
 
-`ALLOWED_ORIGINS` env var, comma-separated [`config.py:86`]. Default: `http://localhost:8000,http://127.0.0.1:8000`. Extended by `run.sh` to include `:8501` (Streamlit). Methods: GET, POST, DELETE. Headers: Content-Type, X-API-Key. Credentials: allowed [`main.py:99`].
+`ALLOWED_ORIGINS` env var, comma-separated [`config.py:86`]. Default: `http://localhost:8000,http://127.0.0.1:8000`. Extended by `run.sh` to include `:8501` (Streamlit). Validated at startup (#135): each entry must be one origin, `scheme://host[:port]` with no path or trailing `/`; `*` is refused; `http` is allowed only for `localhost`, `127.0.0.1` and `[::1]`, so a Railway frontend is listed as `https://<your-frontend>.up.railway.app`. Methods: GET, POST, DELETE. Headers: Content-Type, X-API-Key. Credentials: allowed [`main.py:99`].
 
 ### 6.3 Endpoints
 
@@ -1291,7 +1291,7 @@ Verified against `src/backend/app/config.py` and `.env.example`.
 | `MAX_INPUT_CHARS` | `20000` | Max document text length | int ≥ 1 |
 | `MAX_UPLOAD_BYTES` | `10485760` (10 MB) | Max file/HTTP size | int ≥ 1 |
 | `MAX_PDF_PAGES` | `100` | PDF page cap for OCR | int ≥ 1 |
-| `ALLOWED_ORIGINS` | `http://localhost:8000,http://127.0.0.1:8000` | CORS origins | Comma-separated URLs |
+| `ALLOWED_ORIGINS` | `http://localhost:8000,http://127.0.0.1:8000` | CORS origins | Comma-separated origins; no `*`; https except loopback (e.g. `https://<your-frontend>.up.railway.app`) |
 | `WATCHLIST_REFRESH_SECONDS` | `0` | Background refresh interval; 0 = off | int ≥ 0 |
 | `API_KEY` | *(empty)* | Endpoint auth key; empty = disabled | string |
 | `TERMS_ANALYSIS_DATA_DIR` | `{repo}/data` | Override data dir | filesystem path |
