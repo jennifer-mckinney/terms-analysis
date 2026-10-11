@@ -67,7 +67,9 @@ cp .env.example .env
 | `MODEL_WORLD` | `apertus-8b-instruct` | World/multilingual model (Apertus 8B) |
 | `MODEL_EU` | `eurollm-22b-instruct` | EU language model (EuroLLM 22B) |
 | `DATABASE_URL` | `sqlite:///./data/terms_analysis.db` | Database location |
-| `API_KEY` | *(empty — auth disabled)* | Set to enable endpoint authentication |
+| `DEPLOY_ENV` | *(none; `run.sh` sets `local`)* | `local` or `railway`; required |
+| `API_KEY` | *(empty)* | Required unless `DEPLOY_ENV=local` on a loopback `BACKEND_HOST`; >= 32 printable characters. Rate limits and the rest: `.env.example` |
+| `BACKEND_API_KEY` | *(empty)* | Streamlit UI: the key it sends as `X-API-Key` |
 | `REVIEW_THRESHOLD` | `0.80` | Confidence threshold for human review |
 
 ## Architecture

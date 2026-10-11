@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import csv
-import hmac
 import json
 import logging
 import typing
@@ -13,11 +12,13 @@ from typing import get_args
 from uuid import uuid4
 from xml.sax.saxutils import escape as _xml_escape
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from sqlalchemy.orm import Session
 
+from . import security
 from .config import settings
 from .database import db_session, get_db, init_db
 from .exceptions import CorpusMismatchError
@@ -67,17 +68,11 @@ _VALID_CHIPS: frozenset[str] = frozenset(get_args(ContextChip))
 _VALID_JURISDICTIONS: frozenset[str] = frozenset(get_args(Jurisdiction))
 
 
-def _verify_api_key(x_api_key: str | None = Header(default=None)) -> None:
-    """Enforce API key auth when settings.api_key is set.  No-op when unset."""
-    required = settings.api_key
-    if not required:
-        return
-    if x_api_key is None or not hmac.compare_digest(x_api_key, required):
-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # #133: validate the security settings in force and build the limiter
+    # first; a misconfigured process refuses to start (fail closed).
+    app.state.rate_limiter = security.build_limiter()
     init_db()
     # Issue #91 round-2 owner ruling: say loudly at startup when the legal-KB
     # relevance floor is disabled (NO_MATCH unreachable, never authoritative).
@@ -90,13 +85,19 @@ async def lifespan(app: FastAPI):
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+    app.state.rate_limiter = None
 
 
 app = FastAPI(
     title="Terms Analysis Backend",
     version="0.1.0",
     lifespan=lifespan,
-    dependencies=[Depends(_verify_api_key)],
+    # #133: the built-in docs routes bypass app dependencies, so they are
+    # served below as ordinary routes behind the same auth.
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+    dependencies=[Depends(security.enforce_access)],
 )
 
 app.add_middleware(
@@ -105,7 +106,24 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "X-API-Key"],
+    # #133: browsers may read Retry-After on a 429; the rest of CORS is #135.
+    expose_headers=["Retry-After"],
 )
+
+
+@app.get("/openapi.json", include_in_schema=False)
+def openapi_schema() -> JSONResponse:
+    return JSONResponse(app.openapi())
+
+
+@app.get("/docs", include_in_schema=False)
+def swagger_docs() -> HTMLResponse:
+    return get_swagger_ui_html(openapi_url="/openapi.json", title=f"{app.title} - Swagger UI")
+
+
+@app.get("/redoc", include_in_schema=False)
+def redoc_docs() -> HTMLResponse:
+    return get_redoc_html(openapi_url="/openapi.json", title=f"{app.title} - ReDoc")
 
 
 @app.exception_handler(CorpusMismatchError)
@@ -125,7 +143,7 @@ async def corpus_mismatch_handler(
     )
 
 
-@app.get("/health")
+@app.get(security.HEALTH_PATH)
 def health() -> dict:
     return {"status": "ok"}
 
@@ -371,7 +389,11 @@ async def infer(request: InferRequest) -> InferResponse:
     return infer_all(request.url, request.text)
 
 
-@app.post("/analyze", response_model=AnalysisPayload)
+@app.post(
+    "/analyze",
+    response_model=AnalysisPayload,
+    dependencies=[Depends(security.analysis_admission, scope="function")],
+)
 async def analyze(request: AnalyzeRequest, db: Session = Depends(get_db)):
     logger.info(
         "Analyze request: type=text len=%s jurisdictions=%s mode=%s",
@@ -433,7 +455,11 @@ def _fetch_failure_response(
     )
 
 
-@app.post("/analyze/url", response_model=AnalysisPayload)
+@app.post(
+    "/analyze/url",
+    response_model=AnalysisPayload,
+    dependencies=[Depends(security.analysis_admission, scope="function")],
+)
 async def analyze_url(request: AnalyzeUrlRequest, db: Session = Depends(get_db)):
     logger.info(
         "Analyze request: type=url url=%s jurisdictions=%s mode=%s",
@@ -479,7 +505,11 @@ async def analyze_url(request: AnalyzeUrlRequest, db: Session = Depends(get_db))
     return payload
 
 
-@app.post("/analyze/file", response_model=AnalysisPayload)
+@app.post(
+    "/analyze/file",
+    response_model=AnalysisPayload,
+    dependencies=[Depends(security.analysis_admission, scope="function")],
+)
 async def analyze_file(
     file: UploadFile = File(...),
     name: str | None = Form(default=None),
@@ -571,7 +601,11 @@ async def analyze_file(
     return payload
 
 
-@app.post("/analyze/batch", response_model=dict)
+@app.post(
+    "/analyze/batch",
+    response_model=dict,
+    dependencies=[Depends(security.batch_admission, scope="function")],
+)
 async def analyze_batch(request: AnalyzeBatchRequest, db: Session = Depends(get_db)):
     """Analyze multiple documents in batch with cross-reference detection."""
     batch_req = request
