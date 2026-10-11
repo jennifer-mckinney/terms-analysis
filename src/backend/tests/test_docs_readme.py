@@ -354,21 +354,27 @@ def _stated_counts(text: str, noun: str) -> list[str]:
     return re.findall(pattern, text, re.IGNORECASE)
 
 
+# Parentheses are separators, not comments: text inside them is inspected like
+# any other piece, so "A (D or F)" cannot hide D and F (PR #338 review).
 _GRADE_SEPARATORS = re.compile(
-    r"\s*(?:,|/|;|\bor\b|\band\b|\bto\b|\s[-–—]\s|[–—])\s*", re.IGNORECASE
+    r"\s*(?:,|/|;|\(|\)|\bor\b|\band\b|\bto\b|\s[-–—]\s|[–—])\s*", re.IGNORECASE
 )
-_PARENTHETICAL = re.compile(r"\([^)]*\)")
+
+
+def _grade_tokens(cell: str) -> list[str]:
+    """The one tokenizer for grade cells, shared by every grade check (F3)."""
+    pieces = [p.strip() for p in _GRADE_SEPARATORS.split(_MARKUP.sub("", cell))]
+    return [p for p in pieces if p]
 
 
 def _bad_grade_tokens(cell: str, allowed: frozenset[str]) -> list[str]:
     """Pieces of a grade cell that are not exactly an allowed grade.
 
     An empty cell is itself bad: a grade column with no grade is not a
-    subset of anything (F5).
+    subset of anything (F5). Words in parentheses are pieces too, so a
+    qualifier such as "(best)" is reported rather than skipped.
     """
-    stripped = _MARKUP.sub("", _PARENTHETICAL.sub("", cell))
-    pieces = [p.strip() for p in _GRADE_SEPARATORS.split(stripped)]
-    pieces = [p for p in pieces if p]
+    pieces = _grade_tokens(cell)
     if not pieces:
         return ["<empty>"]
     return [p for p in pieces if p not in allowed]
@@ -500,18 +506,33 @@ def test_readme_grades_subset_of_hr9(readme: str, hr9_grades: frozenset[str]) ->
     )
 
 
+def _jurisdiction_count_problems(text: str, live: int) -> list[str]:
+    """Features must state the live count; no count anywhere may be stale.
+
+    The required count is looked for only in the Features section's prose
+    (code and tables excluded), so a correct count elsewhere cannot stand in
+    for a stale or missing one in Features (PR #338 review). Stale counts
+    are looked for in the whole document. A missing Features section raises.
+    """
+    features = _stated_counts(_prose(_find_section(text, FEATURES_HEADING)), "jurisdictions")
+    problems: list[str] = []
+    if str(live) not in features:
+        problems.append(
+            f"README Features states jurisdiction counts {[_show(s) for s in features]}, "
+            f"not the live {live}. Fix: say '{live} jurisdictions' in Features."
+        )
+    wrong = [s for s in _stated_counts(text, "jurisdictions") if s != str(live)]
+    if wrong:
+        problems.append(
+            f"README states jurisdiction counts {[_show(s) for s in wrong]}; "
+            f"schemas.Jurisdiction has {live}."
+        )
+    return problems
+
+
 def test_readme_jurisdiction_count(readme: str, jurisdiction_count: int) -> None:
-    _find_section(readme, FEATURES_HEADING)
-    stated = _stated_counts(readme, "jurisdictions")
-    assert stated, (
-        f"README never states a jurisdiction count; schemas.Jurisdiction has "
-        f"{jurisdiction_count}. Fix: say '{jurisdiction_count} jurisdictions'."
-    )
-    wrong = [s for s in stated if s != str(jurisdiction_count)]
-    assert not wrong, (
-        f"README states jurisdiction counts {[_show(s) for s in wrong]}; "
-        f"schemas.Jurisdiction has {jurisdiction_count}."
-    )
+    problems = _jurisdiction_count_problems(readme, jurisdiction_count)
+    assert not problems, "\n".join(problems)
 
 
 def test_readme_category_table_marked_illustrative(readme: str, rule_category_count: int) -> None:
@@ -667,63 +688,94 @@ def _band_coverage_problems(bands: list[Band], lo: Decimal, hi: Decimal) -> list
 
 
 def _grade_pieces(cell: str) -> frozenset[str]:
-    stripped = _MARKUP.sub("", _PARENTHETICAL.sub("", cell))
-    return frozenset(p.strip() for p in _GRADE_SEPARATORS.split(stripped) if p.strip())
+    return frozenset(_grade_tokens(cell))
 
 
-def _irp_scale() -> tuple[Decimal, Decimal, Decimal]:
-    """(factor, low, high): the IRP range and how it maps to _grade's input.
-
-    Derived, not restated (F13): the range from ``Finding.irp_score``'s
-    bounds, the factor from ``calculate_risk_score`` on one finding, checked
-    linear so a README IRP band maps to one _grade band.
-    """
+def _irp_range() -> tuple[Decimal, Decimal]:
+    """(low, high): the IRP range, from ``Finding.irp_score``'s bounds (F13)."""
     from app.schemas import Finding
-    from app.services.analyzer import calculate_risk_score
 
     bounds = {type(m).__name__: m for m in Finding.model_fields["irp_score"].metadata}
     if "Ge" not in bounds or "Le" not in bounds:
         raise DocCheckError("Finding.irp_score has no [ge, le] bounds to check coverage against")
-    lo, hi = Decimal(str(bounds["Ge"].ge)), Decimal(str(bounds["Le"].le))
-
-    def score(irp: Decimal) -> Decimal:
-        one = Finding.model_construct(irp_score=float(irp), severity="High")
-        return Decimal(str(calculate_risk_score([one])))
-
-    factor = (score(hi) - score(lo)) / (hi - lo)
-    mid = (lo + hi) / 2
-    if score(lo) != lo * factor or score(mid) != mid * factor:
-        raise DocCheckError("calculate_risk_score is not IRP times a constant; rescale this check")
-    return factor, lo, hi
+    return Decimal(str(bounds["Ge"].ge)), Decimal(str(bounds["Le"].le))
 
 
-def _band_probes(band: Band, lo: Decimal, hi: Decimal, factor: Decimal) -> tuple[float, float, float]:
-    """(lower, upper, midpoint) on _grade's scale, open ends clamped to [lo, hi]."""
-    low = lo if band.lower is None or band.lower < lo else band.lower
-    high = hi if band.upper is None or band.upper > hi else band.upper
-    low_in = band.lower is None or band.lower < lo or band.lower_inclusive
-    high_in = band.upper is None or band.upper > hi or band.upper_inclusive
-    first = float(low * factor) if low_in else math.nextafter(float(low * factor), math.inf)
-    last = float(high * factor) if high_in else math.nextafter(float(high * factor), -math.inf)
-    return first, last, float((low + high) / 2 * factor)
+def _document_score(irps: list[float]) -> float:
+    """The 0-10 score ``_grade`` sees for a document with these finding IRPs.
+
+    Runs the real ``analyzer.calculate_risk_score`` (mean, scale and rounding
+    included), so README bands are checked against what users get, not
+    against an unrounded model of it (PR #338 review).
+    """
+    from app.schemas import Finding
+    from app.services.analyzer import calculate_risk_score
+
+    findings = [Finding.model_construct(irp_score=irp, severity="High") for irp in irps]
+    return calculate_risk_score(findings)
+
+
+def _float_at_or_inside(value: Decimal, inclusive: bool, upward: bool) -> float:
+    """The float aggregate nearest ``value`` that lies inside the band.
+
+    ``upward`` is True for a lower bound (the band lies above it). An
+    exclusive bound, or a float that rounds outside an inclusive one, steps
+    one ulp into the band, so the probe is the boundary aggregate itself.
+    """
+    toward = math.inf if upward else -math.inf
+    x = float(value)
+    outside = Decimal(x) < value if upward else Decimal(x) > value
+    if outside or (not inclusive and Decimal(x) == value):
+        x = math.nextafter(x, toward)
+    return x
+
+
+def _band_edges(band: Band, lo: Decimal, hi: Decimal) -> tuple[float, float]:
+    """(first, last): the lowest and highest aggregate IRP inside the band.
+
+    Open ends clamp to [lo, hi]. A document's aggregate is the mean of its
+    findings' IRPs, so values arbitrarily close to an exclusive bound are
+    reachable (e.g. 21 findings at 0.74 and 19 at 0.76 average 0.7495).
+    """
+    if band.lower is None or band.lower < lo:
+        first = _float_at_or_inside(lo, True, upward=True)
+    else:
+        first = _float_at_or_inside(band.lower, band.lower_inclusive, upward=True)
+    if band.upper is None or band.upper > hi:
+        last = _float_at_or_inside(hi, True, upward=False)
+    else:
+        last = _float_at_or_inside(band.upper, band.upper_inclusive, upward=False)
+    return first, last
+
+
+def _reachable_grades(first: float, last: float, thresholds: list[float]) -> frozenset[str]:
+    """Every grade the real score path gives to an aggregate in [first, last].
+
+    ``calculate_risk_score`` is non-decreasing in the aggregate and ``_grade``
+    changes only at HR9 thresholds (pinned by
+    ``test_hr9_grades_match_analyzer_grade``), so the grades are those at the
+    two edge scores plus each threshold the edge scores straddle.
+    """
+    from app.services.analyzer import _grade
+
+    low, high = _document_score([first]), _document_score([last])
+    return frozenset({_grade(low), _grade(high), *(_grade(t) for t in thresholds if low < t <= high)})
 
 
 def test_readme_grade_bands_match_analyzer_grade(
     readme: str, hr9_entries: list[tuple[str, str, float]]
 ) -> None:
-    """Each Risk Scoring row grades as ``analyzer._grade`` does across its band.
+    """Each Risk Scoring row lists exactly the grades users can get in its band.
 
-    The README states IRP (``Finding.irp_score``'s range); ``_grade`` takes
-    ``calculate_risk_score``'s mean IRP times the derived factor. Per row:
-    ``_grade`` at the lower bound, upper bound (just below an exclusive one)
-    and midpoint is a grade the row lists; and every grade the row lists is one
-    ``_grade`` gives somewhere in the band (HR9 thresholds are the only places
-    it changes; ``test_hr9_grades_match_analyzer_grade`` pins that). The rows
+    The README states the aggregate IRP (``Finding.irp_score``'s range). A
+    document's grade is ``_grade(calculate_risk_score(findings))``, and the
+    score is rounded before grading, so an aggregate just under a band's
+    exclusive upper bound can round up into the next grade. Per row, the
+    grades reachable through that real path, boundary aggregates included,
+    must equal the grades the row lists: none missing, none extra. The rows
     cover the whole range with no gap or overlap.
     """
-    from app.services.analyzer import _grade
-
-    factor, lo, hi = _irp_scale()
+    lo, hi = _irp_range()
     thresholds = sorted({t for _, _, t in hr9_entries})
     section = _find_section(readme, RISK_SCORING_HEADING)
     checked = 0
@@ -743,21 +795,21 @@ def test_readme_grade_bands_match_analyzer_grade(
             band = _parse_band(band_cell)
             bands.append(band)
             listed = _grade_pieces(grade_cell)
-            first, last, mid = _band_probes(band, lo, hi, factor)
+            first, last = _band_edges(band, lo, hi)
             if first > last:
                 problems.append(f"row {_show(band_cell)} lies outside the IRP range [{lo}, {hi}]")
                 continue
-            for where, probe in (("lower bound", first), ("upper bound", last), ("midpoint", mid)):
-                if _grade(probe) not in listed:
-                    problems.append(
-                        f"row {_show(band_cell)}: _grade({probe}) at the {where} is "
-                        f"{_grade(probe)!r}, not one of {sorted(listed)}"
-                    )
-            given = {_grade(p) for p in (first, last, mid, *(t for t in thresholds if first < t <= last))}
-            if listed - given:
+            reachable = _reachable_grades(first, last, thresholds)
+            if reachable - listed:
                 problems.append(
-                    f"row {_show(band_cell)} lists {sorted(listed - given)}, which _grade "
-                    f"never gives in that band (it gives {sorted(given)})"
+                    f"row {_show(band_cell)} omits {sorted(reachable - listed)}: aggregates "
+                    f"{first!r}..{last!r} score {_document_score([first])}.."
+                    f"{_document_score([last])} after rounding"
+                )
+            if listed - reachable:
+                problems.append(
+                    f"row {_show(band_cell)} lists {sorted(listed - reachable)}, which no "
+                    f"aggregate in the band gets (it gets {sorted(reachable)})"
                 )
             checked += 1
         problems += [f"IRP range [{lo}, {hi}]: {p}" for p in _band_coverage_problems(bands, lo, hi)]
@@ -838,6 +890,35 @@ def test_band_coverage_vectors(cells: list[str], expected: list[str]) -> None:
     assert _band_coverage_problems([_b(c) for c in cells], Decimal(0), Decimal(1)) == expected
 
 
+@pytest.mark.parametrize(
+    "cell",
+    ["< 0.45", "> 0.45", ">= 0.7", "<= 0.1", "<= 0.3", "0.45 <= x < 0.75", "> 0.1 and <= 0.7",
+     ">= 0", "<= 1", "> 0", "< 1", "<= 2", ">= 0.0"],
+    ids=_show,
+)
+def test_band_edges_are_the_extreme_aggregates_inside(cell: str) -> None:
+    """Edge probes lie inside the band, and one more ulp outward does not.
+
+    Range [0, 1] is a fixture of the helper. Floats that round outside a
+    decimal bound (0.7, 0.1) and exclusive bounds both step inward.
+    """
+    lo, hi = Decimal(0), Decimal(1)
+    band = _parse_band(cell)
+    first, last = _band_edges(band, lo, hi)
+
+    def inside(x: float) -> bool:
+        d = Decimal(x)
+        low_ok = d >= lo if band.lower is None or band.lower < lo else (
+            d >= band.lower if band.lower_inclusive else d > band.lower)
+        high_ok = d <= hi if band.upper is None or band.upper > hi else (
+            d <= band.upper if band.upper_inclusive else d < band.upper)
+        return low_ok and high_ok
+
+    assert inside(first) and inside(last), (first, last)
+    assert not inside(math.nextafter(first, -math.inf)), first
+    assert not inside(math.nextafter(last, math.inf)), last
+
+
 def test_readme_text_is_clean_utf8(readme: str) -> None:
     bad = _forbidden_chars(readme)
     assert not bad, f"README carries invisible/control characters at {bad[:10]}"
@@ -870,6 +951,7 @@ CHECKERS: dict[str, Callable[[str], bool]] = {
     "illustrative": lambda t: _has_marker(t, ILLUSTRATIVE_MARKERS),
     "partial": lambda t: _has_marker(t, PARTIAL_MARKERS),
     "has_count_30": lambda t: _stated_counts(t, "jurisdictions") == ["30"],
+    "features_count_30": lambda t: _jurisdiction_count_ok(t, 30),
     "finds_risk_scoring": lambda t: _section_found(t, RISK_SCORING_HEADING),
     "clean_text": lambda t: _forbidden_chars(t) == [],
 }
@@ -881,6 +963,13 @@ def _section_found(text: str, wanted: str) -> bool:
     except DocCheckError:
         return False
     return True
+
+
+def _jurisdiction_count_ok(text: str, live: int) -> bool:
+    try:
+        return _jurisdiction_count_problems(text, live) == []
+    except DocCheckError:
+        return False
 
 
 VECTORS: tuple[Vector, ...] = (
@@ -927,6 +1016,29 @@ VECTORS: tuple[Vector, ...] = (
     Vector("has_count_30", "covers 130 jurisdictions", False, "superstring number"),
     Vector("has_count_30", "covers thirty jurisdictions", False, "words"),
     Vector("has_count_30", "", False, "empty"),
+    # features_count_30: the required count must sit in Features (PR #338).
+    Vector("features_count_30", "## Features\n- 30 jurisdictions\n## Limits\nnone", True),
+    Vector("features_count_30", "## Features\n### Sub\n- 30 jurisdictions\n## Limits\n30 jurisdictions",
+           True, "nested subsection, consistent elsewhere"),
+    Vector("features_count_30", "## Features\n```\n## Limits\n```\n- 30 jurisdictions", True,
+           "fenced heading does not end Features"),
+    Vector("features_count_30", "## Features\n- US, EU\n## Limits\n30 jurisdictions", False,
+           "missing in Features, right elsewhere"),
+    Vector("features_count_30", "## Features\n- 10 jurisdictions\n## Limits\n30 jurisdictions", False,
+           "stale in Features, right elsewhere"),
+    Vector("features_count_30", "## Features\n- 30 jurisdictions\n## Limits\n10 jurisdictions", False,
+           "stale elsewhere"),
+    Vector("features_count_30", "## Features\n- US\n\n30 jurisdictions\n## Limits\n", True,
+           "second paragraph of Features"),
+    Vector("features_count_30", "## Features\n- US\n## Limits\r- 30 jurisdictions", False,
+           "CR ends the Features section"),
+    Vector("features_count_30", "## Features\n```\n30 jurisdictions\n```\n## Limits\n30 jurisdictions",
+           False, "count only in a Features code block"),
+    Vector("features_count_30", "## Features\n| a |\n|---|\n| 30 jurisdictions |\n## L\n30 jurisdictions",
+           False, "count only in a Features table"),
+    Vector("features_count_30", "#### Features\n- 30 jurisdictions\n## Features\n- US", False,
+           "duplicate Features heading"),
+    Vector("features_count_30", "## Overview\n30 jurisdictions", False, "no Features section"),
     # finds_risk_scoring: fence-aware ATX headings only.
     Vector("finds_risk_scoring", "## Risk Scoring\nbody", True),
     Vector("finds_risk_scoring", "   ## Risk Scoring ##\nbody", True, "indent + closing"),
@@ -978,8 +1090,8 @@ def test_grade_cell_vectors(hr9_grades: frozenset[str]) -> None:
         " / ".join(allowed),
         f"**{allowed[0]}**",
         f"`{allowed[-1]}`",
-        f"{allowed[0]} (best)",
         f"{allowed[0]} – {allowed[-1]}",
+        f"{allowed[0]} ({allowed[-1]})",  # grades in parentheses are still grades
     ]
     for cell in positives:
         assert _bad_grade_tokens(cell, hr9_grades) == [], _show(cell)
@@ -988,10 +1100,25 @@ def test_grade_cell_vectors(hr9_grades: frozenset[str]) -> None:
     full_width = {cp: cp + 0xFEE0 for cp in range(ord("A"), ord("Z") + 1)}
     lookalikes += [g.translate(full_width) for g in allowed]
     lookalikes += [g[0] + "​" + g[1:] for g in allowed if len(g) > 1]
-    negatives = ["D or F", "F", "D", "E", "D+ or F", "n/a", "", "  ", "()", *lookalikes]
+    # Non-grades hidden in brackets of every kind (PR #338 review): a
+    # parenthetical is inspected, never stripped, and look-alike or other
+    # brackets do not split a piece, so the whole piece is reported.
+    hidden = [
+        f"{allowed[0]} (D or F)",
+        f"{allowed[0]} (D",  # unbalanced
+        f"{allowed[0]} ((F))",  # nested
+        f"{allowed[0]} (**F**)",  # markup inside
+        f"{allowed[0]} (best)",  # a qualifier is not a grade
+        f"{allowed[0]} （F）",  # full-width parentheses
+        f"{allowed[0]} [F]",
+        f"{allowed[0]} {{F}}",
+    ]
+    negatives = ["D or F", "F", "D", "E", "D+ or F", "n/a", "", "  ", "()", *lookalikes, *hidden]
     for cell in negatives:
         assert _bad_grade_tokens(cell, hr9_grades) != [], _show(cell)
     assert set(_bad_grade_tokens("D or F", hr9_grades)) == {"D", "F"}
+    assert set(_bad_grade_tokens(f"{allowed[0]} (D or F)", hr9_grades)) == {"D", "F"}
+    assert _grade_pieces(f"{allowed[0]} (D or F)") == {allowed[0], "D", "F"}
 
 
 # --------------------------------------------------------------------------
