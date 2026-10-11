@@ -184,6 +184,49 @@ st.markdown("""
 
 API_BASE = os.environ.get("API_BASE_URL", "http://localhost:9000")
 
+# #133: same backend credentials contract as the v2 UI (app_streamlit_v2.py).
+# The key lives only in this server's environment and travels only in the
+# X-API-Key header; it is never taken from the browser and never rendered.
+# BACKEND_CLIENT_IP_HEADER names the header the backend trusts
+# (RATE_LIMIT_CLIENT_IP_HEADER there) for the reviewer's address, taken from
+# st.context, the server's view of the connection.
+BACKEND_API_KEY_ENV = "BACKEND_API_KEY"
+BACKEND_CLIENT_IP_HEADER_ENV = "BACKEND_CLIENT_IP_HEADER"
+# RFC 9110 token characters, for the header name.
+_HEADER_NAME_RE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+
+
+class BackendConfigError(RuntimeError):
+    """The backend credentials in the environment are unusable.
+
+    Messages are fixed text naming the variable, never its value.
+    """
+
+
+def _backend_headers() -> Dict[str, str]:
+    """Headers for every backend call, read from the environment at call time."""
+    headers: Dict[str, str] = {}
+    key = os.environ.get(BACKEND_API_KEY_ENV, "")
+    if key:
+        # Printable ASCII without spaces only: anything else would be refused
+        # by the HTTP library with an error that quotes the value.
+        if not all(0x21 <= ord(ch) <= 0x7E for ch in key):
+            raise BackendConfigError(
+                f"{BACKEND_API_KEY_ENV} contains characters not allowed in a header."
+            )
+        headers["X-API-Key"] = key
+    header_name = os.environ.get(BACKEND_CLIENT_IP_HEADER_ENV, "")
+    if header_name:
+        if not _HEADER_NAME_RE.fullmatch(header_name):
+            raise BackendConfigError(
+                f"{BACKEND_CLIENT_IP_HEADER_ENV} is not a valid header name."
+            )
+        ip = getattr(getattr(st, "context", None), "ip_address", None)
+        if isinstance(ip, str) and ip:
+            headers[header_name] = ip
+    return headers
+
+
 JURISDICTIONS = {
     "US-FED":    "United States — Federal (COPPA, HIPAA, GLBA, FTC §5, CAN-SPAM)",
     "US-CA":     "California — CCPA / CPRA",
@@ -365,17 +408,21 @@ def analyze_document(
 ) -> Dict | None:
     jurisdictions = jurisdictions or ["US-CA", "GDPR"]
     try:
+        # Raises BackendConfigError before any request on bad credentials.
+        headers = _backend_headers()
         if file is not None:
             resp = requests.post(
                 f"{API_BASE}/analyze/file",
                 files={"file": file},
                 data={"mode": mode, "jurisdictions": ",".join(jurisdictions), "industry": industry},
+                headers=headers,
                 timeout=400,
             )
         elif url:
             resp = requests.post(
                 f"{API_BASE}/analyze/url",
                 json={"url": url, "mode": mode, "jurisdictions": jurisdictions, "industry": industry},
+                headers=headers,
                 timeout=400,
             )
         else:
@@ -387,6 +434,7 @@ def analyze_document(
                     "jurisdictions": jurisdictions,
                     "industry": industry,
                 },
+                headers=headers,
                 timeout=400,
             )
 
@@ -408,8 +456,12 @@ def analyze_document(
     except requests.exceptions.ConnectionError:
         st.error(f"Unable to reach the analysis service at {API_BASE}. Start the backend first.")
         return None
+    except BackendConfigError as exc:
+        st.error(f"The app is misconfigured: {exc}")
+        return None
     except Exception as exc:
-        st.error(f"Unexpected error: {exc}")
+        # Class name only: an exception's text can quote request headers.
+        st.error(f"Unexpected error ({type(exc).__name__}). Try again in a moment.")
         return None
 
 
@@ -747,7 +799,11 @@ def main() -> None:
                     st.caption("Executive summary, severity table, and annotated findings.")
                     if doc_id:
                         try:
-                            pdf_resp = requests.get(f"{API_BASE}/exports/analysis/{doc_id}.pdf", timeout=30)
+                            pdf_resp = requests.get(
+                                f"{API_BASE}/exports/analysis/{doc_id}.pdf",
+                                headers=_backend_headers(),
+                                timeout=30,
+                            )
                             if pdf_resp.status_code == 200:
                                 st.download_button(
                                     label="Download PDF",
@@ -758,6 +814,8 @@ def main() -> None:
                                 )
                             else:
                                 st.warning("PDF export unavailable for this result.")
+                        except BackendConfigError as exc:
+                            st.error(f"The app is misconfigured: {exc}")
                         except Exception:
                             st.warning("PDF export service not reachable.")
                     else:

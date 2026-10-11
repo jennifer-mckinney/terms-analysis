@@ -289,8 +289,10 @@ class Settings:
     max_concurrent_analyses: int = _env_int("MAX_CONCURRENT_ANALYSES", "2")
     # Retry-After (seconds) sent with the concurrency-cap 429. 1..3600.
     concurrency_retry_after_s: int = _env_int("CONCURRENCY_RETRY_AFTER_S", "5")
-    # Items accepted by one /analyze/batch call (422 above it).
-    max_batch_items: int = _env_int("MAX_BATCH_ITEMS", "10")
+    # Items accepted by one /analyze/batch call (422 above it). Each item costs
+    # one token from every rate in BATCH_CHARGED_RATES, so the cap may not
+    # exceed any of their limits (5 matches the default RATE_LIMIT_PER_CLIENT).
+    max_batch_items: int = _env_int("MAX_BATCH_ITEMS", "5")
 
     def __post_init__(self) -> None:
         # Fail closed at load (and on dataclasses.replace) on bad URL-fetch
@@ -368,6 +370,9 @@ RATE_PERIOD_SECONDS = {"second": 1, "minute": 60, "hour": 3600, "day": 86400}
 _RATE_RE = re.compile(r"([1-9][0-9]{0,8})/(second|minute|hour|day)")
 # RFC 9110 header field-name token: ASCII only, no space, colon, CR, LF or NUL.
 _HEADER_TOKEN_RE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+# Rates /analyze/batch charges one token per item (security.batch_admission).
+# A batch cap above any of these limits could never be admitted.
+BATCH_CHARGED_RATES = ("rate_limit_per_client", "rate_limit_per_key")
 # The concurrency 429's Retry-After must stay within an hour.
 _CONCURRENCY_RETRY_AFTER_MAX_S = 3600
 # Environment variable behind each field, so messages name both.
@@ -495,6 +500,15 @@ def validate_security_settings(s: Settings) -> None:
             raise ValueError(
                 f"{_label(name)} must look like '<N>/<second|minute|hour|day>' "
                 "with N a positive integer"
+            )
+    for name in BATCH_CHARGED_RATES:
+        limit, _period = parse_rate(getattr(s, name)) or (0, 0)
+        if s.max_batch_items > limit:
+            raise ValueError(
+                f"{_label('max_batch_items')} ({s.max_batch_items}) exceeds the "
+                f"{limit} tokens per window of {_label(name)}; each batch item "
+                "costs one token, so a full batch could never be admitted. "
+                "Lower MAX_BATCH_ITEMS or raise the rate"
             )
     for name in ("bind_host", "forwarded_allow_ips", "client_identity_header", "api_key"):
         if not isinstance(getattr(s, name), str):
