@@ -40,7 +40,7 @@ files and the `enforce-p9-review.yml` text check are retired.
 ## Troubleshooting
 
 - **Job fails with `p9-verdict.json was not written`:** the reviewer did not
-  finish (turn limit, timeout, missing `ANTHROPIC_API_KEY`, or a fork PR
+  finish (turn limit, timeout, missing `CLAUDE_CODE_OAUTH_TOKEN`, or a fork PR
   without secrets). Re-run the job, or check the secret.
 - **Job fails with `does not match the verdict contract`:** the reviewer wrote
   the wrong shape. Re-run the job; if it repeats, tighten the brief.
