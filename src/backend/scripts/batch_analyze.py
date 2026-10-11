@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import sys
 import urllib.error
 import urllib.parse
@@ -37,6 +38,14 @@ MAX_RESPONSE_BYTES = 100 * 1024 * 1024
 # stderr warning so a copy-pasted CLI invocation against a random host prompts
 # the operator to think about trust before shipping content there.
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+
+# #133: the backend requires an API key on every route. Same variable and
+# header as the Streamlit UIs (``BACKEND_API_KEY_ENV`` / ``_backend_headers``);
+# the header matches ``app.security.API_KEY_HEADER``. Mirrored, not imported:
+# importing ``app`` would load and validate the backend's own settings.
+BACKEND_API_KEY_ENV = "BACKEND_API_KEY"
+_API_KEY_HEADER = "X-API-Key"
+_REDACTED = "[redacted]"
 
 
 def read_input_csv(path: Path) -> List[Dict[str, str]]:
@@ -104,18 +113,53 @@ def _warn_if_non_local(api_base: str) -> None:
         )
 
 
+def _backend_headers() -> Dict[str, str]:
+    """Request headers, with the API key read from the environment at call time.
+
+    #133: unset or empty means keyless local mode (no key header). A key with
+    anything but printable, non-space ASCII is refused before any request,
+    naming the variable but never the value (the HTTP library would otherwise
+    raise an error that quotes it, or a CR/LF could forge another header).
+    """
+    headers = {"Content-Type": "application/json"}
+    key = os.environ.get(BACKEND_API_KEY_ENV, "")
+    if key:
+        if not all(0x21 <= ord(ch) <= 0x7E for ch in key):
+            raise SystemExit(
+                f"{BACKEND_API_KEY_ENV} contains characters not allowed in a header."
+            )
+        headers[_API_KEY_HEADER] = key
+    return headers
+
+
+def _redact_key(text: str, key: str) -> str:
+    """Remove the API key from text a server or proxy may have echoed back (#133).
+
+    Covers the raw value and its JSON-escaped form (a reflected JSON body).
+    """
+    if not key:
+        return text
+    for form in {key, json.dumps(key)[1:-1]}:
+        text = text.replace(form, _REDACTED)
+    return text
+
+
 def call_batch_endpoint(api_base: str, body: Dict[str, Any]) -> Dict[str, Any]:
     """POST the request body to /analyze/batch and return the parsed response.
 
     The response body is read with a hard cap of ``MAX_RESPONSE_BYTES`` (100 MB).
     Anything larger raises ``ValueError`` before decoding. Reviewer P9
     (security F7) memory-exhaustion guardrail.
+
+    #133: sends ``BACKEND_API_KEY`` (if set) as ``X-API-Key``; error messages
+    never carry the key.
     """
     url = api_base.rstrip("/") + "/analyze/batch"
+    # Validated before anything is sent: a bad key fails closed here.
+    headers = _backend_headers()
+    key = headers.get(_API_KEY_HEADER, "")
     data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}
-    )
+    req = urllib.request.Request(url, data=data, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=600) as resp:
             # Read one byte past the cap so we can detect overflow deterministically.
@@ -124,10 +168,15 @@ def call_batch_endpoint(api_base: str, body: Dict[str, Any]) -> Dict[str, Any]:
                 raise ValueError("response exceeded 100 MB cap")
             return json.loads(raw.decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise SystemExit(f"HTTP {exc.code} from {url}: {detail}") from exc
+        detail = _redact_key(exc.read().decode("utf-8", errors="replace"), key)
+        hint = ""
+        if exc.code == 401:
+            # Message honesty (#133): say which setting fixes a 401.
+            hint = f" (set {BACKEND_API_KEY_ENV} to the backend's API key)"
+        raise SystemExit(f"HTTP {exc.code} from {url}{hint}: {detail}") from exc
     except urllib.error.URLError as exc:
-        raise SystemExit(f"network error calling {url}: {exc.reason}") from exc
+        reason = _redact_key(str(exc.reason), key)
+        raise SystemExit(f"network error calling {url}: {reason}") from exc
 
 
 def write_summary_csv(path: Path, result: Dict[str, Any]) -> None:
