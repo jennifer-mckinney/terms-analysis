@@ -121,8 +121,10 @@ Full API documentation available at `http://localhost:9000/docs` when running.
 | Level | IRP Score | Grade |
 |-------|-----------|-------|
 | High | >= 0.75 | C or D+ |
-| Medium | >= 0.45 and < 0.75 | B, B-, or C+ |
-| Low | < 0.45 | A or A- |
+| Medium | >= 0.45 and < 0.75 | B, B-, C+, or C |
+| Low | < 0.45 | A, A-, or B |
+
+The average IRP score is scaled to 0-10 and rounded to two decimals before grading, so the edges overlap: a Medium average just under 0.75 can grade C, and a Low average just under 0.45 can grade B.
 
 ## Development
 
