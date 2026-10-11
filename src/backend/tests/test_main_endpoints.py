@@ -21,12 +21,15 @@ Covers:
   - DELETE /policy-watch/{id}
   - POST /policy-watch/{id}/snapshot
   - Error paths: 404, 409, 400, 500
+  - Issue #184: a lone surrogate in submitted document text never 500s
 
 Naming: test_<module>_<function>_<scenario>
 """
 from __future__ import annotations
 
 import json
+import re
+import typing
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -1746,3 +1749,489 @@ def test_main_get_analysis_legacy_row_without_llm_status_loads(app_client, db_se
     default = AnalysisPayload.model_fields["llm_status"].default
     assert resp.json()["llm_status"] == default
     assert default != "ok"
+
+
+# ---------------------------------------------------------------------------
+# Issue #184: a lone surrogate in submitted document text must never 500
+# ---------------------------------------------------------------------------
+#
+# Reproduction at base 3384a3f. Pydantic already rejects a lone surrogate in a
+# JSON string field (error type ``string_unicode``). FastAPI's default 422 body
+# then echoes the offending ``input``, Starlette can't encode that body as
+# UTF-8, and the client gets a 500. The same happens for an error on any field
+# while a surrogate is in the body. Text extracted from an RTF upload or a
+# fetched RTF (``\u-10240?``) carries the surrogate past every schema and also
+# 500s. RTF writes a non-BMP character (an emoji) as two ``\uN`` halves, which
+# today reach analysis as two separate surrogates, so a VALID emoji 500s too.
+#
+# Contract pinned here:
+# - a 4xx, with no 500 in any case;
+# - the error body echoes neither the surrogate (as a ``\udXXX`` escape or its
+#   CESU-8 bytes) nor the document text, and names the field;
+# - nothing downstream sees the text: no analyze_text, inference or LLM call,
+#   no DB row, and the exports still serialise;
+# - valid text still passes, including non-BMP characters (also as an RTF
+#   surrogate-pair escape) and the code points either side of the block.
+
+from tests.conftest import LOOPBACK_PEER  # noqa: E402
+
+_S184_MARK = "CANARY184"
+_S184_DOC = f"We sell your personal information. {_S184_MARK} "
+_S184_BLOCK = range(0xD800, 0xDFFF + 1)
+# Both ends of both halves of the surrogate block.
+_S184_EDGES = (0xD800, 0xDBFF, 0xDC00, 0xDFFF)
+_S184_EMOJI = "\U0001F600"
+_S184_URL = "https://example.com/policy.rtf"
+
+
+def _s184_has_surrogate(text: str | None) -> bool:
+    return any(ord(ch) in _S184_BLOCK for ch in text or "")
+
+
+def _s184_reject_vectors() -> list[tuple[str, str]]:
+    """Generated hostile documents: none of them is valid UTF-8."""
+    out: list[tuple[str, str]] = []
+    for cp in _S184_EDGES:
+        ch = chr(cp)
+        out.append((f"U+{cp:04X}-start", ch + _S184_DOC))
+        out.append((f"U+{cp:04X}-mid", _S184_DOC + ch + " more text"))
+        out.append((f"U+{cp:04X}-end", _S184_DOC + ch))
+    out += [
+        ("low-before-high", _S184_DOC + "\udc00\ud800"),  # reversed: not a pair
+        ("high-high", _S184_DOC + "\ud800\udbff"),
+        ("high-then-ascii", _S184_DOC + "\ud800A"),
+        ("low-after-emoji", _S184_DOC + _S184_EMOJI + "\udc00"),
+        ("run-10k", _S184_DOC + "\ud800" * 10_000),
+    ]
+    return out
+
+
+def _s184_huge() -> tuple[str, str]:
+    """A document far past ``max_input_chars`` (read from config, F13) whose
+    LAST character is a lone surrogate. analyze_text truncates at that limit,
+    so a check that runs after truncation would never see the surrogate."""
+    from app.config import settings
+
+    size = settings.max_input_chars * 40
+    return ("huge-tail-past-max-input", _S184_DOC * (size // len(_S184_DOC) + 1) + "\udfff")
+
+
+_S184_HUGE = _s184_huge()
+_S184_REJECT = _s184_reject_vectors()
+
+# Valid text that must still be accepted: either side of the block, U+FFFD and
+# the non-BMP range (which JSON escapes as a correctly PAIRED surrogate).
+_S184_ACCEPT = [
+    ("U+D7FF-below-block", "퟿"),
+    ("U+E000-above-block", ""),
+    ("U+FFFD-replacement", "�"),
+    ("U+10000-first-non-BMP", "\U00010000"),
+    ("U+1F600-emoji", _S184_EMOJI),
+    ("U+10FFFF-last", "\U0010ffff"),
+]
+
+# How a client really sends the text: ``escaped`` is what JSON.stringify and
+# json.dumps produce (``\ud800``); ``raw`` is the surrogate's own CESU-8 bytes
+# (invalid UTF-8), which json.loads on bytes decodes with surrogatepass.
+_S184_WIRES = ("escaped", "raw")
+
+
+def _s184_wire(body: dict, wire: str) -> bytes:
+    if wire == "escaped":
+        return json.dumps(body).encode("ascii")
+    return json.dumps(body, ensure_ascii=False).encode("utf-8", "surrogatepass")
+
+
+_S184_JSON = {"content-type": "application/json"}
+_S184_ESCAPE = re.compile(rb"\\ud[89a-f][0-9a-f]{2}", re.IGNORECASE)
+_S184_CESU = re.compile(rb"\xed[\xa0-\xbf]")
+
+
+def _s184_assert_no_echo(resp: Any) -> None:
+    """The refusal carries no surrogate, no document text and only UTF-8."""
+    raw = resp.content
+    raw.decode("utf-8")  # strict: the body itself is valid UTF-8
+    assert not _S184_ESCAPE.search(raw), "error body echoes a surrogate escape"
+    assert not _S184_CESU.search(raw), "error body echoes surrogate bytes"
+    assert _S184_MARK.encode() not in raw, "error body echoes the document text"
+
+
+def _s184_error_locs(resp: Any) -> list[tuple]:
+    detail = resp.json()["detail"]
+    return [tuple(err["loc"]) for err in detail]
+
+
+def _s184_rtf(text: str) -> bytes:
+    """RTF for ``text``: ASCII as-is, every other UTF-16 code unit as a signed
+    ``\\uN?`` escape (how RTF writers encode non-ASCII and non-BMP text)."""
+    units: list[str] = []
+    for ch in text:
+        if ord(ch) < 0x80:
+            units.append(ch)
+            continue
+        if ord(ch) in _S184_BLOCK:
+            halves = [ord(ch)]
+        else:
+            data = ch.encode("utf-16-be")
+            halves = [int.from_bytes(data[i:i + 2], "big") for i in range(0, len(data), 2)]
+        units += [f"\\u{h - 0x10000 if h > 0x7FFF else h}?" for h in halves]
+    return ("{\\rtf1 " + "".join(units) + "}").encode("ascii")
+
+
+@pytest.fixture
+def s184(monkeypatch, db_session):
+    """A client that returns a 500 instead of raising it, plus spies on every
+    downstream consumer of the document text."""
+    from fastapi.testclient import TestClient
+
+    import app.main as main_module
+    from app.database import get_db
+    from app.services.localai import LocalAIClient
+
+    seen: dict[str, list] = {"analyze_text": [], "infer": [], "llm": []}
+    real_analyze_text = main_module.analyze_text
+    real_infer_all = main_module.infer_all
+
+    async def spy_analyze_text(text, *args, **kwargs):
+        seen["analyze_text"].append(text)
+        return await real_analyze_text(text, *args, **kwargs)
+
+    def spy_infer_all(url, text):
+        seen["infer"].append(text)
+        return real_infer_all(url, text)
+
+    async def spy_llm(self, numbered_text, *args, **kwargs):
+        seen["llm"].append(numbered_text)
+        return None  # rules-only, as on an LLM failure (HR5)
+
+    async def no_kb(query, client, jurisdictions):
+        return [], False
+
+    monkeypatch.setattr(main_module, "analyze_text", spy_analyze_text)
+    monkeypatch.setattr(main_module, "infer_all", spy_infer_all)
+    monkeypatch.setattr(LocalAIClient, "analyze", spy_llm)
+    monkeypatch.setattr(analyzer_module, "_retrieve_legal_context", no_kb)
+
+    def override_get_db():
+        yield db_session
+
+    main_module.app.dependency_overrides[get_db] = override_get_db
+    with TestClient(
+        main_module.app, client=LOOPBACK_PEER, raise_server_exceptions=False
+    ) as client:
+        yield client, seen
+    main_module.app.dependency_overrides.clear()
+
+
+def _s184_assert_nothing_downstream(client: Any, seen: dict, db_session: Any) -> None:
+    assert seen["analyze_text"] == [], "analyze_text received the rejected text"
+    assert seen["infer"] == [], "inference received the rejected text"
+    assert seen["llm"] == [], "the LLM prompt was built from the rejected text"
+    assert db_session.query(AnalysisModel).count() == 0
+    assert db_session.query(ReviewItem).count() == 0
+    assert db_session.query(PolicySnapshot).count() == 0
+    # Export and JSON serialisation still work: nothing poisoned was stored.
+    assert client.get("/analyses").json() == []
+    assert client.get("/exports/analyses.csv").status_code == 200
+
+
+def _s184_serve(monkeypatch, data: bytes, content_type: str = "application/rtf") -> None:
+    """Fake only the network read; the real fetch_url_text extraction runs."""
+    from app.services import ingest
+
+    async def fake_fetch_bytes(url, cfg):
+        return data, content_type
+
+    monkeypatch.setattr(ingest, "_fetch_bytes", fake_fetch_bytes)
+
+
+def test_main_s184_vector_tables_have_reject_and_accept_rows():
+    """Contract: every reject row is invalid UTF-8, every accept row is valid,
+    and both tables (and both wire forms) are populated."""
+    from app.config import settings
+
+    rejects = _S184_REJECT + [_S184_HUGE]
+    assert len(_S184_HUGE[1]) > settings.max_input_chars
+    assert len(rejects) == len(_S184_EDGES) * 3 + 5 + 1
+    for label, text in rejects:
+        with pytest.raises(UnicodeEncodeError):
+            text.encode("utf-8")
+        assert _s184_has_surrogate(text), label
+    assert _S184_ACCEPT
+    for label, ch in _S184_ACCEPT:
+        (_S184_DOC + ch).encode("utf-8")
+        assert not _s184_has_surrogate(ch), label
+    assert set(_S184_WIRES) == {"escaped", "raw"}
+    # The raw wire form really carries invalid UTF-8 bytes on the wire.
+    assert _S184_CESU.search(_s184_wire({"text": "\ud800"}, "raw"))
+    assert _S184_ESCAPE.search(_s184_wire({"text": "\ud800"}, "escaped"))
+
+
+@pytest.mark.parametrize("wire", _S184_WIRES)
+@pytest.mark.parametrize("label,text", _S184_REJECT + [_S184_HUGE], ids=[v[0] for v in _S184_REJECT + [_S184_HUGE]])
+def test_main_analyze_lone_surrogate_text_rejected_422_without_echo(s184, db_session, label, text, wire):
+    client, seen = s184
+    resp = client.post("/analyze", content=_s184_wire({"text": text}, wire), headers=_S184_JSON)
+    assert resp.status_code == 422, (label, wire, resp.status_code)
+    _s184_assert_no_echo(resp)
+    assert ("body", "text") in _s184_error_locs(resp)
+    _s184_assert_nothing_downstream(client, seen, db_session)
+
+
+@pytest.mark.parametrize("wire", _S184_WIRES)
+@pytest.mark.parametrize("label,text", _S184_REJECT, ids=[v[0] for v in _S184_REJECT])
+def test_main_infer_lone_surrogate_text_rejected_422_without_echo(s184, db_session, label, text, wire):
+    client, seen = s184
+    resp = client.post("/infer", content=_s184_wire({"text": text}, wire), headers=_S184_JSON)
+    assert resp.status_code == 422, (label, wire, resp.status_code)
+    _s184_assert_no_echo(resp)
+    assert ("body", "text") in _s184_error_locs(resp)
+    _s184_assert_nothing_downstream(client, seen, db_session)
+
+
+# Minimal valid body for every JSON-body route. The contract test below fails
+# if a route is added (or removed) without updating this table.
+_S184_JSON_BASE: dict[str, dict] = {
+    "/infer": {"text": _S184_DOC},
+    "/analyze": {"text": _S184_DOC, "mode": "quick"},
+    "/analyze/url": {"url": "https://example.com/policy"},
+    "/analyze/batch": {"items": [{"url": "https://example.com/policy"}]},
+    "/reviews/{review_id}": {"status": "approved"},
+    "/watchlist": {"vendor": "ACME"},
+}
+
+
+def _s184_json_body_routes() -> dict[str, type]:
+    """Every route whose body is a JSON model from app.schemas (multipart
+    upload bodies are FastAPI-generated and excluded)."""
+    from fastapi.routing import APIRoute
+    from pydantic import BaseModel
+
+    from app.main import app
+
+    routes: dict[str, type] = {}
+    for route in app.routes:
+        if not isinstance(route, APIRoute) or route.body_field is None:
+            continue
+        model = route.body_field.field_info.annotation
+        if isinstance(model, type) and issubclass(model, BaseModel) and model.__module__ == "app.schemas":
+            routes[route.path] = model
+    return routes
+
+
+def _s184_injections(model: type) -> list[tuple[str, Any]]:
+    """(label, put) for every field of ``model`` and, one level down, every
+    field of a list-of-model field. ``put(body, s)`` places the hostile string
+    ``s`` in that field of a copy of the valid base body, keeping every other
+    field valid so the surrogate is the only fault."""
+    from pydantic import BaseModel
+
+    out: list[tuple[str, Any]] = []
+    for name, field in model.model_fields.items():
+        args = typing.get_args(field.annotation)
+        if typing.get_origin(field.annotation) in (list, typing.List):
+            out.append((name, lambda body, s, name=name: body.__setitem__(name, [s])))
+            inner = args[0] if args else None
+            if isinstance(inner, type) and issubclass(inner, BaseModel):
+                for sub in inner.model_fields:
+                    out.append((
+                        f"{name}.{sub}",
+                        lambda body, s, name=name, sub=sub: body.__setitem__(
+                            name, [{**body.get(name, [{}])[0], sub: s}]
+                        ),
+                    ))
+        else:
+            out.append((name, lambda body, s, name=name: body.__setitem__(name, s)))
+    return out
+
+
+def test_main_s184_json_route_table_matches_app():
+    assert set(_s184_json_body_routes()) == set(_S184_JSON_BASE)
+
+
+@pytest.mark.parametrize("path", sorted(_S184_JSON_BASE))
+def test_main_json_routes_never_500_on_lone_surrogate_in_any_field(s184, db_session, monkeypatch, path):
+    """Generated: every field of every JSON-body route x every reject vector x
+    both wire forms. Each must be a 422 that echoes nothing and names the field,
+    including plain ``str`` fields that pydantic passes through unchecked today.
+    A fetch, if one is reached, gets a valid document (never the network)."""
+    client, seen = s184
+    _s184_serve(monkeypatch, f"<p>{_S184_DOC}</p>".encode("ascii"), "text/html")
+    model = _s184_json_body_routes()[path]
+    url = path.replace("{review_id}", str(uuid4()))
+    failures: list[str] = []
+    count = 0
+    for label_field, put in _s184_injections(model):
+        leaf = label_field.split(".")[-1]
+        for label, text in _S184_REJECT:
+            for wire in _S184_WIRES:
+                count += 1
+                body = json.loads(json.dumps(_S184_JSON_BASE[path]))
+                put(body, text)
+                resp = client.post(url, content=_s184_wire(body, wire), headers=_S184_JSON)
+                where = f"{label_field}/{label}/{wire}"
+                if resp.status_code != 422:
+                    failures.append(f"{where}: {resp.status_code}")
+                    continue
+                try:
+                    _s184_assert_no_echo(resp)
+                except AssertionError as exc:
+                    failures.append(f"{where}: {exc}")
+                    continue
+                if not any(leaf in loc for loc in _s184_error_locs(resp)):
+                    failures.append(f"{where}: loc does not name {leaf}")
+    print(f"#184 generated cases for {path}: {count}")
+    assert count >= len(model.model_fields) * len(_S184_REJECT) * len(_S184_WIRES)
+    by_field: dict[str, set[str]] = {}
+    for failure in failures:
+        where, _, why = failure.partition(": ")
+        by_field.setdefault(where.split("/")[0], set()).add(why)
+    assert not failures, f"{len(failures)}/{count} failed; per field: {by_field}"
+    _s184_assert_nothing_downstream(client, seen, db_session)
+
+
+def _s184_rtf_reject_vectors() -> list[tuple[str, bytes]]:
+    """RTF documents whose ``\\uN`` escapes decode to a lone surrogate:
+    every block edge, signed and unsigned, mid-text and at the end."""
+    out: list[tuple[str, bytes]] = []
+    for cp in _S184_EDGES:
+        for form, n in (("signed", cp - 0x10000), ("unsigned", cp)):
+            esc = f"\\u{n}?"
+            out.append((f"U+{cp:04X}-{form}-mid", f"{{\\rtf1 {_S184_DOC}{esc} more}}".encode("ascii")))
+            out.append((f"U+{cp:04X}-{form}-end", f"{{\\rtf1 {_S184_DOC}{esc}}}".encode("ascii")))
+    out.append(("low-before-high", _s184_rtf(_S184_DOC + "\udc00\ud800")))
+    return out
+
+
+_S184_RTF_REJECT = _s184_rtf_reject_vectors()
+
+
+@pytest.mark.parametrize("label,data", _S184_RTF_REJECT, ids=[v[0] for v in _S184_RTF_REJECT])
+def test_main_analyze_file_rtf_lone_surrogate_rejected_422_without_echo(s184, db_session, label, data):
+    client, seen = s184
+    resp = client.post("/analyze/file", files={"file": ("policy.rtf", data, "application/rtf")})
+    assert resp.status_code == 422, (label, resp.status_code)
+    _s184_assert_no_echo(resp)
+    _s184_assert_nothing_downstream(client, seen, db_session)
+
+
+def test_main_analyze_url_fetched_lone_surrogate_rejected_400_without_echo(s184, db_session, monkeypatch):
+    client, seen = s184
+    _s184_serve(monkeypatch, _s184_rtf(_S184_DOC + "\ud800"))
+    resp = client.post("/analyze/url", json={"url": _S184_URL})
+    assert resp.status_code == 400
+    _s184_assert_no_echo(resp)
+    _s184_assert_nothing_downstream(client, seen, db_session)
+
+
+def test_main_analyze_url_fetched_lone_surrogate_message_is_not_fetch_failure(s184, monkeypatch):
+    """F8: the fetch succeeded, so the refusal must not claim it failed."""
+    from app.services.ingest import UrlFetchError
+
+    client, _ = s184
+
+    async def failing_fetch(url, cfg):
+        raise UrlFetchError("connect", "connect failed")
+
+    from app.services import ingest
+
+    monkeypatch.setattr(ingest, "_fetch_bytes", failing_fetch)
+    fetch_failure = client.post("/analyze/url", json={"url": _S184_URL})
+    assert fetch_failure.status_code == 400
+    _s184_serve(monkeypatch, _s184_rtf(_S184_DOC + "\ud800"))
+    resp = client.post("/analyze/url", json={"url": _S184_URL})
+    assert resp.status_code == 400
+    assert resp.json()["detail"] != fetch_failure.json()["detail"]
+
+
+def test_main_analyze_batch_fetched_lone_surrogate_rejected_400_without_echo(s184, db_session, monkeypatch):
+    client, seen = s184
+    _s184_serve(monkeypatch, _s184_rtf(_S184_DOC + "\udc00"))
+    resp = client.post("/analyze/batch", json={"items": [{"url": _S184_URL}], "mode": "full"})
+    assert resp.status_code == 400
+    _s184_assert_no_echo(resp)
+    _s184_assert_nothing_downstream(client, seen, db_session)
+
+
+def test_main_create_snapshot_fetched_lone_surrogate_rejected_400_without_echo(s184, db_session, monkeypatch):
+    client, seen = s184
+    _s184_serve(monkeypatch, _s184_rtf(_S184_DOC + "\ud800"))
+    resp = client.post("/snapshots", params={"url": _S184_URL})
+    assert resp.status_code == 400
+    _s184_assert_no_echo(resp)
+    _s184_assert_nothing_downstream(client, seen, db_session)
+
+
+def test_main_refresh_watchlist_fetched_lone_surrogate_reports_check_failed(s184, db_session, monkeypatch):
+    """Refresh keeps its own failure contract: 200 with "Check Failed", and the
+    stored text and hash are untouched (never the surrogate text)."""
+    client, _ = s184
+    item = _insert_watchlist_item(db_session, source_url=_S184_URL)
+    _s184_serve(monkeypatch, _s184_rtf(_S184_DOC + "\ud800"))
+    resp = client.post(f"/watchlist/{item.id}/refresh")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "Check Failed"
+    _s184_assert_no_echo(resp)
+    db_session.refresh(item)
+    assert item.last_document_text is None
+    assert item.last_document_hash is None
+
+
+# --- positive controls: valid text is still accepted -----------------------
+
+
+@pytest.mark.parametrize("wire", _S184_WIRES)
+@pytest.mark.parametrize("label,ch", _S184_ACCEPT, ids=[v[0] for v in _S184_ACCEPT])
+def test_main_analyze_accepts_valid_text_next_to_surrogate_block(s184, db_session, label, ch, wire):
+    client, seen = s184
+    text = _S184_DOC + ch + " end"
+    resp = client.post("/analyze", content=_s184_wire({"text": text}, wire), headers=_S184_JSON)
+    assert resp.status_code == 200, (label, wire, resp.status_code)
+    assert len(seen["analyze_text"]) == 1 and ch in seen["analyze_text"][0]
+    assert seen["llm"] and ch in seen["llm"][0]
+    row = db_session.query(AnalysisModel).one()
+    assert ch in row.document_text
+    assert client.get("/exports/analyses.csv").status_code == 200
+
+
+@pytest.mark.parametrize("wire", _S184_WIRES)
+def test_main_infer_accepts_non_bmp_text(s184, wire):
+    client, seen = s184
+    text = _S184_DOC + _S184_EMOJI
+    resp = client.post("/infer", content=_s184_wire({"text": text}, wire), headers=_S184_JSON)
+    assert resp.status_code == 200
+    assert seen["infer"] == [text]
+
+
+def test_main_analyze_file_html_non_bmp_entity_accepted(s184, db_session):
+    client, seen = s184
+    data = f"<p>{_S184_DOC}&#x1F600; end</p>".encode("ascii")
+    resp = client.post("/analyze/file", files={"file": ("policy.html", data, "text/html")})
+    assert resp.status_code == 200
+    assert _S184_EMOJI in seen["analyze_text"][0]
+
+
+def test_main_analyze_file_rtf_surrogate_pair_escape_accepted_as_one_char(s184, db_session):
+    """RTF writes an emoji as two ``\\uN`` halves. That is valid text: it must
+    reach analysis, the LLM and the DB as the one joined character."""
+    client, seen = s184
+    data = _s184_rtf(_S184_DOC + _S184_EMOJI + " end")
+    assert data.count(b"\\u") == 2  # really the two-halves encoding
+    resp = client.post("/analyze/file", files={"file": ("policy.rtf", data, "application/rtf")})
+    assert resp.status_code == 200
+    assert len(seen["analyze_text"]) == 1
+    assert _S184_EMOJI in seen["analyze_text"][0]
+    assert not _s184_has_surrogate(seen["analyze_text"][0])
+    assert seen["llm"] and not _s184_has_surrogate(seen["llm"][0])
+    row = db_session.query(AnalysisModel).one()
+    assert _S184_EMOJI in row.document_text
+
+
+def test_main_analyze_url_fetched_rtf_surrogate_pair_accepted_as_one_char(s184, db_session, monkeypatch):
+    client, seen = s184
+    _s184_serve(monkeypatch, _s184_rtf(_S184_DOC + _S184_EMOJI + " end"))
+    resp = client.post("/analyze/url", json={"url": _S184_URL})
+    assert resp.status_code == 200
+    assert len(seen["analyze_text"]) == 1
+    assert _S184_EMOJI in seen["analyze_text"][0]
+    assert not _s184_has_surrogate(seen["analyze_text"][0])
