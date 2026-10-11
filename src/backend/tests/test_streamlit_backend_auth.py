@@ -1,6 +1,10 @@
-"""Acceptance tests for #133 on the Streamlit v2 side (ruling 6, sec H2 and M4).
+"""Acceptance tests for #133 on the Streamlit side (ruling 6, sec H2 and M4).
 
-Contract the UI must meet (names are the test author's proposal; see the #133 tests
+Both UIs ``run.sh`` can start are covered: v2 (default) and the legacy v1 UI
+(``STREAMLIT_UI=v1``, PR #296 review round 2). A UI that sends no key 401s on every
+backend call once ``API_KEY`` is set.
+
+Contract each UI must meet (names are the test author's proposal; see the #133 tests
 evidence note):
 
 * ``BACKEND_API_KEY`` (environment, server side) is sent as ``X-API-Key`` on every
@@ -19,6 +23,7 @@ from __future__ import annotations
 import importlib.util
 import secrets
 import sys
+import unicodedata
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, Iterator
@@ -30,6 +35,8 @@ import streamlit
 from streamlit.testing.v1 import AppTest
 
 V2_PATH = Path(__file__).resolve().parents[2] / "webapp" / "app_streamlit_v2.py"
+# run.sh: STREAMLIT_UI=v1 starts this file (the legacy UI).
+LEGACY_PATH = V2_PATH.with_name("app_streamlit_legacy.py")
 KEY_ENV = "BACKEND_API_KEY"
 HEADER_ENV = "BACKEND_CLIENT_IP_HEADER"
 IDENTITY_HEADER = "X-Client-IP"
@@ -81,9 +88,9 @@ def ui_env(monkeypatch: pytest.MonkeyPatch) -> str:
     return key
 
 
-def _load_v2() -> ModuleType:
-    name = f"_v2_under_test_{secrets.token_hex(4)}"
-    spec = importlib.util.spec_from_file_location(name, V2_PATH)
+def _load_ui(path: Path = V2_PATH) -> ModuleType:
+    name = f"_ui_under_test_{secrets.token_hex(4)}"
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
@@ -133,7 +140,7 @@ ANALYZE_CASES = [
 def test_call_analyze_sends_key_and_client_identity(
     ui_env: str, recorder: _Recorder, inputs: dict[str, Any], path: str
 ) -> None:
-    v2 = _load_v2()
+    v2 = _load_ui()
     v2.st = _fake_st(_key())
     v2.call_analyze(context=[], jurisdictions=[], doc_type=None, industry=None, **inputs)
     posted = [c for c in recorder.calls if c["url"].endswith(path)]
@@ -142,7 +149,7 @@ def test_call_analyze_sends_key_and_client_identity(
 
 
 def test_call_infer_sends_key_and_client_identity(ui_env: str, recorder: _Recorder) -> None:
-    v2 = _load_v2()
+    v2 = _load_ui()
     v2.st = _fake_st(_key())
     v2.call_infer("https://example.com/terms", None)
     posted = [c for c in recorder.calls if c["url"].endswith("/infer")]
@@ -202,9 +209,13 @@ def test_ui_without_backend_key_still_calls_backend(
     monkeypatch.delenv(KEY_ENV, raising=False)
     monkeypatch.delenv(HEADER_ENV, raising=False)
     monkeypatch.setenv("API_BASE_URL", UNREACHABLE_BACKEND)
-    v2 = _load_v2()
+    v2 = _load_ui()
     v2.st = _fake_st(_key())
     assert v2.call_infer(None, "We share data.") == {"id": "stub", "findings": []}
+    assert len(recorder.calls) == 1
+    # Nothing browser-supplied is forwarded as a credential or identity.
+    assert "x-api-key" not in recorder.calls[0]["headers"]
+    assert IDENTITY_HEADER.lower() not in recorder.calls[0]["headers"]
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +267,7 @@ def test_key_never_rendered_on_results_page(hostile_key: str, fake_context: None
 
 def test_key_never_rendered_when_analysis_fails(hostile_key: str) -> None:
     try:
-        v2 = _load_v2()
+        v2 = _load_ui()
     except Exception as exc:  # refusing a malformed key at import is acceptable
         assert hostile_key.strip() not in str(exc)
         return
@@ -266,3 +277,177 @@ def test_key_never_rendered_when_analysis_fails(hostile_key: str) -> None:
     v2.call_infer("https://example.com/terms", None)
     shown = repr(v2.st.mock_calls)
     assert hostile_key.strip() not in shown
+
+
+# ---------------------------------------------------------------------------
+# Legacy UI (run.sh STREAMLIT_UI=v1), PR #296 review round 2 (MEDIUM): it sent no
+# X-API-Key, so every backend call 401'd once API_KEY was set. Same contract as v2.
+# ---------------------------------------------------------------------------
+
+
+def _load_legacy() -> ModuleType:
+    return _load_ui(LEGACY_PATH)
+
+
+@pytest.mark.parametrize("inputs,path", ANALYZE_CASES)
+def test_legacy_analyze_sends_key_and_client_identity(
+    ui_env: str, recorder: _Recorder, inputs: dict[str, Any], path: str
+) -> None:
+    legacy = _load_legacy()
+    legacy.st = _fake_st(_key())
+    legacy.analyze_document(**inputs)
+    posted = [c for c in recorder.calls if c["url"].endswith(path)]
+    assert len(posted) == 1, [c["url"] for c in recorder.calls]
+    _assert_authenticated(posted[0], ui_env)
+
+
+def _legacy_export_apptest() -> AppTest:
+    at = AppTest.from_file(str(LEGACY_PATH), default_timeout=APPTEST_TIMEOUT_S)
+    at.session_state["findings"] = [
+        {"title": "Stub", "severity": "high", "category": "Data", "excerpt": "We share data.", "confidence": 0.9}
+    ]
+    at.session_state["last_result"] = {"id": "abc", "findings": []}
+    return at
+
+
+def test_legacy_export_download_sends_key_and_client_identity(
+    ui_env: str, recorder: _Recorder, fake_context: None
+) -> None:
+    at = _legacy_export_apptest()
+    at.run()
+    assert not at.exception, [e.value for e in at.exception]
+    exports = [c for c in recorder.calls if "/exports/" in c["url"]]
+    # "Did nothing" guard: the export tab must actually have called the backend.
+    assert [c["url"].split("?")[0].endswith(".pdf") for c in exports] == [True], exports
+    for call in exports:
+        _assert_authenticated(call, ui_env)
+
+
+def test_legacy_ui_without_backend_key_still_calls_backend(
+    monkeypatch: pytest.MonkeyPatch, recorder: _Recorder
+) -> None:
+    # Positive control (green today): the local developer setup with no key works
+    # and sends no X-API-Key header at all.
+    monkeypatch.delenv(KEY_ENV, raising=False)
+    monkeypatch.delenv(HEADER_ENV, raising=False)
+    monkeypatch.setenv("API_BASE_URL", UNREACHABLE_BACKEND)
+    legacy = _load_legacy()
+    legacy.st = _fake_st(_key())
+    assert legacy.analyze_document(text="We share data.") == {"id": "stub", "findings": []}
+    assert len(recorder.calls) == 1
+    assert "x-api-key" not in recorder.calls[0]["headers"]
+    assert IDENTITY_HEADER.lower() not in recorder.calls[0]["headers"]
+
+
+def test_legacy_key_never_rendered_when_analysis_fails(hostile_key: str) -> None:
+    try:
+        legacy = _load_legacy()
+    except Exception as exc:  # refusing a malformed key at import is acceptable
+        assert hostile_key.strip() not in str(exc)
+        return
+    legacy.st = _fake_st(_key())
+    for inputs, _ in ((c.values[0], c.values[1]) for c in ANALYZE_CASES):
+        legacy.analyze_document(**inputs)
+    shown = repr(legacy.st.mock_calls)
+    assert hostile_key.strip() not in shown
+
+
+def test_legacy_key_never_rendered_on_export_tab(hostile_key: str, fake_context: None) -> None:
+    at = _legacy_export_apptest()
+    at.run()
+    rendered = "\n".join(_tree_text(at._tree))
+    rendered += "\n".join(str(e.value) for e in at.exception)
+    for secret in (hostile_key, hostile_key.strip()):
+        assert secret not in rendered
+
+
+# Hostile backend credentials in the environment (attack list A: structure forgery,
+# encoding, look-alikes). Generated, not listed (QUALITY-BAR R2): every code point in
+# Unicode categories Cc, Cf, Zs, Zl and Zp (all line breaks, bidi and zero-width
+# controls, every space), every str.splitlines() breaker, the surrogateescape range
+# os.environ uses for invalid UTF-8 bytes, and the non-ASCII letters NFKC folds to an
+# ASCII letter. NUL is excluded only because no environment can hold it. For the
+# header name, every printable ASCII character outside the RFC 9110 tchar set is
+# added. v2 refuses these before any request with a fixed message naming the
+# variable; the legacy UI must do the same (fail closed, no value echoed).
+_HOSTILE_CATEGORIES = {"Cc", "Cf", "Zs", "Zl", "Zp"}
+_RFC9110_TCHAR = set("!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+
+
+def _generated_hostile_chars() -> tuple[str, ...]:
+    chars = {chr(c) for c in range(1, 0x110000) if unicodedata.category(chr(c)) in _HOSTILE_CATEGORIES}
+    chars |= {ch for ch in map(chr, range(1, 0x110000)) if len(("a" + ch + "b").splitlines()) > 1}
+    chars |= {chr(c) for c in range(0xDC80, 0xDD00)}  # os.fsdecode of bytes 0x80-0xFF
+    chars |= {
+        chr(c)
+        for c in range(0x80, 0x10000)
+        if (folded := unicodedata.normalize("NFKC", chr(c))).isascii() and folded.isalpha()
+    }
+    return tuple(sorted(chars))
+
+
+HOSTILE_CHARS = _generated_hostile_chars()
+HEADER_NAME_ONLY_CHARS = tuple(ch for ch in map(chr, range(0x20, 0x7F)) if ch not in _RFC9110_TCHAR)
+UI_PATHS = [pytest.param(V2_PATH, id="v2"), pytest.param(LEGACY_PATH, id="legacy")]
+
+
+def _ui_analyze(ui: ModuleType, path: Path) -> Any:
+    if path == LEGACY_PATH:
+        return ui.analyze_document(text="We share data.")
+    return ui.call_analyze(
+        context=[], jurisdictions=[], doc_type=None, industry=None, url=None, text="We share data.", file=None
+    )
+
+
+@pytest.mark.parametrize("ui_path", UI_PATHS)
+@pytest.mark.parametrize("env_name", [KEY_ENV, HEADER_ENV])
+def test_ui_refuses_hostile_backend_credentials_before_any_request(
+    monkeypatch: pytest.MonkeyPatch, recorder: _Recorder, ui_path: Path, env_name: str
+) -> None:
+    monkeypatch.setenv("API_BASE_URL", UNREACHABLE_BACKEND)
+    base = {KEY_ENV: _key(), HEADER_ENV: IDENTITY_HEADER}
+    chars = HOSTILE_CHARS + (HEADER_NAME_ONLY_CHARS if env_name == HEADER_ENV else ())
+    # Each character both inside the value and trailing it (the classic "\n" tail).
+    cases = [(ch, base[env_name][:4] + ch + base[env_name][4:]) for ch in chars]
+    cases += [(ch, base[env_name] + ch) for ch in chars]
+    checked = 0
+    for suffix, hostile in cases:
+        monkeypatch.setenv(KEY_ENV, base[KEY_ENV])
+        monkeypatch.setenv(HEADER_ENV, base[HEADER_ENV])
+        monkeypatch.setenv(env_name, hostile)
+        recorder.calls.clear()
+        try:
+            ui = _load_ui(ui_path)
+        except Exception as exc:  # refusing at import is acceptable, without the value
+            assert hostile not in str(exc) and base[env_name] not in str(exc)
+            checked += 1
+            continue
+        ui.st = _fake_st(_key())
+        assert _ui_analyze(ui, ui_path) is None, f"{env_name} with {suffix!r}: request not refused"
+        assert recorder.calls == [], f"{env_name} with {suffix!r} reached the HTTP layer"
+        shown = repr(ui.st.mock_calls)
+        assert ui.st.error.called, f"{env_name} with {suffix!r}: no error shown"
+        assert hostile not in shown and base[env_name] not in shown
+        assert env_name in shown, "message honesty: the error names the variable to fix"
+        checked += 1
+    assert checked == len(cases)
+
+
+@pytest.mark.parametrize("ui_path", UI_PATHS)
+def test_ui_sends_key_without_identity_header_when_header_unconfigured(
+    monkeypatch: pytest.MonkeyPatch, recorder: _Recorder, ui_path: Path
+) -> None:
+    # Key set, BACKEND_CLIENT_IP_HEADER unset (a deployment without a trusted proxy):
+    # the key still goes out, and no identity header is invented from browser input.
+    key = _key()
+    monkeypatch.setenv(KEY_ENV, key)
+    monkeypatch.delenv(HEADER_ENV, raising=False)
+    monkeypatch.setenv("API_BASE_URL", UNREACHABLE_BACKEND)
+    ui = _load_ui(ui_path)
+    ui.st = _fake_st(_key())
+    _ui_analyze(ui, ui_path)
+    assert len(recorder.calls) == 1, [c["url"] for c in recorder.calls]
+    headers = recorder.calls[0]["headers"]
+    assert headers.get("x-api-key") == key, f"{ui_path.name} sent no X-API-Key from {KEY_ENV}"
+    assert IDENTITY_HEADER.lower() not in headers
+    assert REVIEWER_IP not in repr(headers) and SPOOFED_IP not in repr(headers)

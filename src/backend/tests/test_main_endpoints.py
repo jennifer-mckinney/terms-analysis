@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -43,6 +44,11 @@ from app.models import (
 from app.schemas import AnalysisPayload
 from app.services import analyzer as analyzer_module
 from app.services.analyzer import AnalysisResult
+
+if TYPE_CHECKING:
+    from fastapi.testclient import TestClient
+
+    from app.config import Settings
 
 
 # ---------------------------------------------------------------------------
@@ -1271,7 +1277,7 @@ class TestSecurityApiKeyAuth:
     the app would refuse cannot slip through here."""
 
     @staticmethod
-    def _use(monkeypatch, **overrides):
+    def _use(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> Settings:
         import dataclasses
         import importlib
         import secrets
@@ -1295,23 +1301,31 @@ class TestSecurityApiKeyAuth:
             monkeypatch.setattr(security, "settings", new)
         return new
 
-    def test_security_api_key_wrong_key_returns_401(self, app_client, monkeypatch):
+    def test_security_api_key_wrong_key_returns_401(
+        self, app_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         s = self._use(monkeypatch, deploy_env="railway", generate_key=True)
         response = app_client.get("/analyses", headers={"X-API-Key": s.api_key[:-1]})
         assert response.status_code == 401
         assert response.json() == {"detail": "Invalid or missing API key"}
 
-    def test_security_api_key_missing_key_returns_401(self, app_client, monkeypatch):
+    def test_security_api_key_missing_key_returns_401(
+        self, app_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         self._use(monkeypatch, deploy_env="railway", generate_key=True)
         response = app_client.get("/analyses")
         assert response.status_code == 401
 
-    def test_security_api_key_correct_key_passes(self, app_client, monkeypatch):
+    def test_security_api_key_correct_key_passes(
+        self, app_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         s = self._use(monkeypatch, deploy_env="railway", generate_key=True)
         response = app_client.get("/analyses", headers={"X-API-Key": s.api_key})
         assert response.status_code == 200
 
-    def test_security_api_key_empty_string_serves_local_loopback_only(self, app_client, monkeypatch):
+    def test_security_api_key_empty_string_serves_local_loopback_only(
+        self, app_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # The conftest client is a loopback peer; DEPLOY_ENV=local + loopback bind.
         self._use(monkeypatch, deploy_env="local", api_key="", bind_host="127.0.0.1")
         assert app_client.get("/analyses").status_code == 200

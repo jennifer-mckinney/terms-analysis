@@ -37,7 +37,10 @@ field                              environment variable             rule
 ``client_identity_header``         ``RATE_LIMIT_CLIENT_IP_HEADER``  both or neither with CIDRs
 ``forwarded_allow_ips``            ``FORWARDED_ALLOW_IPS``          ``*`` anywhere is refused
 ``max_concurrent_analyses``        ``MAX_CONCURRENT_ANALYSES``      int >= 1
-``max_batch_items``                ``MAX_BATCH_ITEMS``              int >= 1
+``max_batch_items``                ``MAX_BATCH_ITEMS``              int >= 1 and <= the N of
+                                                                    every rate a batch item is
+                                                                    charged to (per-client,
+                                                                    per-key); PR #296 r2
 =================================  ===============================  ==========================
 
 Rates are ``"<N>/<second|minute|hour|day>"`` with N a positive ASCII integer.
@@ -116,6 +119,10 @@ _CHILD_SCRUB = (
     "MAX_BATCH_ITEMS",
 )
 
+# Rates that /analyze/batch charges one token per item (security.batch_admission).
+# A batch larger than any of these limits can never be admitted (PR #296 r2).
+BATCH_CHARGED_RATES = ("rate_limit_per_client", "rate_limit_per_key")
+
 # Spec of the rate format (not configuration): seconds per period unit.
 PERIOD_SECONDS = {"second": 1, "minute": 60, "hour": 3600, "day": 86400}
 
@@ -152,8 +159,24 @@ def _require_fields(names: list[str] | tuple[str, ...]) -> None:
 
 
 def build_settings(**overrides: Any) -> config.Settings:
-    """``dataclasses.replace`` on the live settings, failing clearly on missing fields."""
+    """``dataclasses.replace`` on the live settings, failing clearly on missing fields.
+
+    A batch is charged one token per item to every rate in ``BATCH_CHARGED_RATES``,
+    so ``max_batch_items`` may not exceed any of their limits (PR #296 r2). A test
+    that lowers one of those rates without naming ``max_batch_items`` gets the cap
+    fitted down to the lowest limit; a test that names it gets exactly its value.
+    """
     _require_fields(list(overrides))
+    if "max_batch_items" not in overrides:
+        parsed = [
+            config.parse_rate(overrides.get(name, getattr(config.settings, name)))
+            for name in BATCH_CHARGED_RATES
+        ]
+        # A malformed rate is the validator's to refuse; leave the cap alone then.
+        if all(p is not None for p in parsed):
+            fitted = min([config.settings.max_batch_items] + [p[0] for p in parsed if p])
+            if fitted != config.settings.max_batch_items:
+                overrides["max_batch_items"] = fitted
     return dataclasses.replace(config.settings, **overrides)
 
 
@@ -1335,13 +1358,86 @@ def test_batch_consumes_one_token_per_item(railway: Any, stubs: Any, db_override
 def test_batch_larger_than_remaining_budget_is_429_without_work(
     railway: Any, stubs: Any, db_override: Any
 ) -> None:
+    # The cap may not exceed the per-client limit (PR #296 r2), so the budget is
+    # made short by spending one token first, not by a limit below the batch size.
     k = _batch_size()
-    s = railway(rate_limit_per_client=rate(k - 1))
+    s = railway(rate_limit_per_client=rate(k), max_batch_items=k)
+    hdr = {"X-API-Key": s.api_key}
     with client_at(CLIENT_PEER) as c:
-        resp = c.post("/analyze/batch", json=_batch(k), headers={"X-API-Key": s.api_key})
+        assert c.post("/analyze", json=ANALYZE_BODY, headers=hdr).status_code == 200
+        resp = c.post("/analyze/batch", json=_batch(k), headers=hdr)
     _assert_429(resp, PERIOD_SECONDS["minute"])
     assert stubs.fetch.await_count == 0
     assert stubs.batch.await_count == 0
+
+
+@pytest.mark.parametrize("unit", list(PERIOD_SECONDS))
+@pytest.mark.parametrize("fits", [True, False], ids=["cap-equals-limit", "cap-one-above-limit"])
+@pytest.mark.parametrize("field_name", BATCH_CHARGED_RATES)
+def test_batch_cap_above_a_per_item_rate_is_refused_at_load(
+    field_name: str, fits: bool, unit: str
+) -> None:
+    """Contract (PR #296 r2, HIGH): a batch is charged one token per item to every
+    rate in BATCH_CHARGED_RATES, in a fixed window that holds N tokens whatever its
+    unit. A cap above any N makes a full batch a guaranteed 429, so Settings must
+    refuse it at load, naming MAX_BATCH_ITEMS and the rate's variable. A cap equal
+    to N is the boundary and is accepted. Only ``field_name`` is tight here; the
+    other charged rate sits one above, so the refusal is attributable."""
+    n = config.settings.max_batch_items
+    overrides: dict[str, Any] = {
+        name: rate(n if name == field_name else n + 1, unit) for name in BATCH_CHARGED_RATES
+    }
+    overrides["max_batch_items"] = n if fits else n + 1
+    if fits:
+        s = build_settings(**_valid_base(), **overrides)
+        assert s.max_batch_items == n and getattr(s, field_name) == rate(n, unit)
+        return
+    base = _valid_base()
+    with pytest.raises(ValueError) as caught:
+        build_settings(**base, **overrides)
+    message = str(caught.value)
+    assert "MAX_BATCH_ITEMS" in message, message
+    assert field_name.upper() in message, f"message must name the rate to fix: {message}"
+    assert base["api_key"] not in message
+
+
+_SHIPPED_BATCH_FIELDS = (
+    "rate_limit_pre_auth",
+    *BATCH_CHARGED_RATES,
+    "max_batch_items",
+    "max_concurrent_analyses",
+)
+
+
+def test_shipped_defaults_admit_a_full_batch(
+    tmp_path: Path, railway: Any, stubs: Any, db_override: Any
+) -> None:
+    """Contract (PR #296 r2, HIGH): with every limit at its shipped default (no
+    RATE_LIMIT_* / MAX_* variables set), one client's first batch of exactly
+    max_batch_items items is admitted (200), not rate-limited. The defaults are read
+    from a child import with those variables scrubbed, because conftest raises the
+    rates for the rest of the suite; the child must also accept its own defaults."""
+    names = json.dumps(list(_SHIPPED_BATCH_FIELDS))
+    proc = _run_child(
+        "import json\nfrom app import config\n"
+        f"print(json.dumps({{n: getattr(config.settings, n) for n in {names}}}))",
+        tmp_path,
+        DEPLOY_ENV="railway",
+        API_KEY=_child_key(),
+    )
+    assert proc.returncode == 0, f"shipped defaults refused at import: {_tail(proc.stderr)}"
+    defaults = json.loads(proc.stdout.strip().splitlines()[-1])
+    s = railway(**defaults)
+    assert s.max_batch_items == defaults["max_batch_items"]
+    with client_at(CLIENT_PEER) as c:
+        resp = c.post(
+            "/analyze/batch", json=_batch(s.max_batch_items), headers={"X-API-Key": s.api_key}
+        )
+    assert resp.status_code == 200, (
+        f"a full batch of MAX_BATCH_ITEMS={s.max_batch_items} under the shipped "
+        f"RATE_LIMIT_PER_CLIENT={s.rate_limit_per_client} got {resp.status_code}"
+    )
+    assert stubs.batch.await_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1488,3 +1584,83 @@ def test_key_never_in_logs_or_bodies(
         for r in responses:
             assert secret not in r.text
             assert all(secret not in v for v in r.headers.values())
+
+
+# --- PR #296 r2 finding 3: the FastAPI floor the routes rely on -------------
+#
+# main.py declares ``Depends(..., scope="function")`` so the admission slot is
+# released when the endpoint returns, not after the response streams. FastAPI
+# added the ``scope`` parameter in 0.121.0: verified by inspecting
+# ``fastapi/param_functions.py`` in the published wheels (0.120.4, the last
+# 0.120.x release, has no ``scope`` parameter; 0.121.0 has it). A bare
+# ``fastapi`` requirement lets a cached or older resolver install a release on
+# which every guarded route fails at import with a TypeError.
+LAST_FASTAPI_WITHOUT_DEPENDS_SCOPE = "0.120.4"
+_LOWER_BOUND_OPS = {">=", ">", "==", "~=", "==="}
+
+
+def _ci_test_requirement_lines() -> list[tuple[str, str]]:
+    """(source, requirement line) for everything the CI test job installs.
+
+    Read from ci.yml rather than restated, and following nested ``-r`` files,
+    so a new requirements file in the install step is covered automatically.
+    """
+    import shlex
+
+    import yaml
+
+    repo = BACKEND_DIR.parents[1]
+    doc = yaml.safe_load((repo / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    runs = [s.get("run", "") for s in doc["jobs"]["test"]["steps"]]
+    install = [r for r in runs if "pip install" in r]
+    assert install, "ci.yml test job has no pip install step"
+    lines: list[tuple[str, str]] = []
+    pending: list[Path] = []
+    for script in install:
+        tokens = shlex.split(script.replace("\\\n", " "))
+        prev = ""
+        for tok in tokens:
+            if prev in {"-r", "--requirement"}:
+                pending.append(repo / tok)
+            elif tok[:1].isalpha() and tok not in {"pip", "install"}:
+                lines.append(("ci.yml", tok))  # inline requirement, e.g. pytest-cov
+            prev = tok
+    seen: set[Path] = set()
+    while pending:
+        path = pending.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        assert path.is_file(), f"ci.yml installs a missing requirements file: {path.name}"
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.split("#", 1)[0].strip()
+            if line.startswith(("-r ", "--requirement ")):
+                pending.append(path.parent / line.split(None, 1)[1])
+            elif line and not line.startswith("-"):
+                lines.append((str(path.relative_to(repo)), line))
+    return lines
+
+
+def test_ci_requirements_pin_fastapi_at_or_above_depends_scope() -> None:
+    from packaging.requirements import Requirement
+    from packaging.version import Version
+
+    import fastapi
+
+    floor = Version(LAST_FASTAPI_WITHOUT_DEPENDS_SCOPE)
+    reqs = [(src, Requirement(line)) for src, line in _ci_test_requirement_lines()]
+    fastapi_reqs = [(src, r) for src, r in reqs if r.name.lower() == "fastapi"]
+    # Did-nothing guard: the parse must actually find the dependency.
+    assert fastapi_reqs, "no fastapi requirement found in the files the CI test job installs"
+    for src, req in fastapi_reqs:
+        bounds = [Version(s.version) for s in req.specifier if s.operator in _LOWER_BOUND_OPS]
+        assert any(b > floor for b in bounds), (
+            f"{src}: '{req}' has no lower bound above {floor}; main.py uses "
+            "Depends(scope=...), which FastAPI added in the next minor release"
+        )
+        for probe in (floor, Version("0.120.0"), Version("0.100.0"), Version("0.1.0")):
+            assert probe not in req.specifier, f"{src}: '{req}' still admits fastapi {probe}"
+        # The pin must not be impossible: the version CI resolves today satisfies it.
+        assert req.specifier.contains(fastapi.__version__, prereleases=True), (
+            f"{src}: '{req}' excludes the installed fastapi {fastapi.__version__}"
+        )
