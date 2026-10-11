@@ -24,8 +24,8 @@ xref: [[LIB-ARCH]] [[LIB-STACK]] [[LIB-LEGAL]] [[LIB-TEST]] [[LIB-API]] [[LIB-RU
 | Risk method | IRP composite per finding. Details: [[LIB-RULES#IRP]] |
 | Sibling repo | `legal-corpus-ingester` (PUBLIC, like this one). Corpus bundles feed `legal_kb.py`; `load_from_bundle` is still unwired (D9 / two silent failures). Refresh/health state on ephemeral runners: ingester #71 decided (owner, 2026-10-10) as option 1, `actions/cache`; the mechanism, including the first-record seed step, is still to be implemented before refresh is wired (G2) |
 | Wiring audit | #224 shipped (#282): `wiring-audit-submit.yml` Mon 02:00 UTC, `wiring-audit-collect.yml` Tue 04:00 UTC, environment `wiring-audit` with secret `WIRING_AUDIT_API_KEY`, label `wiring-audit`. Fails loudly until the owner creates those. `AnalysisPayload.llm_status` (#287, LIB-API API7) tells an LLM outage from an always-fallback bug |
-| Hosting | Railway hosts the frontend (D10); railtail bridges to the local backend. Vercel is removed |
-| Review | P9 runs as CI jobs on every PR: `security-review` + `grumpy-review` in `.github/workflows/p9-review.yml` (#214). CRITICAL/HIGH/MEDIUM block; LOW/NIT are carded P3 (#218) |
+| Hosting | Railway hosts the frontend (D10); railtail bridges to the local backend. Vercel is removed. Since #133 (#296) the backend requires `API_KEY` (>= 32 printable ASCII chars) unless `DEPLOY_ENV=local` on a loopback `BACKEND_HOST`; Railway sets `DEPLOY_ENV=railway` + `API_KEY`. Streamlit and `src/backend/scripts/batch_analyze.py` send `BACKEND_API_KEY` as `X-API-Key`. `MAX_BATCH_ITEMS` defaults to 5 (`config.py`) |
+| Review | P9 runs as CI jobs on every PR: `security-review` + `grumpy-review` in `.github/workflows/p9-review.yml` (#214). CRITICAL/HIGH/MEDIUM block; LOW/NIT are carded P3 (#218). Both jobs authenticate with the `CLAUDE_CODE_OAUTH_TOKEN` repo Actions secret (subscription token from `claude setup-token`; #297, owner 2026-10-11; `ANTHROPIC_API_KEY` removed). Only the wiring audit draws API credit (`WIRING_AUDIT_API_KEY`, ADR 0002) |
 
 ## hard-requirements
 These identifiers mean different things in the ingester repo. Never cite a bare "HR7" across repos.
