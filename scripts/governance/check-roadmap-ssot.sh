@@ -116,6 +116,9 @@ KEY_RE = re.compile(r"[a-z_]+")
 # U+2028 or NEL inside a heading stays inside that heading and is rejected.
 LINE_SPLIT_RE = re.compile(r"\r\n|\r|\n")
 FENCE_OPEN_RE = re.compile(r" {0,3}(`{3,}|~{3,})")
+# A fence marker at any indent; which container it belongs to is decided by
+# its indent relative to the list content columns.
+FENCE_ANY_INDENT_RE = re.compile(r"[ \t]*(`{3,}|~{3,})")
 ATX_RE = re.compile(r" {0,3}(#{1,6})(?:[ \t]+(.*?))??(?:[ \t]+#+)?[ \t]*\Z")
 SETEXT_RE = re.compile(r" {0,3}(=+|-+)[ \t]*\Z")
 # CommonMark grammar, not a tunable: 4 columns of indent start an indented
@@ -335,6 +338,13 @@ def content_lines(text: str) -> Iterator[tuple[int, str]]:
     may_start_code = True  # the previous line was blank, a heading or a block end
     previous_blank = True
     for number, line in enumerate(LINE_SPLIT_RE.split(text), 1):
+        item_ended = False
+        if fence is not None and line.strip(" \t") and indent_columns(line) < fence_container_column:
+            # Fenced code has no lazy continuation: a non-blank line indented
+            # less than the list item's content column ends that item, and
+            # with it the fence. The line itself is then read as normal.
+            fence = None
+            may_start_code, item_ended = True, True
         if fence is not None:
             close = re.fullmatch(r"[ \t]*(`{3,}|~{3,})[ \t]*", line)
             close_indent = indent_columns(line)
@@ -363,13 +373,9 @@ def content_lines(text: str) -> Iterator[tuple[int, str]]:
         # continuation and keeps its list open. Anything else closes the list
         # items it is not indented under.
         container_column = list_cols[-1] if list_cols else 0
-        if (
-            previous_blank
-            or item
-            or heading
-            or fence_match(line, container_column)
-            or (indent < container_column and FENCE_OPEN_RE.match(line))
-        ):
+        # A fence opener interrupts a paragraph at any container depth, so
+        # it closes the list items it is not indented under.
+        if previous_blank or item_ended or item or heading or FENCE_ANY_INDENT_RE.match(line):
             while list_cols and indent < list_cols[-1]:
                 list_cols.pop()
             container_column = list_cols[-1] if list_cols else 0
