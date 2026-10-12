@@ -46,6 +46,8 @@ from .schemas import (
     RubricScores,
     WatchlistCreateRequest,
     WatchlistItemPayload,
+    export_content_disposition,
+    render_analysis_export,
 )
 from .services.analyzer import (
     analyze_batch_documents,
@@ -1115,13 +1117,21 @@ def export_analysis_pdf(analysis_id: str, db: Session = Depends(get_db)):
 # (nearest the def) registers BEFORE the alias. The order is .pdf, .json, alias:
 # registered the other way round, the alias would capture "<id>.json" as a
 # literal ID and 404 it, which is the bug #36 fixes.
+#
+# Second ruling ("schema version field and pretty formatting", PRD F5.2): the
+# body and header come from the one export format in schemas. Errors still
+# raise HTTPException, so 404/401/429 stay compact with no attachment header.
 @app.get("/exports/analysis/{analysis_id}")
 @app.get("/exports/analysis/{analysis_id}.json")
-def export_analysis_json(analysis_id: str, db: Session = Depends(get_db)):
+def export_analysis_json(analysis_id: str, db: Session = Depends(get_db)) -> Response:
     record = db.query(Analysis).filter(Analysis.id == analysis_id).first()
     if not record:
         raise HTTPException(status_code=404, detail="Analysis not found")
-    return json.loads(record.result_json)
+    return Response(
+        content=render_analysis_export(json.loads(record.result_json)),
+        media_type="application/json",
+        headers={"Content-Disposition": export_content_disposition(record.id)},
+    )
 
 
 @app.get("/reviews", response_model=list[ReviewItemPayload])

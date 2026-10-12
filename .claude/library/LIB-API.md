@@ -20,8 +20,8 @@ status (2026-10-12): endpoint map = 26 business routes + `/health` = 27 total, v
 | GET | `/analyses/{id}` | API key | path: `id` | `AnalysisPayload` | 404 if missing |
 | GET | `/exports/analyses.csv` | API key | — | CSV download | |
 | GET | `/exports/analysis/{id}.pdf` | API key | path: `id` | PDF download | Requires reportlab; route registered BEFORE both JSON routes below so not shadowed |
-| GET | `/exports/analysis/{id}.json` | API key | path: `id` | JSON download | PRD F5.2 path (#36); registered BEFORE the alias below |
-| GET | `/exports/analysis/{id}` | API key | path: `id` | JSON download | Alias of `.json`: same handler, same response |
+| GET | `/exports/analysis/{id}.json` | API key | path: `id` | JSON attachment: stored analysis + `schema_version`, indent 2 | PRD F5.2 path (#36); registered BEFORE the alias below |
+| GET | `/exports/analysis/{id}` | API key | path: `id` | JSON attachment (as `.json`) | Alias of `.json`: same handler, byte-identical response |
 | GET | `/reviews` | API key | — | `List[ReviewItemPayload]` | Pending reviews |
 | POST | `/reviews/{id}` | API key | `ReviewUpdate` | `ReviewItemPayload` | Approve/reject |
 | GET | `/watchlist` | API key | — | `List[WatchlistItemPayload]` | All items |
@@ -43,6 +43,7 @@ rule: since #133 every route runs the global `security.enforce_access` dependenc
 ### API2: export-route-ordering
 rule: in `main.py` the export routes register in this order: `/exports/analysis/{id}.pdf`, then `/exports/analysis/{id}.json`, then the alias `/exports/analysis/{id}`
 because: Starlette matches routes in registration order and `{id}` is greedy, so the alias registered earlier would capture `<id>.pdf` or `<id>.json` as a literal ID and 404
+body (PRD F5.2, #36): both JSON routes share one handler. It returns the stored analysis plus one top-level `schema_version` (`schemas.EXPORT_SCHEMA_VERSION`), as `json.dumps(indent=2)` UTF-8 with `Content-Type: application/json` and `Content-Disposition: attachment; filename="analysis-<id>.json"`. Any character in the ID outside `A-Z a-z 0-9 . _ -` becomes `_` in the filename. Errors (404, 401, 429) stay compact JSON with no Content-Disposition
 
 ### API3: cross-endpoint-field-parity
 rule: a field validated on `/analyze` MUST be validated identically on `/analyze/url`, `/analyze/file`, `/analyze/batch`

@@ -110,7 +110,7 @@ This is a partial list of the main endpoints; the full API documentation link is
 | `GET` | `/analyses/{id}` | Get specific analysis |
 | `GET` | `/watchlist` | List watched documents |
 | `POST` | `/watchlist` | Add document to watchlist |
-| `GET` | `/exports/analysis/{id}.json` | Export as JSON (`/exports/analysis/{id}` is an alias) |
+| `GET` | `/exports/analysis/{id}.json` | Export as JSON: the stored analysis plus `schema_version`, pretty-printed, as a file attachment (`/exports/analysis/{id}` is an alias) |
 | `GET` | `/exports/analysis/{id}.pdf` | Export as PDF |
 
 Full API documentation available at `http://localhost:9000/docs` when running.
