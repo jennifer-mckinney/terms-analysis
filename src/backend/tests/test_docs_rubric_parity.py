@@ -558,9 +558,12 @@ _UNARY_OPERATORS: dict[type[ast.unaryop], Callable[[float], float]] = {
 def _walk(node: ast.expr, names: Mapping[str, float], clamp: Callable[[float], float]) -> float:
     if isinstance(node, ast.Constant) and type(node.value) in (int, float):
         try:
-            return float(node.value)
+            value = float(node.value)
         except OverflowError as exc:
             raise RubricDocError("formula constant is out of float range") from exc
+        if not math.isfinite(value):
+            raise RubricDocError("formula constant is out of float range")
+        return value
     if isinstance(node, ast.Name):
         if node.id not in names:
             raise RubricDocError(f"formula uses unknown name {_show(node.id)}")
