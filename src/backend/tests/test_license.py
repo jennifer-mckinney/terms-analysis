@@ -363,16 +363,28 @@ def _top_level_docs_markdown(tracked: list[str]) -> list[str]:
 # Task-list items that #333 settles. A status doc that still shows one of
 # these as open contradicts the licence decision. Matched on _normalise()
 # output of the item text, so separators are optional (\s*).
+#
+# Every quantified part matches a given text exactly one way (CodeQL py/redos,
+# alert #10). "open\s*-?\s*source" let two \s* share one space, so a repeated
+# "open source" doubled the paths per repeat; "open\s*(?:-\s*)?source" accepts
+# the same strings with one parse. In "licence-selection" the filler between
+# the verb and "licence" is one loop of single tokens (one whitespace character
+# or one word), entered with a token that starts with whitespace or, right
+# after an "open" glued onto the verb ("pickopen-source"), with the rest of
+# "open source". The verb's \w* run then owns every glued letter, so it never
+# competes with the loop. Accepted strings are unchanged.
 LICENCE_DECISION_ITEMS: dict[str, re.Pattern[str]] = {
     "licence-selection": re.compile(
         r"(?<![a-z0-9])licen[cs](?:e|ing)\s*(?:selection|choice|decision)"
-        r"|(?<![a-z0-9])(?:select|choos|chose|pick|decid)\w*\s*"
-        r"(?:(?:a|an|the|on|our|project|open\s*-?\s*source)\s*)*licen[cs]e(?![a-z0-9])"
+        r"|(?<![a-z0-9])(?:select|choos|chose|pick|decid)\w*"
+        r"(?:(?:\s|(?<=open)(?:\s+(?:-\s*)?|-\s*)source)"
+        r"(?:\s|a|an|the|on|our|project|open\s*(?:-\s*)?source)*)?"
+        r"licen[cs]e(?![a-z0-9])"
     ),
     "open-source-repository": re.compile(
-        r"(?<![a-z0-9])open\s*-?\s*sourc(?:e|ed|ing)\s*(?:(?:the|this|our|a|project)\s*)*"
+        r"(?<![a-z0-9])open\s*(?:-\s*)?sourc(?:e|ed|ing)\s*(?:(?:the|this|our|a|project)\s*)*"
         r"(?:github\s*)?repo(?:sitory)?(?![a-z0-9])"
-        r"|(?<![a-z0-9])(?:github\s*)?repo(?:sitory)?\s*(?:(?:is|as)\s*)?open\s*-?\s*sourc"
+        r"|(?<![a-z0-9])(?:github\s*)?repo(?:sitory)?\s*(?:(?:is|as)\s*)?open\s*(?:-\s*)?sourc"
     ),
 }
 
@@ -893,6 +905,50 @@ def test_vectors_checklist_table_has_positive_and_negative_per_item() -> None:
         assert any(v[2] for v in rows), f"{name} has no open-item vector"
         assert any(not v[2] for v in rows), f"{name} has no closed or benign vector"
     assert {v[0] for v in CHECKLIST_VECTORS} == set(LICENCE_DECISION_ITEMS)
+
+
+# CodeQL py/redos (alert #10): the old "licence-selection" pattern took about
+# 1 s at 22 repeats of " sourceopen" and doubled with each repeat. The search
+# runs in a child process so a regression fails at the kill bound instead of
+# hanging the suite.
+_REDOS_REPEATS = 5000
+_REDOS_BUDGET_SECONDS = 1.0
+_REDOS_KILL_SECONDS = 10 * _REDOS_BUDGET_SECONDS
+_TIMED_SEARCH = (
+    "import re, sys, time\n"
+    "pattern = re.compile(sys.argv[1], int(sys.argv[2]))\n"
+    "text = sys.stdin.read()\n"
+    "start = time.perf_counter()\n"
+    "found = pattern.search(text) is not None\n"
+    "print(found, time.perf_counter() - start)\n"
+)
+
+
+def test_licence_decision_patterns_resist_backtracking_blowup() -> None:
+    hostile = "pickopen" + " sourceopen" * _REDOS_REPEATS
+    # (text, items expected to match): a non-matching tail forces a full
+    # backtrack; a licence tail is the positive control.
+    cases = [(hostile + " x", set()), (hostile + " source licence", {"licence-selection"})]
+    for text, expected in cases:
+        matched = set()
+        for name, pattern in LICENCE_DECISION_ITEMS.items():
+            try:
+                run = subprocess.run(
+                    [sys.executable, "-I", "-c", _TIMED_SEARCH, pattern.pattern, str(pattern.flags)],
+                    input=text,
+                    capture_output=True,
+                    text=True,
+                    timeout=_REDOS_KILL_SECONDS,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                pytest.fail(f"{name} still searching after {_REDOS_KILL_SECONDS}s on {_show(text[-20:])}")
+            assert run.returncode == 0, f"{name}: child exited {run.returncode}: {run.stderr[-500:]}"
+            found, elapsed = run.stdout.split()
+            assert float(elapsed) < _REDOS_BUDGET_SECONDS, f"{name} took {elapsed}s on {_show(text[-20:])}"
+            if found == "True":
+                matched.add(name)
+        assert matched == expected, f"tail {_show(text[-20:])}: matched {matched}, expected {expected}"
 
 
 def test_checklist_reports_the_item_line_number() -> None:
