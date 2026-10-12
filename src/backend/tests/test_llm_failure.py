@@ -28,6 +28,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional, get_args
 import functools
 import hashlib
+import http
 import json
 import logging
 import re
@@ -445,10 +446,23 @@ def test_analyze_cancellation_propagates(localai_http):
 #                             timeout, dropped connection): LocalAI is down
 #   fallback_llm_invalid      a 2xx response whose answer failed parsing or
 #                             LLMAnswer validation: the model misbehaved
-#   fallback_llm_error        anything else inside the boundary: a non-2xx
-#                             reply, model selection, prompt build, request
-#                             encoding, an unforeseen exception. This is the
-#                             "always falls back" bug class #195 is about.
+#   fallback_llm_upstream     LocalAI answered with an HTTP 5xx (500-599):
+#                             model not loaded, backend OOM. An upstream
+#                             availability problem, not our request (#288,
+#                             owner ruling 2026-10-12, option c)
+#   fallback_llm_rate_limited LocalAI answered HTTP 429: the server is
+#                             healthy but we exceeded its capacity. The fix
+#                             is to align MAX_CONCURRENT_ANALYSES with that
+#                             capacity or add capacity, not to fix our code
+#                             (error) or the server (upstream). Retry-After
+#                             changes nothing; no retry is in scope (#288,
+#                             owner ruling 2026-10-12, "approve c")
+#   fallback_llm_error        anything else inside the boundary: a 4xx other
+#                             than 429, any other non-2xx, non-5xx reply (3xx,
+#                             600), model selection,
+#                             prompt build, request encoding, an unforeseen
+#                             exception. This is the "always falls back" bug
+#                             class #195 is about.
 #   disabled                  the LLM step was not run (quick mode)
 #
 # The schema default (for rows stored before the field existed) must be a
@@ -486,8 +500,43 @@ def _raising(exc: BaseException) -> Setup:
     return _respond_with(_raise(exc))
 
 
-def _status_reply(code: int) -> Setup:
-    return _respond_with(lambda request: httpx.Response(code, text="upstream says no"))
+def _status_reply(code: int, **kwargs: Any) -> Setup:
+    kwargs = kwargs or {"text": "upstream says no"}
+    return _respond_with(lambda request: httpx.Response(code, **kwargs))
+
+
+# Issue #288: the status-code families, generated from the stdlib registry
+# (not hand-listed) plus the range edges, so the 5xx/4xx boundary is pinned
+# at both ends: 500 and 599 are upstream; 499, 3xx and 600 are not.
+_UPSTREAM_RANGE = range(500, 600)
+_HTTP_5XX = sorted({s.value for s in http.HTTPStatus if s.value in _UPSTREAM_RANGE} | {_UPSTREAM_RANGE[0], _UPSTREAM_RANGE[-1]})
+# #288 ("approve c"): 429 is its own class, fallback_llm_rate_limited: the
+# server is healthy but we exceeded its capacity. Taken from the stdlib
+# registry, not restated as a literal.
+_RATE_LIMITED = http.HTTPStatus.TOO_MANY_REQUESTS.value
+_HTTP_4XX = sorted(
+    ({s.value for s in http.HTTPStatus if 400 <= s.value < 500} | {_UPSTREAM_RANGE[0] - 1}) - {_RATE_LIMITED}
+)
+# Retry-After values a 429 may carry (RFC 9110 section 10.2.3: delay-seconds
+# or an HTTP-date) plus hostile ones. None may change the outcome, and the
+# client must neither wait nor retry on any of them: no retry is in scope.
+_RETRY_AFTER_VALUES: Dict[str, str] = {
+    "seconds": "1",
+    "zero": "0",
+    "one-day": "86400",
+    "huge": "9" * 40,
+    "negative": "-1",
+    "http-date": "Wed, 21 Oct 2026 07:28:00 GMT",
+    "garbage-forges-status": "soon FORGED llm_status=ok",
+    "empty": "",
+}
+# Non-2xx replies outside both families: redirects (not followed) and a code
+# past the 5xx range. They keep today's fallback_llm_error.
+_HTTP_OTHER_NON_2XX = (300, 302, _UPSTREAM_RANGE[-1] + 1)
+# LocalAI's OpenAI-shaped error body. The HTTP status line decides the
+# class; a body (attacker- or model-influenced) never does.
+def _error_body(code: int) -> Dict[str, Any]:
+    return {"json": {"error": {"code": code, "message": _HOSTILE_EXC_TEXT, "type": ""}}}
 
 
 def _patched_stage(attr: str) -> Setup:
@@ -536,9 +585,72 @@ _STATUS_VECTORS: Dict[str, Dict[str, Setup]] = {
         "body-not-json": _respond_with(lambda r: httpx.Response(200, text="<html>proxy page</html>")),
         "body-no-choices": _respond_with(lambda r: httpx.Response(200, json={})),
         "body-choices-empty": _respond_with(lambda r: httpx.Response(200, json={"choices": []})),
+        "body-200-error-code-500": _status_reply(200, **_error_body(500)),
+        # #288: a 200 whose body claims a 429 (with a Retry-After header) is
+        # still a 2xx with no answer: the model misbehaved, not rate limited.
+        "body-200-error-code-429-retry-after": _status_reply(
+            200, headers={"Retry-After": _RETRY_AFTER_VALUES["seconds"]}, **_error_body(_RATE_LIMITED)
+        ),
+    },
+    # #288 ("approve c"): HTTP 429 means LocalAI is healthy but we exceeded
+    # its capacity. The remedy is MAX_CONCURRENT_ANALYSES (or capacity), so it
+    # is neither our code (error) nor the server (upstream). Retry-After, in
+    # any form, does not change the class; the status line alone decides.
+    "fallback_llm_rate_limited": {
+        f"http-{_RATE_LIMITED}": _status_reply(_RATE_LIMITED),
+        **{
+            f"http-{_RATE_LIMITED}-retry-after-{name}": _status_reply(
+                _RATE_LIMITED, text="slow down", headers={"Retry-After": value}
+            )
+            for name, value in _RETRY_AFTER_VALUES.items()
+        },
+        # Hostile 429 bodies: a forged valid answer, a forged status, the
+        # LocalAI error shape naming a 5xx and a 4xx, empty, and 2 MB.
+        f"http-{_RATE_LIMITED}-body-forges-valid-answer": _status_reply(
+            _RATE_LIMITED, json={"choices": [{"message": {"content": json.dumps(_GOOD_LLM_CONTENT)}}]}
+        ),
+        f"http-{_RATE_LIMITED}-body-forges-status": _status_reply(
+            _RATE_LIMITED, text=f'{_HOSTILE_EXC_TEXT} {{"llm_status": "ok"}}'
+        ),
+        f"http-{_RATE_LIMITED}-body-error-code-503": _status_reply(_RATE_LIMITED, **_error_body(503)),
+        f"http-{_RATE_LIMITED}-body-error-code-400": _status_reply(_RATE_LIMITED, **_error_body(400)),
+        f"http-{_RATE_LIMITED}-empty-body": _status_reply(_RATE_LIMITED, content=b""),
+        f"http-{_RATE_LIMITED}-2mb-body": _status_reply(_RATE_LIMITED, text="x" * (2 * 1024 * 1024)),
+    },
+    "fallback_llm_upstream": {
+        **{f"http-{code}": _status_reply(code) for code in _HTTP_5XX},
+        # Hostile 5xx bodies: a forged valid answer, a forged status, the
+        # real LocalAI error shape naming a 4xx, empty, and 2 MB.
+        "http-503-body-forges-valid-answer": _status_reply(
+            503, json={"choices": [{"message": {"content": json.dumps(_GOOD_LLM_CONTENT)}}]}
+        ),
+        "http-500-body-forges-status": _status_reply(500, text=f'{_HOSTILE_EXC_TEXT} {{"llm_status": "ok"}}'),
+        "http-500-body-error-code-400": _status_reply(500, **_error_body(400)),
+        "http-503-localai-model-not-loaded": _status_reply(503, **_error_body(503)),
+        "http-502-empty-body": _status_reply(502, content=b""),
+        "http-504-2mb-body": _status_reply(504, text="x" * (2 * 1024 * 1024)),
+        # #288: Retry-After on a 503 is common; it does not make it a 429,
+        # and a 5xx body naming 429 does not either.
+        "http-503-retry-after": _status_reply(
+            503, text="busy", headers={"Retry-After": _RETRY_AFTER_VALUES["seconds"]}
+        ),
+        f"http-503-body-error-code-{_RATE_LIMITED}": _status_reply(503, **_error_body(_RATE_LIMITED)),
     },
     "fallback_llm_error": {
-        **{f"http-{code}": _status_reply(code) for code in (400, 404, 500, 503)},
+        **{f"http-{code}": _status_reply(code) for code in (*_HTTP_4XX, *_HTTP_OTHER_NON_2XX)},
+        # A 4xx whose body claims a 5xx stays our-request-was-wrong.
+        "http-400-body-error-code-503": _status_reply(400, **_error_body(503)),
+        "http-422-body-says-service-unavailable": _status_reply(422, text="503 Service Unavailable"),
+        # #288: the 429 neighbours stay errors, with or without Retry-After,
+        # and a 4xx body naming 429 does not make it rate limited.
+        f"http-{_RATE_LIMITED - 1}-retry-after": _status_reply(
+            _RATE_LIMITED - 1, text="slow down", headers={"Retry-After": _RETRY_AFTER_VALUES["seconds"]}
+        ),
+        f"http-{_RATE_LIMITED + 1}-retry-after": _status_reply(
+            _RATE_LIMITED + 1, text="slow down", headers={"Retry-After": _RETRY_AFTER_VALUES["seconds"]}
+        ),
+        f"http-400-body-error-code-{_RATE_LIMITED}": _status_reply(400, **_error_body(_RATE_LIMITED)),
+        "http-403-body-says-too-many-requests": _status_reply(403, text="429 Too Many Requests"),
         "transport-raises-novel": _raising(_NovelError(_HOSTILE_EXC_TEXT)),
         "transport-raises-typeerror": _raising(TypeError(_HOSTILE_EXC_TEXT)),
         "request-encoding-surrogate": _surrogate_in_legal_context,
@@ -550,7 +662,9 @@ _STATUS_VECTORS: Dict[str, Dict[str, Setup]] = {
     },
 }
 
-_FALLBACK_STATUSES = ("fallback_llm_unreachable", "fallback_llm_invalid", "fallback_llm_error")
+# Every fallback family in the table (derived, so a new fallback status gets
+# the HR5 agreement test without editing here).
+_FALLBACK_STATUSES = tuple(s for s in _STATUS_VECTORS if s.startswith("fallback_"))
 _VECTOR_IDS = [(status, case) for status, cases in _STATUS_VECTORS.items() for case in cases]
 
 
@@ -577,6 +691,22 @@ def test_llm_status_vectors_cover_every_emitted_status():
     assert all(_STATUS_VECTORS[s] for s in _STATUS_VECTORS)
     # httpx really has transport errors to generate from (no empty family).
     assert len(_STATUS_VECTORS["fallback_llm_unreachable"]) >= 8
+    # Issue #288: the HTTP families reach both edges of the 5xx range and
+    # the 4xx code just below it (no empty or one-sided family).
+    upstream_codes = {int(c.split("-")[1]) for c in _STATUS_VECTORS["fallback_llm_upstream"]}
+    error_codes = {int(c.split("-")[1]) for c in _STATUS_VECTORS["fallback_llm_error"] if c.startswith("http-")}
+    assert {_UPSTREAM_RANGE[0], _UPSTREAM_RANGE[-1], 502, 503, 504} <= upstream_codes
+    # #288: 429 left the error family; both of its neighbours stay in it.
+    assert {_UPSTREAM_RANGE[0] - 1, 400, 404, 422, _RATE_LIMITED - 1, _RATE_LIMITED + 1, _UPSTREAM_RANGE[-1] + 1} <= error_codes
+    assert all(c in _UPSTREAM_RANGE for c in upstream_codes)
+    assert not any(c in _UPSTREAM_RANGE for c in error_codes)
+    # #288: the rate-limited family is exactly 429, and only it: no other
+    # family carries a 429 status line, and every Retry-After form is fed.
+    rate_limited = _STATUS_VECTORS["fallback_llm_rate_limited"]
+    assert {int(c.split("-")[1]) for c in rate_limited} == {_RATE_LIMITED}
+    assert _RATE_LIMITED not in upstream_codes | error_codes
+    assert {f"http-{_RATE_LIMITED}-retry-after-{n}" for n in _RETRY_AFTER_VALUES} <= set(rate_limited)
+    assert f"http-{_RATE_LIMITED}" in rate_limited, "a 429 without Retry-After is the baseline"
     print(f"llm_status vectors: {len(_VECTOR_IDS)}")
 
 
@@ -613,13 +743,30 @@ def test_llm_status_fallback_agrees_with_hr5_confidence_reduction(monkeypatch, l
     assert payload.status == ("needs_review" if payload.review_required else "completed")
 
 
-def test_llm_status_fallback_with_threshold_above_confidence_needs_review(monkeypatch, localai_http):
-    # Override the threshold through config so the fallback must be reviewed.
+@pytest.mark.parametrize(
+    "status,case",
+    [
+        ("fallback_llm_unreachable", "transport-ConnectError"),
+        ("fallback_llm_unreachable", "transport-ReadTimeout"),
+        ("fallback_llm_upstream", "http-503"),
+        ("fallback_llm_upstream", "http-500"),
+        ("fallback_llm_rate_limited", f"http-{_RATE_LIMITED}"),
+        ("fallback_llm_rate_limited", f"http-{_RATE_LIMITED}-retry-after-seconds"),
+        ("fallback_llm_rate_limited", f"http-{_RATE_LIMITED}-retry-after-huge"),
+        ("fallback_llm_error", "http-400"),
+        ("fallback_llm_error", f"http-{_RATE_LIMITED - 1}-retry-after"),
+    ],
+)
+def test_llm_status_fallback_with_threshold_above_confidence_needs_review(monkeypatch, localai_http, status, case):
+    # HR7: override the threshold through config so the fallback must be
+    # reviewed. A 5xx (#288) is reviewed exactly like an outage or a 4xx, and
+    # so is a 429 (#288, "approve c"): LocalAI being healthy but over capacity
+    # does not exempt the rules-only result from human review.
     baseline = _rules_only_baseline(monkeypatch)
     threshold = min(1.0, baseline.payload.confidence + 0.01)
     monkeypatch.setattr(analyzer_module, "settings", dataclasses.replace(analyzer_module.settings, review_threshold=threshold))
-    payload, _ = _run_vector(monkeypatch, localai_http, "fallback_llm_unreachable", "transport-ConnectError")
-    assert payload.llm_status == "fallback_llm_unreachable"
+    payload, _ = _run_vector(monkeypatch, localai_http, status, case)
+    assert payload.llm_status == status
     assert payload.review_required is True
     assert payload.status == "needs_review"
 
@@ -634,14 +781,108 @@ def test_llm_status_ok_is_not_the_rules_only_result(monkeypatch, localai_http):
     assert payload.confidence != pytest.approx(baseline.payload.confidence)
 
 
-def test_llm_status_set_on_every_batch_document(monkeypatch, localai_http):
+@pytest.mark.parametrize(
+    "status,respond",
+    [
+        ("fallback_llm_unreachable", _raise(httpx.ConnectError(_HOSTILE_EXC_TEXT))),
+        ("fallback_llm_upstream", lambda request: httpx.Response(503, text=_HOSTILE_EXC_TEXT)),
+        (
+            "fallback_llm_rate_limited",
+            lambda request: httpx.Response(
+                _RATE_LIMITED, text=_HOSTILE_EXC_TEXT, headers={"Retry-After": _RETRY_AFTER_VALUES["seconds"]}
+            ),
+        ),
+    ],
+    ids=["connect-error", "http-503", f"http-{_RATE_LIMITED}-retry-after"],
+)
+def test_llm_status_set_on_every_batch_document(monkeypatch, localai_http, status, respond):
     monkeypatch.setattr(analyzer_module, "_retrieve_legal_context", _fake_lookup([], False))
-    localai_http(_raise(httpx.ConnectError(_HOSTILE_EXC_TEXT)))
+    localai_http(respond)
     docs = [(_DOC, "a", None, None), (_DOC, "b", None, None)]
     payloads, _ = asyncio.run(analyzer_module.analyze_batch_documents(docs, None, _JURISDICTIONS))
-    assert [p.llm_status for p in payloads] == ["fallback_llm_unreachable"] * len(docs)
+    assert [p.llm_status for p in payloads] == [status] * len(docs)
     quick, _ = asyncio.run(analyzer_module.analyze_batch_documents(docs, None, _JURISDICTIONS, mode="quick"))
     assert [p.llm_status for p in quick] == ["disabled"] * len(docs)
+
+
+def _outcome(payload: AnalysisPayload) -> Dict[str, Any]:
+    # Everything a reader acts on; ids, timestamps and timing excluded.
+    return {
+        "llm_status": payload.llm_status,
+        "status": payload.status,
+        "review_required": payload.review_required,
+        "confidence": payload.confidence,
+        "risk_score": payload.risk_score,
+        "grade": payload.grade,
+        "summary": payload.summary,
+        "action_readiness": payload.action_readiness,
+        "categories": sorted(f.category for f in payload.findings),
+    }
+
+
+@pytest.mark.parametrize("name", list(_RETRY_AFTER_VALUES), ids=list(_RETRY_AFTER_VALUES))
+def test_llm_status_rate_limited_retry_after_changes_nothing(monkeypatch, localai_http, name):
+    """#288 ("approve c"): a 429 is fallback_llm_rate_limited whatever its
+    Retry-After says. The header neither changes the outcome nor makes the
+    client wait or retry: no retry is in scope, and the remedy for a 429 is
+    MAX_CONCURRENT_ANALYSES or more capacity, not a client-side back-off."""
+    waits: List[Any] = []
+    real_sleep = asyncio.sleep
+
+    async def _recording_sleep(delay: Any, *args: Any, **kwargs: Any) -> Any:
+        waits.append(delay)
+        return await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _recording_sleep)
+    monkeypatch.setattr("time.sleep", lambda delay: waits.append(delay))
+    bare, bare_sent = _run_vector(monkeypatch, localai_http, "fallback_llm_rate_limited", f"http-{_RATE_LIMITED}")
+    hinted, hinted_sent = _run_vector(
+        monkeypatch, localai_http, "fallback_llm_rate_limited", f"http-{_RATE_LIMITED}-retry-after-{name}"
+    )
+    assert hinted.llm_status == "fallback_llm_rate_limited"
+    assert _outcome(hinted) == _outcome(bare)
+    assert (len(bare_sent), len(hinted_sent)) == (1, 1), "a 429 must not be retried"
+    assert [w for w in waits if w] == [], "a 429 must not make the client wait"
+    assert "FORGED" not in hinted.model_dump_json(exclude={"legal_context"})
+
+
+@pytest.mark.parametrize("reason", sorted(_FALLBACK_STATUSES))
+def test_llm_status_reader_keeps_every_fallback_reason(reason):
+    """The analyzer is the one reader of the client's fallback reason
+    (``_llm_status``). Every fallback family in the table, including #288's
+    fallback_llm_rate_limited, must come through by name, not collapse into
+    the fail-closed fallback_llm_error default."""
+    client = type("StubClient", (), {"fallback_reason": reason})()
+    assert analyzer_module._llm_status(None, client) == reason
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        # Near-misses of the #288 value and hostile variants of the real one:
+        # never trusted, so they fail closed to fallback_llm_error.
+        "fallback_llm_rate_limit",
+        "fallback_llm_ratelimited",
+        "fallback_llm_429",
+        "FALLBACK_LLM_RATE_LIMITED",
+        "fallback_llm_rate_limited ",
+        "fallback_llm_rate_limited\n",
+        "fallback_llm_rate_limited​",
+        "fallback_llm_rаte_limited",  # Cyrillic a
+        "fallback_llm_rate_limited\x00",
+        "fallback_llm_rate_limited\ud800",
+        b"fallback_llm_rate_limited",
+        None,
+    ],
+    ids=lambda v: ascii(v)[:40],
+)
+def test_llm_status_reader_fails_closed_on_untrusted_reason(reason):
+    client = type("StubClient", (), {"fallback_reason": reason})()
+    assert analyzer_module._llm_status(None, client) == "fallback_llm_error"
+    # Positive control: an answer always wins, whatever the client recorded.
+    assert analyzer_module._llm_status({"summary": "s"}, client) == "ok"
+
+
 # Issue #194: an error response body never reaches the logs
 # ---------------------------------------------------------------------------
 # The LocalAI response body is untrusted: it can echo the prompt, the

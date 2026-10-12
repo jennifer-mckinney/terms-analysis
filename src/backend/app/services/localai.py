@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import traceback
+from http import HTTPStatus
 from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
 import httpx
@@ -62,6 +63,40 @@ def _traceback_fingerprint(exc: BaseException) -> Tuple[str, str]:
 # Name of the response-parsing stage of LocalAIClient.analyze(). A failure in
 # this stage is an invalid answer (#195); the name also appears in the log.
 _PARSE_STAGE = "response parse"
+
+# Issue #288: HTTP status classes from RFC 9110 section 15 (protocol
+# definitions, not tunables). 429 is taken from the stdlib registry; the 5xx
+# class is a range because HTTPStatus only lists registered codes (599 isn't).
+_HTTP_RATE_LIMITED = HTTPStatus.TOO_MANY_REQUESTS.value
+_HTTP_SERVER_ERROR_CLASS = range(500, 600)
+
+
+def _http_fallback_reason(exc: httpx.HTTPError) -> LLMStatus:
+    """The one classifier of an httpx failure into an ``LLMStatus`` (#195, #288).
+
+    - TransportError (connect error, any timeout, dropped connection): no
+      response came back, so LocalAI is unreachable.
+    - HTTPStatusError 429: LocalAI is healthy but over capacity. Retry-After
+      is never read: the call is not retried and nothing waits.
+    - HTTPStatusError 5xx: an upstream availability fault (model not loaded,
+      backend out of memory).
+    - Everything else (another 4xx, a 3xx, a code above 599, decoding,
+      redirect or URL errors): ``fallback_llm_error``, the fail-closed class.
+
+    Only the status line decides. The body and headers are untrusted and
+    never read here, so a body naming another code cannot move the class.
+    """
+    if isinstance(exc, httpx.TransportError):
+        return "fallback_llm_unreachable"
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        if code == _HTTP_RATE_LIMITED:
+            return "fallback_llm_rate_limited"
+        if code in _HTTP_SERVER_ERROR_CLASS:
+            return "fallback_llm_upstream"
+    return "fallback_llm_error"
+
+
 def _log_http_error(label: str, exc: httpx.HTTPError) -> None:
     """Log an httpx failure without any server-controlled text (issue #194).
 
@@ -219,15 +254,9 @@ class LocalAIClient:
             answer = LLMAnswer.model_validate(json.loads(content))
             return answer.model_dump()
         except httpx.HTTPError as exc:
-            # Issue #195: only a TransportError means no response came back
-            # (connect error, any timeout, dropped connection). A non-2xx
-            # status (LocalAI is up, the call is wrong) and other httpx errors
-            # (decoding, redirects, bad URL) are not an outage.
-            self.fallback_reason = (
-                "fallback_llm_unreachable"
-                if isinstance(exc, httpx.TransportError)
-                else "fallback_llm_error"
-            )
+            # Issues #195, #288: unreachable, upstream (5xx), rate limited
+            # (429) or error, decided by the one classifier.
+            self.fallback_reason = _http_fallback_reason(exc)
             # Issue #194: the error body is untrusted (it can echo prompt,
             # document or legal-passage text); log status/length/fingerprint
             # or the type name only.

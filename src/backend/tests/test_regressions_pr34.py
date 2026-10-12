@@ -25,8 +25,10 @@ Naming convention follows ``.claude/rules/testing.md``:
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import get_args
 from uuid import uuid4
 
@@ -929,6 +931,52 @@ class TestCategoryIInferenceEdges:
 # ===========================================================================
 
 
+# The API7 contract: the complete set of llm_status values a client may see.
+# Pinned (not derived) on purpose: adding, renaming or dropping a value is an
+# API change and must turn this red. #288 (owner ruling 2026-10-12, option c)
+# added fallback_llm_upstream for a LocalAI HTTP 5xx, and (owner ruling
+# 2026-10-12, "approve c", an approved data-model change)
+# fallback_llm_rate_limited for a LocalAI HTTP 429: the server is healthy but
+# we exceeded its capacity, so the fix is MAX_CONCURRENT_ANALYSES or more
+# capacity, not our code (error) or the server (upstream).
+_EXPECTED_LLM_STATUSES = frozenset({
+    "ok",
+    "fallback_llm_unreachable",
+    "fallback_llm_upstream",
+    "fallback_llm_rate_limited",
+    "fallback_llm_invalid",
+    "fallback_llm_error",
+    "disabled",
+    "unknown",
+})
+
+# Where the contract is documented (#288 acceptance: "LIB-API API7 and
+# TECH_SPEC 5.1.5 updated together"): (doc, first line of the section, prefix
+# of the line that starts the next section).
+_LLM_STATUS_DOC_SECTIONS = [
+    (".claude/library/LIB-API.md", "### API7", "### "),
+    ("docs/TECH_SPEC.md", "#### 5.1.5", "###"),
+]
+
+
+def _names_value(text: str, value: str) -> bool:
+    # Whole token only: "fallback_llm_error" must not count as naming
+    # "fallback_llm_err", and "ok" must not match inside "token".
+    return re.search(rf"(?<![A-Za-z0-9_]){re.escape(value)}(?![A-Za-z0-9_])", text) is not None
+
+
+def _doc_section(doc: str, start: str, next_prefix: str) -> str:
+    lines = (Path(__file__).resolve().parents[3] / doc).read_text(encoding="utf-8").splitlines()
+    starts = [i for i, row in enumerate(lines) if row.startswith(start)]
+    assert len(starts) == 1, (doc, start, len(starts))
+    body = []
+    for row in lines[starts[0] + 1:]:
+        if row.startswith(next_prefix):
+            break
+        body.append(row)
+    return "\n".join(body)
+
+
 def _llm_status_literal():
     # Looked up at call time so a missing Literal fails the test (red for
     # the right reason), not the module import.
@@ -964,9 +1012,58 @@ class TestLLMStatusSchemaContract:
         values = get_args(literal)
         assert values and all(isinstance(v, str) for v in values)
         assert len(set(values)) == len(values)
-        # The card's two states, distinct (acceptance criterion 2), plus
-        # the brief's minimum set.
-        assert {"ok", "fallback_llm_unreachable", "fallback_llm_invalid", "disabled"} <= set(values)
+        # The full allowed set (#288): a new value, a dropped value or a
+        # rename each fail here.
+        assert set(values) == _EXPECTED_LLM_STATUSES
+
+    @pytest.mark.parametrize("value", sorted(_EXPECTED_LLM_STATUSES))
+    def test_every_documented_member_is_accepted(self, value):
+        assert _payload(llm_status=value).llm_status == value
+
+    @pytest.mark.parametrize(
+        "value",
+        ["fallback_llm_5xx", "fallback_llm_upstream_error", "fallback_upstream", "upstream", "fallback_llm_server"],
+    )
+    def test_near_miss_names_for_the_upstream_status_are_rejected(self, value):
+        # #288: only the ruled spelling is a member; plausible neighbours
+        # of it stay outside the closed set.
+        _llm_status_literal()
+        with pytest.raises(ValueError):
+            _payload(llm_status=value)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "fallback_llm_rate_limit",
+            "fallback_llm_ratelimited",
+            "fallback_llm_rate_limiting",
+            "fallback_llm_throttled",
+            "fallback_llm_429",
+            "fallback_rate_limited",
+            "rate_limited",
+            "fallback_llm_too_many_requests",
+        ],
+    )
+    def test_near_miss_names_for_the_rate_limited_status_are_rejected(self, value):
+        # #288 ("approve c"): only the ruled spelling is a member.
+        _llm_status_literal()
+        with pytest.raises(ValueError):
+            _payload(llm_status=value)
+
+    def test_field_description_names_every_member(self):
+        # The OpenAPI description is the client-facing copy of API7; it is
+        # tested against the Literal so a new value can't leave it stale.
+        description = AnalysisPayload.model_fields["llm_status"].description or ""
+        missing = [v for v in sorted(_EXPECTED_LLM_STATUSES) if not _names_value(description, v)]
+        assert missing == []
+
+    @pytest.mark.parametrize("doc,start,next_prefix", _LLM_STATUS_DOC_SECTIONS, ids=[d for d, _, _ in _LLM_STATUS_DOC_SECTIONS])
+    def test_contract_docs_name_every_member(self, doc, start, next_prefix):
+        # Static by necessity (docs have no behaviour): LIB-API API7 and
+        # TECH_SPEC 5.1.5 each name every llm_status value.
+        section = _doc_section(doc, start, next_prefix)
+        missing = [v for v in sorted(_EXPECTED_LLM_STATUSES) if not _names_value(section, v)]
+        assert missing == [], (doc, missing)
 
     @pytest.mark.parametrize("value", [None, "", 0, 1, True, ["ok"], {"ok": 1}])
     def test_non_member_types_are_rejected(self, value):
@@ -976,7 +1073,9 @@ class TestLLMStatusSchemaContract:
 
     def test_forged_look_alikes_are_rejected(self):
         values = get_args(_llm_status_literal())
-        variants = [v for value in values for v in _forged_status_variants(value)]
+        # The pinned set too, so look-alikes of a value the Literal lacks
+        # (#288 fallback_llm_rate_limited before the fix) are still fed.
+        variants = [v for value in sorted(set(values) | _EXPECTED_LLM_STATUSES) for v in _forged_status_variants(value)]
         accepted = []
         for variant in variants:
             if variant in values:
