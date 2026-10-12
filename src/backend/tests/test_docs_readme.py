@@ -1,0 +1,1223 @@
+"""README.md does not contradict the code (#144, plan A1, HR9).
+
+The public README contradicted itself and the code in four places:
+
+- Features called the IRP methodology "planned, not-yet-implemented" while the
+  Risk Scoring section publishes the live formula (``rules._seed_irp``).
+- The Risk Scoring table used grades (``D or F``) that HR9 does not define.
+- Features listed a handful of jurisdictions with no count, while
+  ``schemas.Jurisdiction`` defines many more.
+- The Risk Categories table read as exhaustive against the rule engine's
+  categories, and the API Endpoints table read as complete.
+
+Every expected value is derived at test time from its single source of truth
+(F10, F13), never restated here:
+
+- grades: the HR9 line in ``.claude/CLAUDE.md`` (cross-checked against the
+  behaviour of ``analyzer._grade``);
+- jurisdiction count: ``len(get_args(schemas.Jurisdiction))``;
+- rule-category count: distinct ``category`` values in ``rules.PATTERNS``;
+- endpoints: the live FastAPI OpenAPI schema (``app.openapi()``).
+
+The README is prose, so these are static checks by necessity. Each checker is
+pinned by a vectors table (positive and negative rows, with a contract test)
+and by hostile Unicode generated per category, so a weakened checker goes red
+here instead of letting a contradiction through. Sections are found by
+heading, fence-aware, and a missing section fails the test: no test can pass
+because the thing it checks is absent (F5).
+"""
+from __future__ import annotations
+
+import math
+import re
+import sys
+import unicodedata
+from dataclasses import dataclass, field
+from decimal import Decimal
+from pathlib import Path
+from typing import Callable, get_args
+
+import pytest
+
+REPO_ROOT: Path = Path(__file__).resolve().parents[3]
+
+# Repo-relative, so failure messages carry no absolute paths (F8).
+README_REL = "README.md"
+HR9_SOURCE_REL = ".claude/CLAUDE.md"
+HR9_LINE_PREFIX = "- HR9 grades:"
+
+FEATURES_HEADING = "Features"
+RISK_CATEGORIES_HEADING = "Risk Categories"
+API_ENDPOINTS_HEADING = "API Endpoints"
+RISK_SCORING_HEADING = "Risk Scoring"
+
+# Words a reader takes as "this table is not the full list". The card names
+# "illustrative" for categories and "partial" for endpoints.
+ILLUSTRATIVE_MARKERS: tuple[str, ...] = ("illustrative",)
+PARTIAL_MARKERS: tuple[str, ...] = ("partial", "non-exhaustive", "not exhaustive")
+
+# Display bound for untrusted text in assertion messages (output safety).
+SHOW_LIMIT = 80
+
+HTTP_METHODS: frozenset[str] = frozenset(
+    {"get", "post", "put", "patch", "delete", "head", "options", "trace"}
+)
+
+# Unicode categories a public markdown file must not carry: controls other
+# than tab/LF/CR, format (zero-width, bidi, soft hyphen, BOM), surrogates,
+# private use, unassigned, and the Unicode line/paragraph separators.
+FORBIDDEN_CATEGORIES: frozenset[str] = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
+ALLOWED_CONTROLS: frozenset[str] = frozenset({"\t", "\n", "\r"})
+
+
+# --------------------------------------------------------------------------
+# Readers and display
+# --------------------------------------------------------------------------
+
+
+class DocCheckError(AssertionError):
+    """A doc could not be read or parsed the way the check needs."""
+
+
+def _show(text: str) -> str:
+    """ASCII-escaped, truncated rendering of untrusted text for messages."""
+    shown = ascii(text[:SHOW_LIMIT])
+    extra = len(text) - SHOW_LIMIT
+    return f"{shown}...(+{extra} chars)" if extra > 0 else shown
+
+
+def _read_text(root: Path, rel: str) -> str:
+    """Read ``root/rel`` as strict UTF-8; refuse symlinks and escapes (F7)."""
+    path = root / rel
+    if path.is_symlink():
+        raise DocCheckError(f"{rel} is a symlink; the check must read the tracked file itself")
+    if not path.is_file():
+        raise DocCheckError(f"{rel} is missing")
+    if not path.resolve().is_relative_to(root.resolve()):
+        raise DocCheckError(f"{rel} resolves outside the repository")
+    try:
+        return path.read_bytes().decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise DocCheckError(f"{rel} is not valid UTF-8 at byte {exc.start}") from exc
+
+
+def _forbidden_chars(text: str) -> list[tuple[int, str]]:
+    """Every (index, U+XXXX) whose category a public doc must not carry."""
+    found: list[tuple[int, str]] = []
+    for index, char in enumerate(text):
+        if char in ALLOWED_CONTROLS:
+            continue
+        if unicodedata.category(char) in FORBIDDEN_CATEGORIES:
+            found.append((index, f"U+{ord(char):04X}"))
+    return found
+
+
+# --------------------------------------------------------------------------
+# Markdown structure (CommonMark subset: ATX headings, fences, pipe tables)
+# --------------------------------------------------------------------------
+
+_LINE_ENDING = re.compile(r"\r\n|\r|\n")  # CommonMark line endings only
+_FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_ATX_HEADING = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*$")
+_CLOSING_HASHES = re.compile(r"(?:^|[ \t]+)#+[ \t]*$")
+_TABLE_DELIMITER = re.compile(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
+_UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")
+_MARKUP = re.compile(r"[*_`]")
+
+
+@dataclass(frozen=True)
+class Line:
+    text: str
+    in_code: bool
+
+
+@dataclass(frozen=True)
+class Heading:
+    level: int
+    title: str
+    index: int  # line index
+
+
+@dataclass(frozen=True)
+class Section:
+    heading: Heading
+    lines: tuple[Line, ...]  # body, nested subsections included
+
+
+@dataclass(frozen=True)
+class Table:
+    header: tuple[str, ...]
+    rows: tuple[tuple[str, ...], ...]
+    start: int  # line index of the header row within the section body
+
+
+def _lines(text: str) -> list[Line]:
+    """Split on CommonMark line endings and mark fenced-code lines."""
+    out: list[Line] = []
+    fence: str | None = None
+    for raw in _LINE_ENDING.split(text):
+        if fence is None:
+            opened = _FENCE_OPEN.match(raw)
+            if opened:
+                fence = opened.group(1)
+                out.append(Line(raw, True))
+                continue
+            out.append(Line(raw, False))
+        else:
+            out.append(Line(raw, True))
+            stripped = raw.strip()
+            if (
+                stripped
+                and set(stripped) == {fence[0]}
+                and len(stripped) >= len(fence)
+                and len(raw) - len(raw.lstrip(" ")) <= 3
+            ):
+                fence = None
+    return out
+
+
+def _headings(lines: list[Line]) -> list[Heading]:
+    found: list[Heading] = []
+    for index, line in enumerate(lines):
+        if line.in_code:
+            continue
+        match = _ATX_HEADING.match(line.text)
+        if not match:
+            continue
+        title = _CLOSING_HASHES.sub("", match.group(2) or "").strip()
+        found.append(Heading(len(match.group(1)), _MARKUP.sub("", title).strip(), index))
+    return found
+
+
+def _title_matches(title: str, wanted: str) -> bool:
+    """``wanted`` is the title, or its prefix followed by a non-word char."""
+    if not title.casefold().startswith(wanted.casefold()):
+        return False
+    rest = title[len(wanted):]
+    return rest == "" or not (rest[0].isalnum() or rest[0] == "_")
+
+
+def _find_section(text: str, wanted: str) -> Section:
+    """The one section whose heading starts with ``wanted``; else fail closed."""
+    lines = _lines(text)
+    heads = _headings(lines)
+    hits = [h for h in heads if _title_matches(h.title, wanted)]
+    if not hits:
+        raise DocCheckError(f"README has no {wanted!r} section (looked for an ATX heading)")
+    if len(hits) > 1:
+        raise DocCheckError(
+            f"README has {len(hits)} {wanted!r} sections; the check needs exactly one"
+        )
+    head = hits[0]
+    end = len(lines)
+    for other in heads:
+        if other.index > head.index and other.level <= head.level:
+            end = other.index
+            break
+    return Section(head, tuple(lines[head.index + 1:end]))
+
+
+def _cells(row: str) -> tuple[str, ...]:
+    body = row.strip()
+    if body.startswith("|"):
+        body = body[1:]
+    if body.endswith("|") and not body.endswith("\\|"):
+        body = body[:-1]
+    return tuple(c.replace("\\|", "|").strip() for c in _UNESCAPED_PIPE.split(body))
+
+
+def _tables(section: Section) -> list[Table]:
+    """Pipe tables in the section body (header row + delimiter row + rows)."""
+    lines = section.lines
+    tables: list[Table] = []
+    i = 0
+    while i + 1 < len(lines):
+        head, delim = lines[i], lines[i + 1]
+        if (
+            not head.in_code
+            and not delim.in_code
+            and "|" in head.text
+            and _TABLE_DELIMITER.match(delim.text)
+            and "-" in delim.text
+        ):
+            rows: list[tuple[str, ...]] = []
+            j = i + 2
+            while j < len(lines) and not lines[j].in_code and lines[j].text.strip().startswith("|"):
+                rows.append(_cells(lines[j].text))
+                j += 1
+            tables.append(Table(_cells(head.text), tuple(rows), i))
+            i = j
+            continue
+        i += 1
+    return tables
+
+
+def _prose(section: Section, until: int | None = None) -> str:
+    """Heading title plus non-code, non-table body text (up to line ``until``)."""
+    table_lines: set[int] = set()
+    for table in _tables(section):
+        table_lines.update(range(table.start, table.start + 2 + len(table.rows)))
+    body = [
+        line.text
+        for index, line in enumerate(section.lines[:until])
+        if not line.in_code and index not in table_lines
+    ]
+    return "\n".join([section.heading.title, *body])
+
+
+def _column(table: Table, pattern: str) -> int | None:
+    for index, name in enumerate(table.header):
+        if re.search(pattern, _MARKUP.sub("", name), re.IGNORECASE | re.ASCII):
+            return index
+    return None
+
+
+# --------------------------------------------------------------------------
+# Prose checkers
+# --------------------------------------------------------------------------
+
+# U+2212 MINUS SIGN is Sm, not Pd, but reads as a hyphen.
+_EXTRA_DASHES: frozenset[str] = frozenset({"−"})
+_BLOCK_SPLIT = re.compile(r"\n[ \t]*\n|\n(?=[ \t]*(?:[-*+]|\d+[.)])[ \t])|\n(?=[ \t]*[|#])")
+_SENTENCE_SPLIT = re.compile(r"(?<=[.;!?])\s+")
+_UNIMPLEMENTED = re.compile(r"not[ -]*yet[ -]*implemented")
+_IRP_MENTION = re.compile(r"\birp\b|impact\s*/\s*likelihood\s*/\s*safeguards?")
+_IRP_NOT_LIVE = re.compile(
+    r"\bplanned\b|\bnot[ -]*(?:yet[ -]*)?implemented\b|\bunimplemented\b|\bcoming soon\b"
+)
+
+
+def _fold_loose(text: str) -> str:
+    """Normalise for FORBIDDEN phrases: catch every disguise of the phrase.
+
+    Drops Cf (zero-width, bidi, soft hyphen), applies NFKC (full-width,
+    long s), maps every dash to '-', collapses every Unicode space and line
+    break to one space, and casefolds.
+    """
+    text = "".join(c for c in text if unicodedata.category(c) != "Cf")
+    text = unicodedata.normalize("NFKC", text)
+    text = "".join(
+        "-" if unicodedata.category(c) == "Pd" or c in _EXTRA_DASHES else c for c in text
+    )
+    return re.sub(r"\s+", " ", text).casefold()
+
+
+def _irp_claimed_unimplemented(text: str) -> bool:
+    """True if the text calls IRP planned / not implemented.
+
+    Two forms: the card's phrase "not yet implemented" anywhere, in any
+    disguise; and any sentence that mentions IRP and calls it planned or not
+    implemented. Sentences are split per markdown block first, so a soft line
+    wrap cannot hide the claim and an unrelated bullet cannot trigger it.
+    """
+    commonmark = text.replace("\r\n", "\n").replace("\r", "\n")
+    for block in _BLOCK_SPLIT.split(commonmark):
+        folded = _fold_loose(block)
+        if _UNIMPLEMENTED.search(folded):
+            return True
+        for sentence in _SENTENCE_SPLIT.split(folded):
+            if _IRP_MENTION.search(sentence) and _IRP_NOT_LIVE.search(sentence):
+                return True
+    return False
+
+
+def _has_marker(text: str, markers: tuple[str, ...]) -> bool:
+    """A REQUIRED marker word, matched strictly: ASCII letters, whole word.
+
+    No folding here: a look-alike (Cyrillic i, long s, full-width) must not
+    count as the marker. Only runs of whitespace between words are relaxed.
+    """
+    for marker in markers:
+        words = [re.escape(w) for w in marker.split()]
+        pattern = r"(?<![A-Za-z0-9_-])" + r"\s+".join(words) + r"(?![A-Za-z0-9_-])"
+        if re.search(pattern, text, re.IGNORECASE | re.ASCII):
+            return True
+    return False
+
+
+def _stated_counts(text: str, noun: str) -> list[str]:
+    """Every number written as the count of ``noun`` (e.g. "30 jurisdictions").
+
+    Up to two letter-only words may sit between the number and the noun
+    ("50 rule categories"). The number token is returned raw, with any "+"
+    and in whatever digits it was written, so "30+", "1,000" and non-ASCII
+    digits never equal the live count.
+    """
+    pattern = (
+        r"(?<![\w.,+])(\d[\d,.]*\+?)"
+        r"\s+(?:[^\W\d_]+\s+){0,2}?"
+        + noun
+        + r"\b"
+    )
+    # Deliberately unfolded: a count split by a zero-width character is not
+    # the count (the hygiene test rejects such characters in the README).
+    return re.findall(pattern, text, re.IGNORECASE)
+
+
+# Parentheses are separators, not comments: text inside them is inspected like
+# any other piece, so "A (D or F)" cannot hide D and F (PR #338 review).
+_GRADE_SEPARATORS = re.compile(
+    r"\s*(?:,|/|;|\(|\)|\bor\b|\band\b|\bto\b|\s[-–—]\s|[–—])\s*", re.IGNORECASE
+)
+
+
+def _grade_tokens(cell: str) -> list[str]:
+    """The one tokenizer for grade cells, shared by every grade check (F3)."""
+    pieces = [p.strip() for p in _GRADE_SEPARATORS.split(_MARKUP.sub("", cell))]
+    return [p for p in pieces if p]
+
+
+def _bad_grade_tokens(cell: str, allowed: frozenset[str]) -> list[str]:
+    """Pieces of a grade cell that are not exactly an allowed grade.
+
+    An empty cell is itself bad: a grade column with no grade is not a
+    subset of anything (F5). Words in parentheses are pieces too, so a
+    qualifier such as "(best)" is reported rather than skipped.
+    """
+    pieces = _grade_tokens(cell)
+    if not pieces:
+        return ["<empty>"]
+    return [p for p in pieces if p not in allowed]
+
+
+# --------------------------------------------------------------------------
+# Live values from their single sources of truth
+# --------------------------------------------------------------------------
+
+_HR9_ENTRY = re.compile(r"^\s*(\S+)\s*(<|>=)\s*(\d+(?:\.\d+)?)\s*$")
+
+
+def _parse_hr9(text: str) -> list[tuple[str, str, float]]:
+    """(grade, op, threshold) entries from the one HR9 line."""
+    lines = [line for line in _LINE_ENDING.split(text) if line.startswith(HR9_LINE_PREFIX)]
+    if len(lines) != 1:
+        raise DocCheckError(
+            f"{HR9_SOURCE_REL} has {len(lines)} lines starting {HR9_LINE_PREFIX!r}; need one"
+        )
+    body = lines[0][len(HR9_LINE_PREFIX):].strip().rstrip(".")
+    entries: list[tuple[str, str, float]] = []
+    for part in body.split(","):
+        match = _HR9_ENTRY.match(part)
+        if not match:
+            raise DocCheckError(f"HR9 entry {_show(part)} is not '<grade> <op> <number>'")
+        entries.append((match.group(1), match.group(2), float(match.group(3))))
+    if not entries:
+        raise DocCheckError("HR9 defines no grades")
+    return entries
+
+
+@pytest.fixture(scope="module")
+def readme() -> str:
+    return _read_text(REPO_ROOT, README_REL)
+
+
+@pytest.fixture(scope="module")
+def hr9_entries() -> list[tuple[str, str, float]]:
+    return _parse_hr9(_read_text(REPO_ROOT, HR9_SOURCE_REL))
+
+
+@pytest.fixture(scope="module")
+def hr9_grades(hr9_entries: list[tuple[str, str, float]]) -> frozenset[str]:
+    grades = [grade for grade, _, _ in hr9_entries]
+    assert len(grades) == len(set(grades)), f"HR9 repeats a grade: {grades}"
+    return frozenset(grades)
+
+
+@pytest.fixture(scope="module")
+def jurisdiction_count() -> int:
+    from app.schemas import Jurisdiction
+
+    codes = get_args(Jurisdiction)
+    assert codes and len(codes) == len(set(codes)), "schemas.Jurisdiction is empty or repeats"
+    return len(codes)
+
+
+@pytest.fixture(scope="module")
+def rule_category_count() -> int:
+    from app.services.rules import PATTERNS
+
+    categories = {pattern.category for pattern in PATTERNS}
+    assert categories and all(c.strip() for c in categories), "rules.PATTERNS has no categories"
+    return len(categories)
+
+
+def _normalise_path(path: str) -> str:
+    return re.sub(r"\{[^}]*\}", "{}", path)
+
+
+@pytest.fixture(scope="module")
+def live_endpoints() -> frozenset[tuple[str, str]]:
+    from app.main import app
+
+    endpoints = frozenset(
+        (method.upper(), _normalise_path(path))
+        for path, operations in app.openapi()["paths"].items()
+        for method in operations
+        if method in HTTP_METHODS
+    )
+    assert endpoints, "the live OpenAPI schema lists no endpoints"
+    return endpoints
+
+
+def _readme_endpoints(section: Section) -> list[tuple[str, str]]:
+    for table in _tables(section):
+        method_col = _column(table, r"\bmethod\b")
+        path_col = _column(table, r"\b(?:endpoint|path)\b")
+        if method_col is None or path_col is None:
+            continue
+        rows: list[tuple[str, str]] = []
+        for row in table.rows:
+            method = _MARKUP.sub("", row[method_col] if method_col < len(row) else "").strip()
+            path = _MARKUP.sub("", row[path_col] if path_col < len(row) else "").strip()
+            rows.append((method.upper(), _normalise_path(path)))
+        return rows
+    raise DocCheckError("README API Endpoints section has no Method/Endpoint table")
+
+
+# --------------------------------------------------------------------------
+# Acceptance tests (card #144 test spec)
+# --------------------------------------------------------------------------
+
+
+def test_readme_does_not_call_irp_planned(readme: str) -> None:
+    _find_section(readme, FEATURES_HEADING)  # the claim lived here; it must still exist
+    _find_section(readme, RISK_SCORING_HEADING)  # the live formula lives here
+    assert not _irp_claimed_unimplemented(readme), (
+        "README calls the IRP methodology planned / not yet implemented, but "
+        "rules._seed_irp computes it on every finding and Risk Scoring publishes "
+        "the formula. Fix: describe IRP as live in Features."
+    )
+
+
+def test_readme_grades_subset_of_hr9(readme: str, hr9_grades: frozenset[str]) -> None:
+    section = _find_section(readme, RISK_SCORING_HEADING)
+    graded = [(t, _column(t, r"\bgrades?\b")) for t in _tables(section)]
+    graded = [(t, col) for t, col in graded if col is not None]
+    assert graded, "README Risk Scoring section has no table with a Grade column"
+    bad: list[str] = []
+    for table, col in graded:
+        assert table.rows, "README Risk Scoring grade table has no rows"
+        for row in table.rows:
+            cell = row[col] if col < len(row) else ""
+            bad.extend(_bad_grade_tokens(cell, hr9_grades))
+    assert not bad, (
+        f"README Risk Scoring grades {[_show(b) for b in bad]} are not HR9 grades "
+        f"{sorted(hr9_grades)}. Fix: use only HR9 grades."
+    )
+
+
+def _jurisdiction_count_problems(text: str, live: int) -> list[str]:
+    """Features must state the live count; no count anywhere may be stale.
+
+    The required count is looked for only in the Features section's prose
+    (code and tables excluded), so a correct count elsewhere cannot stand in
+    for a stale or missing one in Features (PR #338 review). Stale counts
+    are looked for in the whole document. A missing Features section raises.
+    """
+    features = _stated_counts(_prose(_find_section(text, FEATURES_HEADING)), "jurisdictions")
+    problems: list[str] = []
+    if str(live) not in features:
+        problems.append(
+            f"README Features states jurisdiction counts {[_show(s) for s in features]}, "
+            f"not the live {live}. Fix: say '{live} jurisdictions' in Features."
+        )
+    wrong = [s for s in _stated_counts(text, "jurisdictions") if s != str(live)]
+    if wrong:
+        problems.append(
+            f"README states jurisdiction counts {[_show(s) for s in wrong]}; "
+            f"schemas.Jurisdiction has {live}."
+        )
+    return problems
+
+
+def test_readme_jurisdiction_count(readme: str, jurisdiction_count: int) -> None:
+    problems = _jurisdiction_count_problems(readme, jurisdiction_count)
+    assert not problems, "\n".join(problems)
+
+
+def test_readme_category_table_marked_illustrative(readme: str, rule_category_count: int) -> None:
+    section = _find_section(readme, RISK_CATEGORIES_HEADING)
+    tables = _tables(section)
+    intro = _prose(section, until=tables[0].start if tables else None)
+    assert _has_marker(intro, ILLUSTRATIVE_MARKERS), (
+        "README Risk Categories heading is not followed by the word 'illustrative' "
+        "before its table, so the table reads as the full list."
+    )
+    stated = _stated_counts(intro, r"categor(?:y|ies)")
+    assert str(rule_category_count) in stated, (
+        f"README Risk Categories intro does not state the live count "
+        f"({rule_category_count} distinct categories in rules.PATTERNS); "
+        f"it states {[_show(s) for s in stated]}."
+    )
+    wrong = [s for s in stated if s != str(rule_category_count)]
+    assert not wrong, f"README Risk Categories intro states stale counts {wrong}"
+
+
+def test_readme_endpoint_table_marked_partial(
+    readme: str, live_endpoints: frozenset[tuple[str, str]]
+) -> None:
+    section = _find_section(readme, API_ENDPOINTS_HEADING)
+    listed = frozenset(_readme_endpoints(section))
+    if listed == live_endpoints:
+        return  # a complete table needs no marker
+    assert _has_marker(_prose(section), PARTIAL_MARKERS), (
+        f"README API Endpoints table lists {len(listed)} of {len(live_endpoints)} "
+        f"live endpoints but is not marked partial. Fix: say it is partial."
+    )
+
+
+# --------------------------------------------------------------------------
+# Positive controls (green today) and source integrity
+# --------------------------------------------------------------------------
+
+
+def test_readme_endpoint_rows_exist_in_live_api(
+    readme: str, live_endpoints: frozenset[tuple[str, str]]
+) -> None:
+    rows = _readme_endpoints(_find_section(readme, API_ENDPOINTS_HEADING))
+    assert rows, "README API Endpoints table has no rows"
+    invented = [r for r in rows if r not in live_endpoints]
+    assert not invented, f"README lists endpoints the app does not serve: {invented}"
+
+
+def _hr9_grade(entries: list[tuple[str, str, float]], score: float) -> str:
+    """Reference reading of HR9: the first '<' band the score is under, else '>='."""
+    for grade, op, threshold in sorted(entries, key=lambda e: e[2]):
+        if op == "<" and score < threshold:
+            return grade
+    tops = [grade for grade, op, threshold in entries if op == ">=" and score >= threshold]
+    if len(tops) != 1:
+        raise DocCheckError(f"HR9 does not grade score {score} exactly once")
+    return tops[0]
+
+
+def test_hr9_grades_match_analyzer_grade(hr9_entries: list[tuple[str, str, float]]) -> None:
+    """HR9 (the grade source here) and analyzer._grade agree on every band.
+
+    Probes: each threshold, just below it, midpoints between thresholds, and
+    both open ends (so an invented grade above the top band goes red).
+    """
+    from app.services.analyzer import _grade
+
+    thresholds = sorted({t for _, _, t in hr9_entries})
+    probes = [-math.inf, math.inf, *thresholds]
+    probes += [math.nextafter(t, -math.inf) for t in thresholds]
+    probes += [(a + b) / 2 for a, b in zip(thresholds, thresholds[1:])]
+    mismatched = [(p, _grade(p), _hr9_grade(hr9_entries, p)) for p in probes
+                  if _grade(p) != _hr9_grade(hr9_entries, p)]
+    assert not mismatched, f"analyzer._grade disagrees with HR9 at {mismatched}"
+    assert {_grade(p) for p in probes} == {g for g, _, _ in hr9_entries}
+
+
+# --------------------------------------------------------------------------
+# Grade bands: each README row's score band grades as that row says (#144)
+# --------------------------------------------------------------------------
+
+# Numbers are ASCII-only (re.ASCII): non-ASCII digits, exponents, nan and inf
+# are refused rather than read as a band.
+_NUM = r"(\d+(?:\.\d+)?|\.\d+)"
+_LOWER_OPS: dict[str, bool] = {">=": True, "≥": True, ">": False}
+_UPPER_OPS: dict[str, bool] = {"<=": True, "≤": True, "<": False}
+_OP = r"(>=|≥|>|<=|≤|<)"
+_BAND_ONE_SIDED = re.compile(rf"{_OP}\s*{_NUM}", re.ASCII)
+_BAND_RANGE = re.compile(rf"{_NUM}\s*(?:-|–|—|to)\s*{_NUM}", re.ASCII)
+_BAND_PAIR = re.compile(rf"(>=|≥|>)\s*{_NUM}\s*(?:,|and|&)\s*(<=|≤|<)\s*{_NUM}", re.ASCII)
+_BAND_CHAIN = re.compile(rf"{_NUM}\s*(<=|≤|<)\s*[A-Za-z]+\s*(<=|≤|<)\s*{_NUM}", re.ASCII)
+
+
+@dataclass(frozen=True)
+class Band:
+    """An interval of scores; ``None`` is an open end."""
+
+    lower: Decimal | None
+    lower_inclusive: bool
+    upper: Decimal | None
+    upper_inclusive: bool
+
+
+def _parse_band(cell: str) -> Band:
+    """Read a score band cell; anything that is not a band raises (fail closed).
+
+    Forms: ``>= a`` / ``> a`` / ``< b`` / ``<= b``; ``a - b`` (both ends
+    inclusive, as a reader takes it); ``>= a and < b``; ``a <= x < b``.
+    """
+    text = " ".join(_MARKUP.sub("", cell).split())
+    band: Band | None = None
+    if match := _BAND_ONE_SIDED.fullmatch(text):
+        op, num = match.group(1), Decimal(match.group(2))
+        if op in _LOWER_OPS:
+            band = Band(num, _LOWER_OPS[op], None, False)
+        else:
+            band = Band(None, False, num, _UPPER_OPS[op])
+    elif match := _BAND_RANGE.fullmatch(text):
+        band = Band(Decimal(match.group(1)), True, Decimal(match.group(2)), True)
+    elif match := _BAND_PAIR.fullmatch(text):
+        band = Band(Decimal(match.group(2)), _LOWER_OPS[match.group(1)],
+                    Decimal(match.group(4)), _UPPER_OPS[match.group(3)])
+    elif match := _BAND_CHAIN.fullmatch(text):
+        band = Band(Decimal(match.group(1)), _UPPER_OPS[match.group(2)],
+                    Decimal(match.group(4)), _UPPER_OPS[match.group(3)])
+    if band is None:
+        raise DocCheckError(f"score band {_show(cell)} is not a band this check can read")
+    if band.lower is not None and band.upper is not None and band.lower >= band.upper:
+        raise DocCheckError(f"score band {_show(cell)} is empty or reversed")
+    return band
+
+
+def _band_coverage_problems(bands: list[Band], lo: Decimal, hi: Decimal) -> list[str]:
+    """Gaps and overlaps of ``bands`` over the closed range [lo, hi]."""
+    if not bands:
+        return ["no bands"]
+    ordered = sorted(bands, key=lambda b: (b.lower is not None, b.lower or Decimal(0)))
+    problems: list[str] = []
+    first, last = ordered[0], ordered[-1]
+    if first.lower is not None and (first.lower > lo or (first.lower == lo and not first.lower_inclusive)):
+        problems.append(f"nothing covers the bottom of the range {lo}")
+    if last.upper is not None and (last.upper < hi or (last.upper == hi and not last.upper_inclusive)):
+        problems.append(f"nothing covers the top of the range {hi}")
+    for below, above in zip(ordered, ordered[1:]):
+        if below.upper is None or above.lower is None:
+            problems.append("two bands are open-ended on the same side")
+        elif below.upper < above.lower or (
+            below.upper == above.lower and not (below.upper_inclusive or above.lower_inclusive)
+        ):
+            problems.append(f"gap between {below.upper} and {above.lower}")
+        elif below.upper > above.lower or (below.upper_inclusive and above.lower_inclusive):
+            problems.append(f"bands overlap at {above.lower}")
+    return problems
+
+
+def _grade_pieces(cell: str) -> frozenset[str]:
+    return frozenset(_grade_tokens(cell))
+
+
+def _irp_range() -> tuple[Decimal, Decimal]:
+    """(low, high): the IRP range, from ``Finding.irp_score``'s bounds (F13)."""
+    from app.schemas import Finding
+
+    bounds = {type(m).__name__: m for m in Finding.model_fields["irp_score"].metadata}
+    if "Ge" not in bounds or "Le" not in bounds:
+        raise DocCheckError("Finding.irp_score has no [ge, le] bounds to check coverage against")
+    return Decimal(str(bounds["Ge"].ge)), Decimal(str(bounds["Le"].le))
+
+
+def _document_score(irps: list[float]) -> float:
+    """The 0-10 score ``_grade`` sees for a document with these finding IRPs.
+
+    Runs the real ``analyzer.calculate_risk_score`` (mean, scale and rounding
+    included), so README bands are checked against what users get, not
+    against an unrounded model of it (PR #338 review).
+    """
+    from app.schemas import Finding
+    from app.services.analyzer import calculate_risk_score
+
+    findings = [Finding.model_construct(irp_score=irp, severity="High") for irp in irps]
+    return calculate_risk_score(findings)
+
+
+def _float_at_or_inside(value: Decimal, inclusive: bool, upward: bool) -> float:
+    """The float aggregate nearest ``value`` that lies inside the band.
+
+    ``upward`` is True for a lower bound (the band lies above it). An
+    exclusive bound, or a float that rounds outside an inclusive one, steps
+    one ulp into the band, so the probe is the boundary aggregate itself.
+    """
+    toward = math.inf if upward else -math.inf
+    x = float(value)
+    outside = Decimal(x) < value if upward else Decimal(x) > value
+    if outside or (not inclusive and Decimal(x) == value):
+        x = math.nextafter(x, toward)
+    return x
+
+
+def _band_edges(band: Band, lo: Decimal, hi: Decimal) -> tuple[float, float]:
+    """(first, last): the lowest and highest aggregate IRP inside the band.
+
+    Open ends clamp to [lo, hi]. A document's aggregate is the mean of its
+    findings' IRPs, so values arbitrarily close to an exclusive bound are
+    reachable (e.g. 21 findings at 0.74 and 19 at 0.76 average 0.7495).
+    """
+    if band.lower is None or band.lower < lo:
+        first = _float_at_or_inside(lo, True, upward=True)
+    else:
+        first = _float_at_or_inside(band.lower, band.lower_inclusive, upward=True)
+    if band.upper is None or band.upper > hi:
+        last = _float_at_or_inside(hi, True, upward=False)
+    else:
+        last = _float_at_or_inside(band.upper, band.upper_inclusive, upward=False)
+    return first, last
+
+
+def _reachable_grades(first: float, last: float, thresholds: list[float]) -> frozenset[str]:
+    """Every grade the real score path gives to an aggregate in [first, last].
+
+    ``calculate_risk_score`` is non-decreasing in the aggregate and ``_grade``
+    changes only at HR9 thresholds (pinned by
+    ``test_hr9_grades_match_analyzer_grade``), so the grades are those at the
+    two edge scores plus each threshold the edge scores straddle.
+    """
+    from app.services.analyzer import _grade
+
+    low, high = _document_score([first]), _document_score([last])
+    return frozenset({_grade(low), _grade(high), *(_grade(t) for t in thresholds if low < t <= high)})
+
+
+def test_readme_grade_bands_match_analyzer_grade(
+    readme: str, hr9_entries: list[tuple[str, str, float]]
+) -> None:
+    """Each Risk Scoring row lists exactly the grades users can get in its band.
+
+    The README states the aggregate IRP (``Finding.irp_score``'s range). A
+    document's grade is ``_grade(calculate_risk_score(findings))``, and the
+    score is rounded before grading, so an aggregate just under a band's
+    exclusive upper bound can round up into the next grade. Per row, the
+    grades reachable through that real path, boundary aggregates included,
+    must equal the grades the row lists: none missing, none extra. The rows
+    cover the whole range with no gap or overlap.
+    """
+    lo, hi = _irp_range()
+    thresholds = sorted({t for _, _, t in hr9_entries})
+    section = _find_section(readme, RISK_SCORING_HEADING)
+    checked = 0
+    problems: list[str] = []
+    for table in _tables(section):
+        grade_col = _column(table, r"\bgrades?\b")
+        score_col = _column(table, r"\birp\b")
+        if grade_col is None:
+            continue
+        if score_col is None:
+            raise DocCheckError("README grade table has no IRP score column to read bands from")
+        assert table.rows, "README Risk Scoring grade table has no rows"
+        bands: list[Band] = []
+        for row in table.rows:
+            band_cell = row[score_col] if score_col < len(row) else ""
+            grade_cell = row[grade_col] if grade_col < len(row) else ""
+            band = _parse_band(band_cell)
+            bands.append(band)
+            listed = _grade_pieces(grade_cell)
+            first, last = _band_edges(band, lo, hi)
+            if first > last:
+                problems.append(f"row {_show(band_cell)} lies outside the IRP range [{lo}, {hi}]")
+                continue
+            reachable = _reachable_grades(first, last, thresholds)
+            if reachable - listed:
+                problems.append(
+                    f"row {_show(band_cell)} omits {sorted(reachable - listed)}: aggregates "
+                    f"{first!r}..{last!r} score {_document_score([first])}.."
+                    f"{_document_score([last])} after rounding"
+                )
+            if listed - reachable:
+                problems.append(
+                    f"row {_show(band_cell)} lists {sorted(listed - reachable)}, which no "
+                    f"aggregate in the band gets (it gets {sorted(reachable)})"
+                )
+            checked += 1
+        problems += [f"IRP range [{lo}, {hi}]: {p}" for p in _band_coverage_problems(bands, lo, hi)]
+    assert checked, "README Risk Scoring section has no grade table with score bands"
+    assert not problems, "README grade bands contradict analyzer._grade:\n" + "\n".join(problems)
+
+
+@pytest.mark.parametrize(
+    ("cell", "band"),
+    [
+        (">= 0.75", Band(Decimal("0.75"), True, None, False)),
+        ("≥ .75", Band(Decimal("0.75"), True, None, False)),
+        ("**> 0.75**", Band(Decimal("0.75"), False, None, False)),
+        ("< 0.45", Band(None, False, Decimal("0.45"), False)),
+        ("≤0.45", Band(None, False, Decimal("0.45"), True)),
+        ("0.45 - 0.74", Band(Decimal("0.45"), True, Decimal("0.74"), True)),
+        ("0.45–0.74", Band(Decimal("0.45"), True, Decimal("0.74"), True)),
+        ("0.45 to 0.74", Band(Decimal("0.45"), True, Decimal("0.74"), True)),
+        (">= 0.45 and < 0.75", Band(Decimal("0.45"), True, Decimal("0.75"), False)),
+        ("> 0.45, <= 0.75", Band(Decimal("0.45"), False, Decimal("0.75"), True)),
+        ("0.45 <= IRP < 0.75", Band(Decimal("0.45"), True, Decimal("0.75"), False)),
+        ("0.45 < x <= 0.75", Band(Decimal("0.45"), False, Decimal("0.75"), True)),
+    ],
+)
+def test_band_parser_reads_bands(cell: str, band: Band) -> None:
+    assert _parse_band(cell) == band
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        "", "  ", "n/a", "High", ">=", "0.75 -", "- 0.75", "about 0.5", "0.75+",
+        "0.74 - 0.45", "0.5 - 0.5", ">= 0.5 and < 0.5", "0.5 < x < 0.4",
+        "＞= 0.75", ">= ０.７５", ">= ٠.٧٥", ">= 0.7​5", ">= 0.7\x005",
+        ">= 7.5e-1", ">= nan", ">= inf", "<= -0.1", ">= 0.75\n# Heading",
+        ">= 0.75 < 0.5", "0.45 - 0.74 - 0.9", "0 to < 1", "9" * 10_000,
+    ],
+    ids=_show,
+)
+def test_band_parser_fails_loudly(cell: str) -> None:
+    with pytest.raises(DocCheckError):
+        _parse_band(cell)
+
+
+def test_band_parser_error_message_is_safe() -> None:
+    with pytest.raises(DocCheckError) as raised:
+        _parse_band("\x1b[31m" + "x" * 10_000)
+    message = str(raised.value)
+    assert "\x1b" not in message and len(message) < 4 * SHOW_LIMIT
+
+
+def _b(cell: str) -> Band:
+    return _parse_band(cell)
+
+
+@pytest.mark.parametrize(
+    ("cells", "expected"),
+    [
+        (["< 0.45", ">= 0.45 and < 0.75", ">= 0.75"], []),
+        ([">= 0.75", "< 0.45", "0.45 <= x < 0.75"], []),  # order-free
+        (["<= 1"], []),
+        (["0 - 1"], []),
+        (["< 0.45", "0.45 - 0.74", ">= 0.75"], ["gap between 0.74 and 0.75"]),
+        (["< 0.45", "> 0.45"], ["gap between 0.45 and 0.45"]),
+        (["<= 0.45", ">= 0.45"], ["bands overlap at 0.45"]),
+        (["< 0.5", ">= 0.4"], ["bands overlap at 0.4"]),
+        (["> 0", "<= 1"], ["bands overlap at 0"]),
+        (["< 0.5", ">= 0.5", ">= 0.7"], ["two bands are open-ended on the same side"]),
+        (["< 0.5", "< 0.7", ">= 0.7"], ["two bands are open-ended on the same side"]),
+        (["> 0 and <= 1"], ["nothing covers the bottom of the range 0"]),
+        (["0.1 - 1"], ["nothing covers the bottom of the range 0"]),
+        (["0 - 0.9"], ["nothing covers the top of the range 1"]),
+        ([], ["no bands"]),
+    ],
+)
+def test_band_coverage_vectors(cells: list[str], expected: list[str]) -> None:
+    """Range [0, 1] here is a fixture of the helper, not the IRP range."""
+    assert _band_coverage_problems([_b(c) for c in cells], Decimal(0), Decimal(1)) == expected
+
+
+@pytest.mark.parametrize(
+    "cell",
+    ["< 0.45", "> 0.45", ">= 0.7", "<= 0.1", "<= 0.3", "0.45 <= x < 0.75", "> 0.1 and <= 0.7",
+     ">= 0", "<= 1", "> 0", "< 1", "<= 2", ">= 0.0"],
+    ids=_show,
+)
+def test_band_edges_are_the_extreme_aggregates_inside(cell: str) -> None:
+    """Edge probes lie inside the band, and one more ulp outward does not.
+
+    Range [0, 1] is a fixture of the helper. Floats that round outside a
+    decimal bound (0.7, 0.1) and exclusive bounds both step inward.
+    """
+    lo, hi = Decimal(0), Decimal(1)
+    band = _parse_band(cell)
+    first, last = _band_edges(band, lo, hi)
+
+    def inside(x: float) -> bool:
+        d = Decimal(x)
+        low_ok = d >= lo if band.lower is None or band.lower < lo else (
+            d >= band.lower if band.lower_inclusive else d > band.lower)
+        high_ok = d <= hi if band.upper is None or band.upper > hi else (
+            d <= band.upper if band.upper_inclusive else d < band.upper)
+        return low_ok and high_ok
+
+    assert inside(first) and inside(last), (first, last)
+    assert not inside(math.nextafter(first, -math.inf)), first
+    assert not inside(math.nextafter(last, math.inf)), last
+
+
+def test_readme_text_is_clean_utf8(readme: str) -> None:
+    bad = _forbidden_chars(readme)
+    assert not bad, f"README carries invisible/control characters at {bad[:10]}"
+
+
+def test_doc_sources_are_regular_tracked_files() -> None:
+    for rel in (README_REL, HR9_SOURCE_REL):
+        path = REPO_ROOT / rel
+        assert not path.is_symlink(), f"{rel} is a symlink"
+        assert path.is_file(), f"{rel} is missing"
+
+
+# --------------------------------------------------------------------------
+# Checker vectors: each checker has positive and negative rows (contract)
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Vector:
+    checker: str
+    text: str
+    expected: bool
+    note: str = field(default="")
+
+
+_FENCED_HEADING = "intro\n```bash\n# Risk Scoring\n```\n"
+
+CHECKERS: dict[str, Callable[[str], bool]] = {
+    "irp_unimplemented": _irp_claimed_unimplemented,
+    "illustrative": lambda t: _has_marker(t, ILLUSTRATIVE_MARKERS),
+    "partial": lambda t: _has_marker(t, PARTIAL_MARKERS),
+    "has_count_30": lambda t: _stated_counts(t, "jurisdictions") == ["30"],
+    "features_count_30": lambda t: _jurisdiction_count_ok(t, 30),
+    "finds_risk_scoring": lambda t: _section_found(t, RISK_SCORING_HEADING),
+    "clean_text": lambda t: _forbidden_chars(t) == [],
+}
+
+
+def _section_found(text: str, wanted: str) -> bool:
+    try:
+        _find_section(text, wanted)
+    except DocCheckError:
+        return False
+    return True
+
+
+def _jurisdiction_count_ok(text: str, live: int) -> bool:
+    try:
+        return _jurisdiction_count_problems(text, live) == []
+    except DocCheckError:
+        return False
+
+
+VECTORS: tuple[Vector, ...] = (
+    # irp_unimplemented: the card's phrase and its disguises; and controls.
+    Vector("irp_unimplemented", "IRP is a planned, not-yet-implemented enhancement", True),
+    Vector("irp_unimplemented", "NOT YET IMPLEMENTED", True, "case"),
+    Vector("irp_unimplemented", "not yet\nimplemented", True, "soft wrap"),
+    Vector("irp_unimplemented", "- the IRP method is\n  planned", True, "wrapped bullet"),
+    Vector("irp_unimplemented", "Impact/Likelihood/Safeguards scoring is planned", True),
+    Vector("irp_unimplemented", "IRP is unimplemented", True),
+    Vector("irp_unimplemented", "ＩＲＰ is planned", True, "full-width"),
+    Vector("irp_unimplemented", "IRP scores every finding.", False),
+    Vector("irp_unimplemented", "- IRP scores findings\n- Watchlist export is planned", False,
+           "planned in another bullet"),
+    Vector("irp_unimplemented", "IRP is live. Vue 3 is planned.", False, "another sentence"),
+    Vector("irp_unimplemented", "not yet\n\nimplemented", False, "separate paragraphs"),
+    Vector("irp_unimplemented", "", False, "empty"),
+    # illustrative: strict ASCII whole word.
+    Vector("illustrative", "This table is illustrative.", True),
+    Vector("illustrative", "ILLUSTRATIVE list", True),
+    Vector("illustrative", "(Illustrative; 50 categories)", True),
+    Vector("illustrative", "illuſtrative", False, "long s look-alike"),
+    Vector("illustrative", "іllustrative", False, "Cyrillic i look-alike"),
+    Vector("illustrative", "illustratively", False, "longer word"),
+    Vector("illustrative", "illus​trative", False, "zero-width split"),
+    Vector("illustrative", "", False, "empty"),
+    # partial
+    Vector("partial", "Partial list of endpoints.", True),
+    Vector("partial", "This list is not\nexhaustive.", True),
+    Vector("partial", "A non-exhaustive table.", True),
+    Vector("partial", "Full API documentation at /docs.", False),
+    Vector("partial", "impartial", False, "substring"),
+    Vector("partial", "pаrtial", False, "Cyrillic a look-alike"),
+    # has_count_30: stated count is exactly the token "30".
+    Vector("has_count_30", "covers 30 jurisdictions", True),
+    Vector("has_count_30", "covers 30 jurisdictions", True, "no-break space"),
+    Vector("has_count_30", "covers 30 supported jurisdictions", True),
+    Vector("has_count_30", "10 of the 30 jurisdictions", True, "only the count before noun"),
+    Vector("has_count_30", "covers 30+ jurisdictions", False, "plus"),
+    Vector("has_count_30", "covers 3​0 jurisdictions", False, "zero-width split digit"),
+    Vector("has_count_30", "covers ٣٠ jurisdictions", False, "Arabic-Indic digits"),
+    Vector("has_count_30", "covers ３０ jurisdictions", False, "full-width digits"),
+    Vector("has_count_30", "covers 10 jurisdictions", False),
+    Vector("has_count_30", "covers 130 jurisdictions", False, "superstring number"),
+    Vector("has_count_30", "covers thirty jurisdictions", False, "words"),
+    Vector("has_count_30", "", False, "empty"),
+    # features_count_30: the required count must sit in Features (PR #338).
+    Vector("features_count_30", "## Features\n- 30 jurisdictions\n## Limits\nnone", True),
+    Vector("features_count_30", "## Features\n### Sub\n- 30 jurisdictions\n## Limits\n30 jurisdictions",
+           True, "nested subsection, consistent elsewhere"),
+    Vector("features_count_30", "## Features\n```\n## Limits\n```\n- 30 jurisdictions", True,
+           "fenced heading does not end Features"),
+    Vector("features_count_30", "## Features\n- US, EU\n## Limits\n30 jurisdictions", False,
+           "missing in Features, right elsewhere"),
+    Vector("features_count_30", "## Features\n- 10 jurisdictions\n## Limits\n30 jurisdictions", False,
+           "stale in Features, right elsewhere"),
+    Vector("features_count_30", "## Features\n- 30 jurisdictions\n## Limits\n10 jurisdictions", False,
+           "stale elsewhere"),
+    Vector("features_count_30", "## Features\n- US\n\n30 jurisdictions\n## Limits\n", True,
+           "second paragraph of Features"),
+    Vector("features_count_30", "## Features\n- US\n## Limits\r- 30 jurisdictions", False,
+           "CR ends the Features section"),
+    Vector("features_count_30", "## Features\n```\n30 jurisdictions\n```\n## Limits\n30 jurisdictions",
+           False, "count only in a Features code block"),
+    Vector("features_count_30", "## Features\n| a |\n|---|\n| 30 jurisdictions |\n## L\n30 jurisdictions",
+           False, "count only in a Features table"),
+    Vector("features_count_30", "#### Features\n- 30 jurisdictions\n## Features\n- US", False,
+           "duplicate Features heading"),
+    Vector("features_count_30", "## Overview\n30 jurisdictions", False, "no Features section"),
+    # finds_risk_scoring: fence-aware ATX headings only.
+    Vector("finds_risk_scoring", "## Risk Scoring\nbody", True),
+    Vector("finds_risk_scoring", "   ## Risk Scoring ##\nbody", True, "indent + closing"),
+    Vector("finds_risk_scoring", "## Risk Scoring (HR9)\nbody", True, "suffix"),
+    Vector("finds_risk_scoring", "## **Risk Scoring**", True, "emphasis"),
+    Vector("finds_risk_scoring", _FENCED_HEADING, False, "heading inside fence"),
+    Vector("finds_risk_scoring", "    ## Risk Scoring", False, "indented code"),
+    Vector("finds_risk_scoring", "##Risk Scoring", False, "no space after #"),
+    Vector("finds_risk_scoring", "text ## Risk Scoring", False, "U+2028 is not a line end"),
+    Vector("finds_risk_scoring", "## Risk Scorings", False, "longer word"),
+    Vector("finds_risk_scoring", "## Risk Scoring\n## Risk Scoring", False, "duplicate"),
+    Vector("finds_risk_scoring", "", False, "missing"),
+    # clean_text
+    Vector("clean_text", "plain — text × ├── ok\n\ttab", True),
+    Vector("clean_text", "nul\x00", False),
+    Vector("clean_text", "bidi‮", False),
+    Vector("clean_text", "bom﻿", False),
+    Vector("clean_text", "lone\ud800", False, "lone surrogate"),
+    # One literal per forbidden category, independent of FORBIDDEN_CATEGORIES,
+    # so dropping a category from the constant goes red here.
+    Vector("clean_text", "esc\x1b", False, "Cc"),
+    Vector("clean_text", "zwsp​", False, "Cf"),
+    Vector("clean_text", "pua", False, "Co"),
+    Vector("clean_text", "unassigned͸", False, "Cn"),
+    Vector("clean_text", "line sep", False, "Zl"),
+    Vector("clean_text", "para sep", False, "Zp"),
+)
+
+
+@pytest.mark.parametrize("vector", VECTORS, ids=lambda v: f"{v.checker}-{v.note or _show(v.text)}")
+def test_checker_vectors(vector: Vector) -> None:
+    assert CHECKERS[vector.checker](vector.text) is vector.expected, _show(vector.text)
+
+
+def test_vectors_contract_every_checker_has_positive_and_negative() -> None:
+    for name in CHECKERS:
+        outcomes = {v.expected for v in VECTORS if v.checker == name}
+        assert outcomes == {True, False}, f"checker {name!r} lacks a positive or negative vector"
+    assert {v.checker for v in VECTORS} == set(CHECKERS)
+
+
+def test_grade_cell_vectors(hr9_grades: frozenset[str]) -> None:
+    """Grade cells: HR9 grades in any list form pass; anything else is reported."""
+    allowed = sorted(hr9_grades)
+    positives = [
+        *allowed,
+        " or ".join(allowed),
+        ", ".join(allowed),
+        " / ".join(allowed),
+        f"**{allowed[0]}**",
+        f"`{allowed[-1]}`",
+        f"{allowed[0]} – {allowed[-1]}",
+        f"{allowed[0]} ({allowed[-1]})",  # grades in parentheses are still grades
+    ]
+    for cell in positives:
+        assert _bad_grade_tokens(cell, hr9_grades) == [], _show(cell)
+    # Grades HR9 lacks, look-alikes of HR9 grades, and empty cells.
+    lookalikes = [g.replace("-", "−") for g in allowed if "-" in g]
+    full_width = {cp: cp + 0xFEE0 for cp in range(ord("A"), ord("Z") + 1)}
+    lookalikes += [g.translate(full_width) for g in allowed]
+    lookalikes += [g[0] + "​" + g[1:] for g in allowed if len(g) > 1]
+    # Non-grades hidden in brackets of every kind (PR #338 review): a
+    # parenthetical is inspected, never stripped, and look-alike or other
+    # brackets do not split a piece, so the whole piece is reported.
+    hidden = [
+        f"{allowed[0]} (D or F)",
+        f"{allowed[0]} (D",  # unbalanced
+        f"{allowed[0]} ((F))",  # nested
+        f"{allowed[0]} (**F**)",  # markup inside
+        f"{allowed[0]} (best)",  # a qualifier is not a grade
+        f"{allowed[0]} （F）",  # full-width parentheses
+        f"{allowed[0]} [F]",
+        f"{allowed[0]} {{F}}",
+    ]
+    negatives = ["D or F", "F", "D", "E", "D+ or F", "n/a", "", "  ", "()", *lookalikes, *hidden]
+    for cell in negatives:
+        assert _bad_grade_tokens(cell, hr9_grades) != [], _show(cell)
+    assert set(_bad_grade_tokens("D or F", hr9_grades)) == {"D", "F"}
+    assert set(_bad_grade_tokens(f"{allowed[0]} (D or F)", hr9_grades)) == {"D", "F"}
+    assert _grade_pieces(f"{allowed[0]} (D or F)") == {allowed[0], "D", "F"}
+
+
+# --------------------------------------------------------------------------
+# Generated hostile inputs (R2): every line break, dash and Cf code point
+# --------------------------------------------------------------------------
+
+
+def _all_chars(predicate: Callable[[str], bool]) -> list[str]:
+    return [chr(cp) for cp in range(sys.maxunicode + 1) if predicate(chr(cp))]
+
+
+def test_generated_disguises_of_unimplemented_are_caught() -> None:
+    line_breaks = _all_chars(lambda c: len(f"a{c}b".splitlines()) == 2) + ["\r\n"]
+    dashes = _all_chars(lambda c: unicodedata.category(c) == "Pd") + sorted(_EXTRA_DASHES)
+    format_chars = _all_chars(lambda c: unicodedata.category(c) == "Cf")
+    cases = [f"IRP: not{sep}yet{sep}implemented" for sep in line_breaks + dashes]
+    cases += [f"IRP: not-ye{cf}t-implemented" for cf in format_chars]
+    cases += [f"The IRP method is{sep}planned" for sep in line_breaks]
+    missed = [_show(c) for c in cases if not _irp_claimed_unimplemented(c)]
+    print(f"generated {len(cases)} disguised 'not yet implemented' cases")
+    assert len(line_breaks) > 1 and len(dashes) > 1 and len(format_chars) > 1
+    assert not missed, missed
+
+
+def test_generated_forbidden_chars_are_all_flagged() -> None:
+    hostile = _all_chars(
+        lambda c: c not in ALLOWED_CONTROLS and unicodedata.category(c) in FORBIDDEN_CATEGORIES
+    )
+    flagged = {code for _, code in _forbidden_chars("".join(hostile))}
+    expected = {f"U+{ord(c):04X}" for c in hostile}
+    print(f"generated {len(hostile)} forbidden code points")
+    assert {unicodedata.category(c) for c in hostile} == FORBIDDEN_CATEGORIES
+    assert flagged == expected
+
+
+def test_generated_line_breaks_do_not_forge_headings() -> None:
+    """Only CommonMark line endings start a heading; other breaks do not."""
+    commonmark = {"\n", "\r", "\r\n"}
+    breaks = _all_chars(lambda c: len(f"a{c}b".splitlines()) == 2) + ["\r\n"]
+    for brk in breaks:
+        found = _section_found(f"text{brk}## {RISK_SCORING_HEADING}", RISK_SCORING_HEADING)
+        assert found is (brk in commonmark), ascii(brk)
+
+
+def test_huge_line_is_parsed() -> None:
+    """A 2 MB line with a count buried at the end is still found."""
+    filler = "word " * (2 * 1024 * 1024 // 5)
+    assert _stated_counts(filler + "30 jurisdictions", "jurisdictions") == ["30"]
+    assert not _irp_claimed_unimplemented(filler)
+
+
+# --------------------------------------------------------------------------
+# Readers and message safety
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        (b"\xff\xfe bad", "not valid UTF-8"),
+        (b"lone \xed\xa0\x80 surrogate", "not valid UTF-8"),
+        (b"overlong \xc0\xaf", "not valid UTF-8"),
+    ],
+)
+def test_read_text_rejects_invalid_utf8(tmp_path: Path, payload: bytes, reason: str) -> None:
+    (tmp_path / "README.md").write_bytes(payload)
+    with pytest.raises(DocCheckError, match=reason) as info:
+        _read_text(tmp_path, "README.md")
+    assert str(tmp_path) not in str(info.value)  # no absolute path in the message (F8)
+
+
+def test_read_text_refuses_symlink_and_missing(tmp_path: Path) -> None:
+    (tmp_path / "clean.md").write_text("## Risk Scoring\n", encoding="utf-8")
+    (tmp_path / "README.md").symlink_to(tmp_path / "clean.md")
+    with pytest.raises(DocCheckError, match="symlink") as info:
+        _read_text(tmp_path, "README.md")
+    assert str(tmp_path) not in str(info.value)
+    with pytest.raises(DocCheckError, match="missing"):
+        _read_text(tmp_path, "absent.md")
+
+
+def test_read_text_keeps_nul_for_the_hygiene_check(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_bytes(b"ok\x00")
+    assert _forbidden_chars(_read_text(tmp_path, "README.md")) == [(2, "U+0000")]
+
+
+def test_show_escapes_and_truncates() -> None:
+    hostile = "\x1b[31m‮" + "x" * (SHOW_LIMIT * 2)
+    shown = _show(hostile)
+    assert shown.isascii() and "\x1b" not in shown and "‮" not in shown
+    assert shown.endswith(f"(+{len(hostile) - SHOW_LIMIT} chars)")
+    assert _show("ok") == "'ok'"
+
+
+def test_hr9_parser_fails_closed() -> None:
+    with pytest.raises(DocCheckError, match="need one"):
+        _parse_hr9("no grades here")
+    with pytest.raises(DocCheckError, match="need one"):
+        _parse_hr9(f"{HR9_LINE_PREFIX} A <1\n{HR9_LINE_PREFIX} B <2")
+    with pytest.raises(DocCheckError, match="not '<grade> <op> <number>'"):
+        _parse_hr9(f"{HR9_LINE_PREFIX} A about 3")
+    assert _parse_hr9(f"{HR9_LINE_PREFIX} A <1, B >=1.") == [("A", "<", 1.0), ("B", ">=", 1.0)]
