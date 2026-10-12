@@ -309,6 +309,16 @@ def list_content_column(line: str, item: re.Match[str]) -> int:
     return marker_col + (gap if 1 <= gap <= CODE_INDENT else 1)
 
 
+def fence_match(line: str, container_column: int) -> re.Match[str] | None:
+    """Match a fence indented at most three columns from its container."""
+    prefix_length = len(line) - len(line.lstrip(" \t"))
+    indent = indent_columns(line)
+    if indent < container_column or indent - container_column > 3:
+        return None
+    relative_line = " " * (indent - container_column) + line[prefix_length:]
+    return FENCE_OPEN_RE.match(relative_line)
+
+
 def content_lines(text: str) -> Iterator[tuple[int, str]]:
     """Lines that markdown renders as content: not in fences, HTML comments or
     indented code blocks.
@@ -319,14 +329,21 @@ def content_lines(text: str) -> Iterator[tuple[int, str]]:
     list item is list content, not code, so nested tasks still count.
     """
     fence: str | None = None
+    fence_container_column = 0
     in_comment = False
     list_cols: list[int] = []  # content columns of the open list items
     may_start_code = True  # the previous line was blank, a heading or a block end
     previous_blank = True
     for number, line in enumerate(LINE_SPLIT_RE.split(text), 1):
         if fence is not None:
-            close = re.fullmatch(r" {0,3}(`{3,}|~{3,})[ \t]*", line)
-            if close and close.group(1)[0] == fence[0] and len(close.group(1)) >= len(fence):
+            close = re.fullmatch(r"[ \t]*(`{3,}|~{3,})[ \t]*", line)
+            close_indent = indent_columns(line)
+            if (
+                close
+                and fence_container_column <= close_indent <= fence_container_column + 3
+                and close.group(1)[0] == fence[0]
+                and len(close.group(1)) >= len(fence)
+            ):
                 fence = None
                 may_start_code, previous_blank = True, False
             continue
@@ -345,9 +362,17 @@ def content_lines(text: str) -> Iterator[tuple[int, str]]:
         # A paragraph line straight after another (no blank between) is a lazy
         # continuation and keeps its list open. Anything else closes the list
         # items it is not indented under.
-        if previous_blank or item or heading or FENCE_OPEN_RE.match(line):
+        container_column = list_cols[-1] if list_cols else 0
+        if (
+            previous_blank
+            or item
+            or heading
+            or fence_match(line, container_column)
+            or (indent < container_column and FENCE_OPEN_RE.match(line))
+        ):
             while list_cols and indent < list_cols[-1]:
                 list_cols.pop()
+            container_column = list_cols[-1] if list_cols else 0
         floor = (list_cols[-1] if list_cols else 0) + CODE_INDENT
         previous_blank = False
         # may_start_code stays set through the block, so following lines
@@ -357,9 +382,10 @@ def content_lines(text: str) -> Iterator[tuple[int, str]]:
         if item:
             list_cols.append(list_content_column(line, item))
         may_start_code = heading
-        opened = FENCE_OPEN_RE.match(line)
+        opened = fence_match(line, container_column)
         if opened:
             fence = opened.group(1)
+            fence_container_column = container_column
             continue
         comment = re.match(r" {0,3}<!--", line)
         if comment:

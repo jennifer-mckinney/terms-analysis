@@ -529,6 +529,11 @@ VECTORS: tuple[Vector, ...] = (
            lambda b: make_tree(b, brd_doc=brd(checked=0, inside="```\n" + "- [x] fenced\n" * MIN_CHECKED + "```"))),
     Vector("checked boxes inside a tilde fence", "brd-roadmap-checked", False,
            lambda b: make_tree(b, brd_doc=brd(checked=0, inside="~~~~\n" + "- [x] fenced\n" * MIN_CHECKED + "~~~~"))),
+    Vector("checked boxes inside a fence nested in a list item", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(
+               checked=0,
+               inside="- example\n\n    ```\n" + "    - [x] fenced\n" * MIN_CHECKED + "    ```",
+           ))),
     Vector("checked boxes inside an HTML comment", "brd-roadmap-checked", False,
            lambda b: make_tree(b, brd_doc=brd(checked=0, inside="<!--\n" + "- [x] hidden\n" * MIN_CHECKED + "-->"))),
     Vector("'[x]' in prose", "brd-roadmap-checked", False,
