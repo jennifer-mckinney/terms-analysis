@@ -683,11 +683,21 @@ def test_analyzer_analyze_text_grounded_exposes_citations_and_feeds_llm(monkeypa
         ([" Placeholder "], False),
         (["placeholder", "in_force"], True),
         ([" IN_FORCE "], True),
-        # Round-2 allowlist (fail closed): null, unknown, typo and the
-        # ingester's not_yet_in_force are all NOT authoritative.
+        # Round-2 allowlist (fail closed): null, unknown and the ingester's
+        # not_yet_in_force are NOT authoritative. #176: the typo "placholder"
+        # now resolves to placeholder, which is still not authoritative.
         ([None], False),
         (["verified"], False),
         (["placholder"], False),
+        # #176 (owner ruling 2026-10-12): variants and typos of in_force are
+        # authoritative; a negated or look-alike value never is.
+        (["In Force"], True),
+        (["in_froce"], True),
+        (["\uff49\uff4e\uff3f\uff46\uff4f\uff52\uff43\uff45"], True),
+        (["not in force"], False),
+        (["un_force"], False),
+        (["in_force_repealed"], False),
+        (["in_forc\u0435"], False),
         (["not_yet_in_force"], False),
         (["draft", None, "not_yet_in_force"], False),
         ([], False),
@@ -756,7 +766,19 @@ def test_analyzer_analyze_text_ungrounded_is_never_authoritative(monkeypatch):
 
 @pytest.mark.parametrize(
     "raw,expected",
-    [("PLACEHOLDER", "placeholder"), ("  Verified ", "verified"), ("   ", None), (None, None), (3, None)],
+    [
+        ("PLACEHOLDER", "placeholder"),
+        ("  Verified ", "verified"),
+        ("   ", None),
+        (None, None),
+        (3, None),
+        # #176: the citation exposes the canonical status.
+        ("In Force", "in_force"),
+        ("in_froce", "in_force"),
+        ("PlaceHolder", "placeholder"),
+        ("not-yet-in-force", "not_yet_in_force"),
+        ("\uff49\uff4e\uff3f\uff46\uff4f\uff52\uff43\uff45", "in_force"),
+    ],
 )
 def test_schemas_legal_citation_status_normalised(raw, expected):
     assert LegalCitation(status=raw).status == expected
@@ -1175,7 +1197,15 @@ _LABEL = {key: passage_label(key) for key in PASSAGE_LABELS}
         ("", "GDPR", ["GDPR"], ["unverified_provenance"], "GDPR"),
         ("draft", "GDPR", ["GDPR"], ["unverified_provenance"], "GDPR"),
         ("repealed", "GDPR", ["GDPR"], ["unverified_provenance"], "GDPR"),
+        # #176: a look-alike letter is forgery, not a misspelling; still unverified.
         ("in_forcе", "GDPR", ["GDPR"], ["unverified_provenance"], "GDPR"),  # Cyrillic "е"
+        # #176: variants and typos resolve; negation never does.
+        ("In Force", "GDPR", ["GDPR"], [], "GDPR"),
+        ("in_froce", "GDPR", ["GDPR"], [], "GDPR"),
+        ("not in force", "GDPR", ["GDPR"], ["unverified_provenance"], "GDPR"),
+        ("un_force", "GDPR", ["GDPR"], ["unverified_provenance"], "GDPR"),
+        ("Not Yet In Force", "GDPR", ["GDPR"], ["not_yet_in_force"], "GDPR"),
+        ("placeholdr", "GDPR", ["GDPR"], ["placeholder"], "GDPR"),
         ("in_force", "GDPR", ["US-CA"], ["out_of_jurisdiction"], "GDPR"),
         ("not_yet_in_force", "GDPR", ["US-CA"], ["not_yet_in_force", "out_of_jurisdiction"], "GDPR"),
         ("placeholder", "GDPR", [], ["placeholder"], "GDPR"),
@@ -1697,3 +1727,507 @@ def test_code_docs_use_the_single_jurisdiction_phrase():
     docstring = " ".join((analyzer_module._grounding_is_authoritative.__doc__ or "").split())
     for text in (description, docstring):
         assert _K_PHRASE in text and _U_PHRASE in text, text
+
+
+# ---------------------------------------------------------------------------
+# Issue #176 (owner ruling 2026-10-12: option (a) stands, "misspelling need to
+# be accounted for"). AUTHORITATIVE_STATUSES stays {"in_force"}, but a variant
+# or misspelled spelling of a KNOWN status resolves to that status:
+#   1. canonicalise: NFKC, case-fold, trim, collapse runs of space / "-" /
+#      "_" / "." to "_";
+#   2. typo: within Damerau-Levenshtein distance 1 of exactly one known
+#      status (on the canonical form) resolves to it; distance >= 2 is unknown;
+#   3. negation (hard rule): a value holding a negation token never resolves
+#      to in_force, and the typo step can't cross from negated to in_force;
+#   4. fail closed: null, blank, junk, non-strings, huge values are unknown,
+#      never raise, and resolve in linear time;
+#   5. no silent mapping: a typo-mapped or unknown value logs a WARNING that
+#      names the (truncated, escaped) raw value.
+# Look-alike letters, format (Cf), control (Cc), line-separator and surrogate
+# characters are hostile structure, not misspellings: they fail closed, the
+# same rule schemas.normalise_jurisdiction applies (round 11, security N1).
+# ---------------------------------------------------------------------------
+
+import itertools  # noqa: E402
+import re  # noqa: E402
+import time  # noqa: E402
+import unicodedata  # noqa: E402
+
+from app.schemas import (  # noqa: E402 - grouped with the #176 tests
+    NOT_YET_IN_FORCE_STATUS,
+    normalise_corpus_status,
+)
+
+# Schema-derived vocabulary (F13): the one authoritative status, then the two
+# labelled ones. test_authoritative_statuses_vocabulary_is_ingester_in_force_only
+# pins AUTHORITATIVE_STATUSES to a single member.
+_IN_FORCE = next(iter(AUTHORITATIVE_STATUSES))
+_KNOWN_STATUSES = (_IN_FORCE, NOT_YET_IN_FORCE_STATUS, PLACEHOLDER_STATUS)
+# Characters a canonical status is made of; the generated typos draw from it.
+_CANONICAL_ALPHABET = "".join(sorted(set("".join(_KNOWN_STATUSES)) | set("abcdefghijklmnopqrstuvwxyz")))
+# Card #176 negation tokens; "un" covers the un-prefixed "un force" family.
+_NEGATION_TOKENS = ("not", "no", "non", "never", "un", "repealed", "revoked", "expired", "superseded", "draft")
+# Card #176 spec: a 1 MB value resolves in under 1 s (linear time).
+_LINEAR_TIME_BUDGET_S = 1.0
+_ONE_MB = 1_000_000
+# A warning must name at least as much of the raw value as the shortest
+# canonical status, or a mis-typed status can't be identified from the log.
+_MIN_NAMED_PREFIX = min(len(s) for s in _KNOWN_STATUSES)
+_HOSTILE_MESSAGE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
+
+
+def _oracle_canonical(raw: str) -> str:
+    """Test-side oracle of rule 1, used ONLY to self-check generated vectors."""
+    folded = unicodedata.normalize("NFKC", raw).casefold().strip()
+    return re.sub(r"[ ._\-]+", "_", folded)
+
+
+def _osa_distance(a: str, b: str) -> int:
+    """Damerau-Levenshtein (optimal string alignment) distance; test oracle."""
+    d = [[0] * (len(b) + 1) for _ in range(len(a) + 1)]
+    for i in range(len(a) + 1):
+        d[i][0] = i
+    for j in range(len(b) + 1):
+        d[0][j] = j
+    for i in range(1, len(a) + 1):
+        for j in range(1, len(b) + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            d[i][j] = min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost)
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                d[i][j] = min(d[i][j], d[i - 2][j - 2] + 1)
+    return d[len(a)][len(b)]
+
+
+def _token_negated(canonical: str) -> bool:
+    """Oracle: the canonical value holds a negation TOKEN (or an un-prefixed force)."""
+    tokens = canonical.split("_")
+    return any(t in _NEGATION_TOKENS for t in tokens) or any(
+        t.startswith("un") and t.endswith("force") for t in tokens
+    )
+
+
+def _mentions_negation(canonical: str) -> bool:
+    """Oracle: a negation token appears anywhere, even inside a word."""
+    return any(tok in canonical for tok in _NEGATION_TOKENS)
+
+
+def _distance_one_edits(word: str) -> List[str]:
+    """Every single deletion, substitution, transposition and insertion of ``word``."""
+    edits = set()
+    for i in range(len(word)):
+        edits.add(word[:i] + word[i + 1 :])
+        for ch in _CANONICAL_ALPHABET:
+            edits.add(word[:i] + ch + word[i + 1 :])
+    for i in range(len(word) - 1):
+        edits.add(word[:i] + word[i + 1] + word[i] + word[i + 2 :])
+    for i in range(len(word) + 1):
+        for ch in _CANONICAL_ALPHABET:
+            edits.add(word[:i] + ch + word[i:])
+    edits.discard(word)
+    return sorted(edits)
+
+
+def _distance_two_edits(word: str) -> List[str]:
+    """Two non-adjacent letter deletions, and two non-adjacent substitutions by a
+    letter absent from every known status: each is exactly distance 2 away."""
+    absent = next(ch for ch in "abcdefghijklmnopqrstuvwxyz" if ch not in "".join(_KNOWN_STATUSES))
+    letters = [i for i, ch in enumerate(word) if ch != "_"]
+    edits = set()
+    for i, j in itertools.combinations(letters, 2):
+        if j - i < 2:
+            continue
+        edits.add(word[:i] + word[i + 1 : j] + word[j + 1 :])
+        edits.add(word[:i] + absent + word[i + 1 : j] + absent + word[j + 1 :])
+    return sorted(edits)
+
+
+def _unknown_labels() -> List[str]:
+    return ["unverified_provenance"]
+
+
+def _expected_labels(status: str) -> List[str]:
+    # PASSAGE_LABELS keys are the status names themselves for the labelled
+    # statuses; the authoritative one carries no label.
+    return [] if status in AUTHORITATIVE_STATUSES else [status]
+
+
+def _warning_messages(caplog) -> List[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+
+
+# Rule 1: canonicalisation. Rows marked "green" already pass on main (strip +
+# lower-case was enough); the rest are red until rule 1 lands.
+_STATUS_VARIANTS = [
+    ("In Force", _IN_FORCE),
+    ("in-force", _IN_FORCE),
+    ("IN_FORCE", _IN_FORCE),  # green
+    (" in  force ", _IN_FORCE),
+    ("in.force", _IN_FORCE),
+    ("in -_. force", _IN_FORCE),  # mixed separator run collapses to one "_"
+    ("in__force", _IN_FORCE),
+    ("In_Force\t", _IN_FORCE),  # green: outer whitespace is trimmed
+    ("ｉｎ＿ｆｏｒｃｅ", _IN_FORCE),  # full-width "in_force"
+    ("ＩＮ　ＦＯＲＣＥ", _IN_FORCE),  # full-width "IN FORCE", ideographic space
+    ("Not Yet In Force", NOT_YET_IN_FORCE_STATUS),
+    ("not-yet-in-force", NOT_YET_IN_FORCE_STATUS),
+    ("NOT.YET.IN.FORCE", NOT_YET_IN_FORCE_STATUS),
+    (" Not_Yet_In_Force", NOT_YET_IN_FORCE_STATUS),  # green
+    ("ｎｏｔ ｙｅｔ ｉｎ ｆｏｒｃｅ", NOT_YET_IN_FORCE_STATUS),
+    ("PlaceHolder", PLACEHOLDER_STATUS),  # green
+    ("PLACEHOLDER", PLACEHOLDER_STATUS),  # green
+    ("ＰＬＡＣＥＨＯＬＤＥＲ", PLACEHOLDER_STATUS),  # full-width
+]
+
+# Rule 2: within distance 1 of exactly one known status (after rule 1).
+_STATUS_TYPOS = [
+    ("in_froce", _IN_FORCE),  # transposition
+    ("inforce", _IN_FORCE),  # deletion
+    ("in_forc", _IN_FORCE),  # deletion
+    ("in_forse", _IN_FORCE),  # substitution
+    ("in_forcee", _IN_FORCE),  # insertion
+    ("In Froce", _IN_FORCE),  # rule 1 then rule 2
+    ("IN-FORSE", _IN_FORCE),
+    ("placeholdr", PLACEHOLDER_STATUS),
+    ("Place Holder", PLACEHOLDER_STATUS),  # "place_holder" is one insertion away
+    ("placehodler", PLACEHOLDER_STATUS),
+    ("not_yet_in_froce", NOT_YET_IN_FORCE_STATUS),
+    ("Not Yet Inforce", NOT_YET_IN_FORCE_STATUS),
+    ("no_yet_in_force", NOT_YET_IN_FORCE_STATUS),  # negation only bars in_force
+]
+
+# Rule 3: hard rule. None of these may ever be authoritative.
+_NEGATED_IN_FORCE = [
+    "not in force",
+    "not_in_force",
+    "Not In Force",
+    "NOT-IN-FORCE",
+    "no longer in force",
+    "non_in_force",
+    "notinforce",
+    "never in force",
+    "repealed",
+    "in_force_repealed",
+    "in force (repealed)",
+    "revoked",
+    "expired",
+    "superseded",
+    "draft",
+    "in_force_draft",
+    "no_in_force",
+    "un_force",  # distance 1 from in_force: the typo step must not cross
+    "unforce",
+    "Un-Force",
+    "UN FORCE",
+    "un_in_force",
+    "not_in_froce",
+    "un_froce",
+    "ｎｏｔ ｉｎ ｆｏｒｃｅ",  # full-width "not in force"
+]
+_GENERATED_NEGATED = sorted(
+    {
+        value
+        for tok in _NEGATION_TOKENS
+        for sep in (" ", "-", "_", ".", "")
+        for base in ("in force", "in_froce", "inforce")
+        for value in (f"{tok}{sep}{base}", f"{base}{sep}{tok}")
+    }
+)
+
+# Look-alike letters and invisible / control / separator characters: hostile
+# structure, never a misspelling, so never resolved (fail closed).
+_LOOKALIKE_OR_HOSTILE = [
+    "in_forcе",  # Cyrillic ie
+    "іn_force",  # Cyrillic i
+    "in_fοrce",  # Greek omicron
+    "in​force",  # zero-width space
+    "in_force​",
+    "​in_force",
+    "in_force﻿",  # BOM
+    "‮in_force",  # RTL override
+    "in­force",  # soft hyphen
+    "in_force\U000e0041",  # tag character
+    "in_force\x00",  # NUL
+    "in\x00force",
+    "in_force\x1b",  # ESC
+    "in_force\x7f",  # DEL
+    "in\nforce",
+    "in\rforce",
+    "in\x85force",  # NEL
+    "in force",  # line separator
+    "in force",  # paragraph separator
+    "in_force\ud800",  # lone surrogate
+    "\udfffin_force",
+]
+
+# Rule 4: fail closed, never raise.
+_FAIL_CLOSED_STATUSES = [
+    None,
+    "",
+    "   ",
+    "\t\n",
+    "-",
+    "_-.",
+    "...",
+    "junk",
+    "verified",
+    "unknown",
+    "null",
+    "None",
+    "0",
+    "1",
+    "in",
+    "force",
+    "status: in_force",
+    0,
+    1,
+    3.5,
+    True,
+    False,
+    b"in_force",
+    bytearray(b"in_force"),
+    ["in_force"],
+    ("in_force",),
+    {"in_force"},
+    {"status": "in_force"},
+    "in_force" * 1250,  # 10k characters
+    "x" * 10_000,
+    "in_force " + "x" * 10_000,
+]
+
+
+def test_corpus_status_vectors_cover_every_status_and_negation_token():
+    # QUALITY-BAR 9 contract: every known status has a variant row and a typo
+    # row, every negation token has an explicit negative row, and the
+    # generated vectors are what they claim to be (oracle self-check).
+    assert {expected for _, expected in _STATUS_VARIANTS} == set(_KNOWN_STATUSES)
+    assert {expected for _, expected in _STATUS_TYPOS} == set(_KNOWN_STATUSES)
+    for tok in _NEGATION_TOKENS:
+        assert any(_token_negated(_oracle_canonical(v)) and tok in _oracle_canonical(v) for v in _NEGATED_IN_FORCE), tok
+    for raw, expected in _STATUS_VARIANTS:
+        assert _oracle_canonical(raw) == expected, raw
+    for raw, expected in _STATUS_TYPOS:
+        assert _osa_distance(_oracle_canonical(raw), expected) == 1, raw
+
+
+def test_corpus_status_vocabulary_cannot_make_distance_one_ambiguous():
+    # Rule 2 says a tie resolves to unknown. With this vocabulary no value is
+    # within distance 1 of two statuses (they are >= 3 apart), so no tie is
+    # reachable; a status added too close to another fails here first and
+    # needs a tie vector.
+    for a, b in itertools.combinations(_KNOWN_STATUSES, 2):
+        assert _osa_distance(a, b) >= 3, (a, b)
+
+
+@pytest.mark.parametrize("raw,expected", _STATUS_VARIANTS)
+def test_corpus_status_variant_spelling_resolves_to_known_status(raw, expected):
+    assert normalise_corpus_status(raw) == expected
+    assert LegalCitation(status=raw).status == expected
+    assert passage_label_keys(raw, "GDPR", ["GDPR"]) == _expected_labels(expected)
+
+
+@pytest.mark.parametrize("raw,expected", _STATUS_TYPOS)
+def test_corpus_status_typo_resolves_and_logs_one_warning(caplog, raw, expected):
+    with caplog.at_level(logging.WARNING):
+        resolved = normalise_corpus_status(raw)
+    assert resolved == expected
+    warnings = _warning_messages(caplog)
+    assert len(warnings) == 1, warnings
+    # Names the raw value and the status it was mapped to.
+    assert raw in warnings[0] and expected in warnings[0], warnings[0]
+    assert LegalCitation(status=raw).status == expected
+    assert passage_label_keys(raw, "GDPR", ["GDPR"]) == _expected_labels(expected)
+
+
+def test_corpus_status_every_distance_one_edit_resolves_to_its_status(caplog):
+    # Rule 2 + rule 3, generated (R2): every single edit of every known status
+    # resolves to it. in_force edits that hold a negation token must NOT
+    # resolve to in_force; in_force edits that only contain a negation
+    # substring inside a word (e.g. "ino_force") are left to the
+    # implementation either way.
+    caplog.set_level(logging.ERROR)
+    checked = negated = 0
+    wrong: List[Tuple[str, Any, str]] = []
+    for status in _KNOWN_STATUSES:
+        for edit in _distance_one_edits(status):
+            canonical = _oracle_canonical(edit)
+            if canonical == status:
+                continue  # a separator run that collapses back to the status
+            assert _osa_distance(canonical, status) == 1, edit
+            resolved = normalise_corpus_status(edit)
+            if status == _IN_FORCE and _token_negated(canonical):
+                negated += 1
+                if resolved == _IN_FORCE or passage_label_keys(edit, "GDPR", ["GDPR"]) != _unknown_labels():
+                    wrong.append((edit, resolved, "negated edit resolved"))
+                continue
+            if status == _IN_FORCE and _mentions_negation(canonical):
+                continue
+            checked += 1
+            if resolved != status:
+                wrong.append((edit, resolved, status))
+    print(f"#176 distance-1 vectors: {checked} resolving, {negated} negated")
+    assert negated >= 1, "the generator must reach a negated in_force edit (un_force)"
+    assert not wrong, f"{len(wrong)} of {checked + negated} edits wrong, e.g. {wrong[:10]}"
+
+
+def test_corpus_status_distance_two_or_more_is_unknown():
+    # Rule 2, generated: two edits away is unknown (fail closed), never
+    # pulled to the nearest status.
+    count = 0
+    for status in _KNOWN_STATUSES:
+        for edit in _distance_two_edits(status):
+            canonical = _oracle_canonical(edit)
+            assert min(_osa_distance(canonical, s) for s in _KNOWN_STATUSES) >= 2, edit
+            assert normalise_corpus_status(edit) not in _KNOWN_STATUSES, edit
+            assert passage_label_keys(edit, "GDPR", ["GDPR"]) == _unknown_labels(), edit
+            count += 1
+    print(f"#176 distance-2 vectors: {count}")
+    assert count > 0
+
+
+@pytest.mark.parametrize("raw", _NEGATED_IN_FORCE + _GENERATED_NEGATED)
+def test_corpus_status_negated_value_is_never_authoritative(raw):
+    # Rule 3 (hard rule): never in_force, never unlabelled, whatever the case,
+    # separators, width or typos.
+    assert normalise_corpus_status(raw) != _IN_FORCE
+    assert LegalCitation(status=raw).status != _IN_FORCE
+    assert passage_label_keys(raw, "GDPR", ["GDPR"]) == _unknown_labels()
+
+
+def test_corpus_status_typo_step_never_crosses_from_negated_to_in_force(caplog):
+    # Rule 3, generated: no single edit of a negated value that is itself
+    # still negated (by token) resolves to in_force.
+    caplog.set_level(logging.ERROR)
+    count = 0
+    crossed = []
+    for value in _NEGATED_IN_FORCE + _GENERATED_NEGATED:
+        for edit in _distance_one_edits(_oracle_canonical(value)):
+            if not _token_negated(_oracle_canonical(edit)):
+                continue
+            count += 1
+            if normalise_corpus_status(edit) == _IN_FORCE:
+                crossed.append(edit)
+    print(f"#176 negated-edit vectors: {count}")
+    assert count > 0
+    assert not crossed, crossed[:20]
+
+
+@pytest.mark.parametrize("raw", _LOOKALIKE_OR_HOSTILE, ids=lambda v: v.encode("unicode_escape").decode("ascii"))
+def test_corpus_status_lookalike_or_hostile_character_fails_closed(raw):
+    # A look-alike letter or an invisible / control / separator character is
+    # one edit from in_force but is forgery, not a misspelling: unknown.
+    assert normalise_corpus_status(raw) not in _KNOWN_STATUSES
+    assert passage_label_keys(raw, "GDPR", ["GDPR"]) == _unknown_labels()
+
+
+@pytest.mark.parametrize("raw", _FAIL_CLOSED_STATUSES, ids=lambda v: f"{type(v).__name__}:{str(v)[:12]!r}")
+def test_corpus_status_junk_null_and_wrong_type_fail_closed(raw):
+    # Rule 4: unknown, so unverified provenance and never authoritative; no
+    # exception from the normaliser, the citation model or the label table.
+    assert normalise_corpus_status(raw) not in _KNOWN_STATUSES
+    assert LegalCitation(status=raw).status not in _KNOWN_STATUSES
+    assert passage_label_keys(raw, "GDPR", ["GDPR"]) == _unknown_labels()
+
+
+_ONE_MB_VALUES = {
+    "ascii": ("x" * _ONE_MB, True),
+    "repeated_typo": ("in_froce" * (_ONE_MB // len("in_froce")), True),
+    "negation_prefix": ("not_" * (_ONE_MB // 4) + _IN_FORCE, True),
+    "nfkc_expanding": ("ﷺ" * (_ONE_MB // 3), True),  # one char -> 18 under NFKC
+    "zero_width": ("​" * (_ONE_MB // 3), True),
+    "surrogate_tail": ("a" * (_ONE_MB - 1) + "\ud800", True),
+    # Outcome not pinned (collapses to "in_force" under rule 1): time only.
+    "separator_run": ("in" + " -_." * (_ONE_MB // 4) + "force", False),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_ONE_MB_VALUES))
+def test_corpus_status_one_megabyte_value_resolves_in_linear_time(caplog, name):
+    raw, pin_unknown = _ONE_MB_VALUES[name]
+    with caplog.at_level(logging.WARNING):
+        started = time.perf_counter()
+        resolved = normalise_corpus_status(raw)
+        labels = passage_label_keys(raw, "GDPR", ["GDPR"])
+        elapsed = time.perf_counter() - started
+    assert elapsed < _LINEAR_TIME_BUDGET_S, f"{name}: {elapsed:.3f}s"
+    if pin_unknown:
+        assert resolved not in _KNOWN_STATUSES
+        assert labels == _unknown_labels()
+    # A log line never carries the whole value.
+    for message in _warning_messages(caplog):
+        assert len(message) < len(raw), name
+
+
+@pytest.mark.parametrize("status", _KNOWN_STATUSES)
+def test_corpus_status_canonical_value_logs_nothing(caplog, status):
+    # Green guard: only a mapped or unknown value warns. Known jurisdiction
+    # codes go through passage_label_keys too, and must not be mistaken for
+    # unknown statuses (normalise_jurisdiction shares the strip/lower step).
+    from app.schemas import KNOWN_JURISDICTIONS
+
+    with caplog.at_level(logging.WARNING):
+        assert normalise_corpus_status(status) == status
+        assert LegalCitation(status=status).status == status
+        for code in sorted(KNOWN_JURISDICTIONS):
+            assert passage_label_keys(status, code, [code]) == _expected_labels(status)
+    assert _warning_messages(caplog) == []
+
+
+@pytest.mark.parametrize("raw", ["junk", "verified", "not in force", "un_force", "in_forcе", "repealed"])
+def test_corpus_status_unknown_value_logs_one_warning_naming_it(caplog, raw):
+    with caplog.at_level(logging.WARNING):
+        resolved = normalise_corpus_status(raw)
+    assert resolved not in _KNOWN_STATUSES
+    warnings = _warning_messages(caplog)
+    assert len(warnings) == 1, warnings
+    # Named raw, or escaped (a look-alike letter may be shown as \u0435).
+    prefix = raw[:_MIN_NAMED_PREFIX]
+    named = (prefix, prefix.encode("unicode_escape").decode("ascii"))
+    assert any(form in warnings[0] for form in named), warnings[0]
+
+
+def test_corpus_status_warning_truncates_a_long_raw_value(caplog):
+    raw = "in_froce" + "z" * 10_000
+    with caplog.at_level(logging.WARNING):
+        assert normalise_corpus_status(raw) not in _KNOWN_STATUSES
+    warnings = _warning_messages(caplog)
+    assert len(warnings) == 1, warnings
+    assert raw[:_MIN_NAMED_PREFIX] in warnings[0]
+    assert raw not in warnings[0]
+    assert len(warnings[0]) < len(raw)
+
+
+def _hostile_message_characters() -> List[str]:
+    chars = [
+        chr(cp)
+        for cp in range(0x110000)
+        if not 0xD800 <= cp <= 0xDFFF and unicodedata.category(chr(cp)) in _HOSTILE_MESSAGE_CATEGORIES
+    ]
+    # Lone surrogates (Cs), sampled across the range.
+    chars.extend(chr(cp) for cp in range(0xD800, 0xE000, 0x40))
+    chars.append("\udfff")
+    return chars
+
+
+def test_corpus_status_warning_never_carries_raw_control_or_format_characters(caplog):
+    # F2 / CWE-117, generated (R2): every Cc, Cf, Zl, Zp code point and a
+    # sample of lone surrogates, embedded in an unknown status. The WARNING
+    # must exist, contain none of them raw, and encode as UTF-8, so a corpus
+    # value can't forge a log line, hide text or crash a log handler.
+    hostile = _hostile_message_characters()
+    leaked = []
+    with caplog.at_level(logging.WARNING):
+        for ch in hostile:
+            caplog.clear()
+            raw = f"junk{ch}status"
+            assert normalise_corpus_status(raw) not in _KNOWN_STATUSES
+            messages = _warning_messages(caplog)
+            if not messages:
+                leaked.append((ascii(ch), "no warning"))
+                continue
+            for message in messages:
+                bad = {c for c in message if unicodedata.category(c) in _HOSTILE_MESSAGE_CATEGORIES}
+                if bad:
+                    leaked.append((ascii(ch), sorted(ascii(c) for c in bad)))
+                message.encode("utf-8")
+    print(f"#176 hostile log vectors: {len(hostile)}")
+    assert not leaked, f"{len(leaked)} of {len(hostile)}: {leaked[:10]}"

@@ -42,6 +42,13 @@ Cases:
   (f2) same in_force chunk, NO floor configured -> authoritative False
   (f3) chunk with no Status line (null) + floor set -> authoritative False
   (f4) not_yet_in_force chunk + floor set -> authoritative False
+  (f5) "In Force" (case / separator variant) + floor -> authoritative True,
+       citation status exposed as the canonical value (#176)
+  (f6) "not in force" + floor -> authoritative False, never in_force (#176)
+  (f7) "in_froce" (typo) + floor -> authoritative True, canonical status, a
+       WARNING naming the raw value and the resolved status (#176)
+  (f8) "un-force" (one edit from in_force, but negated) + floor ->
+       authoritative False (#176)
   (g)  KB retrieve() returns a plain [] -> ungrounded
   (h)  LEGAL_KB_MIN_SCORE=-1 (and other out-of-range values) -> ValueError at
        settings load, so a misconfigured floor fails startup
@@ -63,10 +70,14 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from app.config import settings
+from app.schemas import AUTHORITATIVE_STATUSES
 from app.services import legal_kb as legal_kb_module
 from app.services.legal_kb import LegalKnowledgeBase
 from app.services.localai import LocalAIClient
 
+
+# The one authoritative status, from the schema (F13); #176 cases (f5)-(f8).
+_IN_FORCE = next(iter(AUTHORITATIVE_STATUSES))
 
 # Long enough to clear any paste-length gate; deliberately contains none of
 # the toy-embedding topic words, so the query embeds to the zero vector
@@ -451,6 +462,48 @@ def test_legal_grounding_analyze_f4_not_yet_in_force_not_authoritative(
 ):
     body = _grounded_with_status(app_client, kb_paths, "not_yet_in_force", -0.99, min_score)
     assert all(c.get("status") == "not_yet_in_force" for c in body["legal_context"])
+    _assert_not_authoritative(body)
+
+
+# ── (f5)-(f8) #176: variants and typos resolve; negation never does ─────────
+def test_legal_grounding_analyze_f5_in_force_variant_is_authoritative(
+    app_client, kb_paths, fresh_kb, captured_llm, min_score
+):
+    body = _grounded_with_status(app_client, kb_paths, "In Force", -0.99, min_score)
+    assert {c.get("status") for c in body["legal_context"]} == {_IN_FORCE}
+    assert body["legal_grounding_authoritative"] is True
+
+
+def test_legal_grounding_analyze_f6_negated_in_force_not_authoritative(
+    app_client, kb_paths, fresh_kb, captured_llm, min_score
+):
+    body = _grounded_with_status(app_client, kb_paths, "not in force", -0.99, min_score)
+    assert all(c.get("status") != _IN_FORCE for c in body["legal_context"])
+    _assert_not_authoritative(body)
+
+
+def test_legal_grounding_analyze_f7_in_force_typo_is_authoritative_and_logged(
+    app_client, kb_paths, fresh_kb, captured_llm, min_score, caplog
+):
+    caplog.set_level(logging.WARNING)
+    body = _grounded_with_status(app_client, kb_paths, "in_froce", -0.99, min_score)
+    assert {c.get("status") for c in body["legal_context"]} == {_IN_FORCE}
+    assert body["legal_grounding_authoritative"] is True
+    # No silent mapping: the typo and what it was read as are both named.
+    assert any(
+        "in_froce" in r.getMessage() and _IN_FORCE in r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING
+    ), [r.getMessage() for r in caplog.records]
+
+
+def test_legal_grounding_analyze_f8_negated_typo_neighbour_not_authoritative(
+    app_client, kb_paths, fresh_kb, captured_llm, min_score
+):
+    # "un_force" is one substitution from "in_force": the typo step must not
+    # cross from a negated value to an authoritative one.
+    body = _grounded_with_status(app_client, kb_paths, "un-force", -0.99, min_score)
+    assert all(c.get("status") != _IN_FORCE for c in body["legal_context"])
     _assert_not_authoritative(body)
 
 
