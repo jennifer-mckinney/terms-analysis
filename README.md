@@ -5,14 +5,16 @@ A privacy-focused tool for analyzing Terms of Service and Privacy Policies. Iden
 ## Features
 
 - **Multi-format input**: URLs, PDFs, DOCX, RTF, HTML, or pasted text
-- **Risk scoring**: severity-weighted average (0-10 scale) with letter grades; an Impact/Likelihood/Safeguards (IRP) methodology is a planned, not-yet-implemented enhancement
-- **Jurisdiction mapping**: US (CA, CO, CT, NY, Federal), EU/GDPR, UK, Canada, Australia, Brazil
+- **Risk scoring**: severity-weighted average (0-10 scale) with letter grades; every finding carries an Impact/Likelihood/Safeguards (IRP) score (see [Risk Scoring](#risk-scoring))
+- **Jurisdiction mapping**: 30 jurisdictions, including US (CA, CO, CT, NY, Federal), EU/GDPR, UK, Canada, Australia, Brazil
 - **Industry profiles**: Retail, Finance, Health, Gaming, Social, Education
 - **Watchlist monitoring**: Track policy changes over time
 - **Vendor comparison**: Side-by-side risk analysis
 - **Export options**: PDF reports, CSV, JSON
 
 ### Risk Categories
+
+This table is illustrative: the rule engine covers 50 categories, and the rows below are a sample of them.
 
 | Category | What it detects |
 |----------|-----------------|
@@ -97,6 +99,8 @@ terms-analysis/
 
 ## API Endpoints
 
+This is a partial list of the main endpoints; the full API documentation link is below the table.
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/analyze` | Analyze raw text |
@@ -116,9 +120,11 @@ Full API documentation available at `http://localhost:9000/docs` when running.
 
 | Level | IRP Score | Grade |
 |-------|-----------|-------|
-| High | >= 0.75 | D or F |
-| Medium | 0.45 - 0.74 | C |
-| Low | < 0.45 | A or B |
+| High | >= 0.75 | C or D+ |
+| Medium | >= 0.45 and < 0.75 | B, B-, C+, or C |
+| Low | < 0.45 | A, A-, or B |
+
+The average IRP score is scaled to 0-10 and rounded to two decimals before grading, so the edges overlap: a Medium average just under 0.75 can grade C, and a Low average just under 0.45 can grade B.
 
 ## Development
 
