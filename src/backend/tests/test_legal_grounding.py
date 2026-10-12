@@ -70,7 +70,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from app.config import settings
-from app.schemas import AUTHORITATIVE_STATUSES
+from app.schemas import AUTHORITATIVE_STATUSES, _canonical_status
 from app.services import legal_kb as legal_kb_module
 from app.services.legal_kb import LegalKnowledgeBase
 from app.services.localai import LocalAIClient
@@ -424,12 +424,19 @@ def test_legal_grounding_analyze_f_in_force_chunk_with_floor_is_authoritative(
     assert body["legal_grounding_authoritative"] is True
 
 
-def _grounded_with_status(app_client, kb_paths, status, floor, min_score):
-    """Build an index whose chunks carry ``status`` and POST; return the body."""
+def _grounded_with_status(app_client, kb_paths, status, floor, min_score, caplog=None):
+    """Build an index whose chunks carry ``status`` and POST; return the body.
+
+    With ``caplog``, records are cleared after the index build so the caller
+    sees only what the one POST /analyze request logged.
+    """
     corpus_dir, index_path, metadata_path = kb_paths
     _write_corpus(corpus_dir, status=status)
     _build_index(corpus_dir, index_path, metadata_path)
     min_score(floor)
+    if caplog is not None:
+        caplog.set_level(logging.WARNING)
+        caplog.clear()
     response = _post(app_client, text=_CONSENT_POLICY_TEXT)
     assert response.status_code == 200
     body = response.json()
@@ -466,6 +473,22 @@ def test_legal_grounding_analyze_f4_not_yet_in_force_not_authoritative(
 
 
 # ── (f5)-(f8) #176: variants and typos resolve; negation never does ─────────
+def _status_warnings(caplog, raw):
+    """WARNING records naming ``raw`` or its canonical form.
+
+    #176 review round 2: one request must warn once per distinct raw status,
+    however many places (citation, authority check, prompt header, response
+    re-validation) re-read it. The canonical form counts too, so a re-read of
+    an already-canonicalised value cannot hide a second warning.
+    """
+    forms = {raw, _canonical_status(raw)}
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and any(f in r.getMessage() for f in forms)
+    ]
+
+
 def test_legal_grounding_analyze_f5_in_force_variant_is_authoritative(
     app_client, kb_paths, fresh_kb, captured_llm, min_score
 ):
@@ -475,33 +498,36 @@ def test_legal_grounding_analyze_f5_in_force_variant_is_authoritative(
 
 
 def test_legal_grounding_analyze_f6_negated_in_force_not_authoritative(
-    app_client, kb_paths, fresh_kb, captured_llm, min_score
+    app_client, kb_paths, fresh_kb, captured_llm, min_score, caplog
 ):
-    body = _grounded_with_status(app_client, kb_paths, "not in force", -0.99, min_score)
+    raw = "not in force"
+    body = _grounded_with_status(app_client, kb_paths, raw, -0.99, min_score, caplog)
     assert all(c.get("status") != _IN_FORCE for c in body["legal_context"])
     _assert_not_authoritative(body)
+    # Unknown value: named once per request, not once per re-read.
+    assert len(_status_warnings(caplog, raw)) == 1, _status_warnings(caplog, raw)
 
 
 def test_legal_grounding_analyze_f7_in_force_typo_is_authoritative_and_logged(
     app_client, kb_paths, fresh_kb, captured_llm, min_score, caplog
 ):
-    caplog.set_level(logging.WARNING)
-    body = _grounded_with_status(app_client, kb_paths, "in_froce", -0.99, min_score)
+    raw = "in_froce"
+    body = _grounded_with_status(app_client, kb_paths, raw, -0.99, min_score, caplog)
     assert {c.get("status") for c in body["legal_context"]} == {_IN_FORCE}
     assert body["legal_grounding_authoritative"] is True
-    # No silent mapping: the typo and what it was read as are both named.
-    assert any(
-        "in_froce" in r.getMessage() and _IN_FORCE in r.getMessage()
-        for r in caplog.records
-        if r.levelno == logging.WARNING
-    ), [r.getMessage() for r in caplog.records]
+    # No silent mapping: the typo and what it was read as are both named, and
+    # exactly once for this request (review round 2: no 3-4x amplification).
+    named = _status_warnings(caplog, raw)
+    assert len(named) == 1, named
+    assert raw in named[0] and _IN_FORCE in named[0], named
 
 
 def test_legal_grounding_analyze_f8_negated_typo_neighbour_not_authoritative(
     app_client, kb_paths, fresh_kb, captured_llm, min_score
 ):
-    # "un_force" is one substitution from "in_force": the typo step must not
-    # cross from a negated value to an authoritative one.
+    # "un-force" canonicalises (separator collapse) to "un_force", which is one
+    # substitution from "in_force": the typo step must not cross from a
+    # negated value to an authoritative one.
     body = _grounded_with_status(app_client, kb_paths, "un-force", -0.99, min_score)
     assert all(c.get("status") != _IN_FORCE for c in body["legal_context"])
     _assert_not_authoritative(body)

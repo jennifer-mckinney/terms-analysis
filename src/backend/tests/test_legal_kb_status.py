@@ -1765,8 +1765,10 @@ _IN_FORCE = next(iter(AUTHORITATIVE_STATUSES))
 _KNOWN_STATUSES = (_IN_FORCE, NOT_YET_IN_FORCE_STATUS, PLACEHOLDER_STATUS)
 # Characters a canonical status is made of; the generated typos draw from it.
 _CANONICAL_ALPHABET = "".join(sorted(set("".join(_KNOWN_STATUSES)) | set("abcdefghijklmnopqrstuvwxyz")))
-# Card #176 negation tokens; "un" covers the un-prefixed "un force" family.
-_NEGATION_TOKENS = ("not", "no", "non", "never", "un", "repealed", "revoked", "expired", "superseded", "draft")
+# Card #176 negation tokens, read from the config the code uses (F13: never
+# restated here); "un" covers the un-prefixed "un force" family. Review round
+# 2 pins that an override can only add to the built-in tokens.
+_NEGATION_TOKENS = tuple(settings.corpus_status_negation_tokens)
 # Card #176 spec: a 1 MB value resolves in under 1 s (linear time).
 _LINEAR_TIME_BUDGET_S = 1.0
 _ONE_MB = 1_000_000
@@ -1867,7 +1869,7 @@ _STATUS_VARIANTS = [
     ("in__force", _IN_FORCE),
     ("In_Force\t", _IN_FORCE),  # green: outer whitespace is trimmed
     ("ｉｎ＿ｆｏｒｃｅ", _IN_FORCE),  # full-width "in_force"
-    ("ＩＮ　ＦＯＲＣＥ", _IN_FORCE),  # full-width "IN FORCE", ideographic space
+    ("ＩＮ\u3000ＦＯＲＣＥ", _IN_FORCE),  # full-width "IN FORCE", ideographic space
     ("Not Yet In Force", NOT_YET_IN_FORCE_STATUS),
     ("not-yet-in-force", NOT_YET_IN_FORCE_STATUS),
     ("NOT.YET.IN.FORCE", NOT_YET_IN_FORCE_STATUS),
@@ -1939,12 +1941,12 @@ _LOOKALIKE_OR_HOSTILE = [
     "in_forcе",  # Cyrillic ie
     "іn_force",  # Cyrillic i
     "in_fοrce",  # Greek omicron
-    "in​force",  # zero-width space
-    "in_force​",
-    "​in_force",
-    "in_force﻿",  # BOM
-    "‮in_force",  # RTL override
-    "in­force",  # soft hyphen
+    "in\u200bforce",  # zero-width space
+    "in_force\u200b",
+    "\u200bin_force",
+    "in_force\ufeff",  # BOM
+    "\u202ein_force",  # RTL override
+    "in\u00adforce",  # soft hyphen
     "in_force\U000e0041",  # tag character
     "in_force\x00",  # NUL
     "in\x00force",
@@ -1953,8 +1955,8 @@ _LOOKALIKE_OR_HOSTILE = [
     "in\nforce",
     "in\rforce",
     "in\x85force",  # NEL
-    "in force",  # line separator
-    "in force",  # paragraph separator
+    "in\u2028force",  # line separator
+    "in\u2029force",  # paragraph separator
     "in_force\ud800",  # lone surrogate
     "\udfffin_force",
 ]
@@ -2133,7 +2135,7 @@ _ONE_MB_VALUES = {
     "repeated_typo": ("in_froce" * (_ONE_MB // len("in_froce")), True),
     "negation_prefix": ("not_" * (_ONE_MB // 4) + _IN_FORCE, True),
     "nfkc_expanding": ("ﷺ" * (_ONE_MB // 3), True),  # one char -> 18 under NFKC
-    "zero_width": ("​" * (_ONE_MB // 3), True),
+    "zero_width": ("\u200b" * (_ONE_MB // 3), True),
     "surrogate_tail": ("a" * (_ONE_MB - 1) + "\ud800", True),
     # Outcome not pinned (collapses to "in_force" under rule 1): time only.
     "separator_run": ("in" + " -_." * (_ONE_MB // 4) + "force", False),
@@ -2231,3 +2233,250 @@ def test_corpus_status_warning_never_carries_raw_control_or_format_characters(ca
                 message.encode("utf-8")
     print(f"#176 hostile log vectors: {len(hostile)}")
     assert not leaked, f"{len(leaked)} of {len(hostile)}: {leaked[:10]}"
+
+
+# ---------------------------------------------------------------------------
+# #176 review round 2 (PR #354 threads UZ6X, Uk0c / UkZ1, Ul61 / UK1p).
+# ---------------------------------------------------------------------------
+
+from app import config as app_config  # noqa: E402 - grouped with the round-2 tests
+
+# Thread UZ6X: a raw invisible, bidi or line-separator character in this file
+# hides what a vector row tests (a Trojan-Source pattern a formatter can
+# silently strip). Every such row is written as an escape; ASCII space, tab
+# and newline are the only layout characters allowed raw.
+_RAW_SOURCE_FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Zs"})
+_RAW_SOURCE_ALLOWED_LAYOUT = frozenset(" \t\n")
+
+
+def _raw_invisible_characters(text: str) -> List[Tuple[int, str]]:
+    """(line, U+XXXX) of every raw control, format, separator or odd space."""
+    found = []
+    # split("\n"), not splitlines(): splitlines() would swallow U+2028 / NEL.
+    for line_no, line in enumerate(text.split("\n"), 1):
+        for ch in line:
+            if ch not in _RAW_SOURCE_ALLOWED_LAYOUT and unicodedata.category(ch) in _RAW_SOURCE_FORBIDDEN_CATEGORIES:
+                found.append((line_no, f"U+{ord(ch):04X}"))
+    return found
+
+
+def test_corpus_status_test_source_has_no_raw_invisible_characters():
+    # Positive control: the scanner flags each class (built from escapes).
+    for ch in ("\x1b", "\x7f", "\x85", "\u00a0", "\u00ad", "\u200b", "\u202e", "\u2028", "\u2029", "\u3000", "\ufeff", "\U000e0041"):
+        assert _raw_invisible_characters(f"x = 'a{ch}b'\n") == [(1, f"U+{ord(ch):04X}")], ascii(ch)
+    assert _raw_invisible_characters("plain\tascii, full-width \uff49\uff4e, Cyrillic \u0435\n") == []
+    # The file itself, read strictly as UTF-8 (an undecodable byte fails too).
+    source = Path(__file__).read_text(encoding="utf-8")
+    assert _raw_invisible_characters(source) == []
+
+
+# Threads Uk0c / UkZ1: one unknown or misspelled status must log exactly ONE
+# WARNING per distinct raw value per analysis request, through the whole
+# request: the analyzer's citations, the authoritative flag, the real prompt
+# build and the payload model. A canonical (or merely re-cased) value logs
+# nothing. Each direct normalise_corpus_status call still logs once (the
+# tests above), so this is not a process-wide cache: every request logs again.
+_OVERLONG_STATUS = "x" * (settings.corpus_status_max_chars + 1)
+_REQUEST_WARNING_ROWS = [
+    # (chunk statuses in retrieval order, expected status WARNINGs per request)
+    ([_IN_FORCE], 0),
+    ([NOT_YET_IN_FORCE_STATUS], 0),
+    ([PLACEHOLDER_STATUS], 0),
+    (["In Force"], 0),  # variant: mapped silently
+    ([None], 0),  # no status declared
+    (["in_froce"], 1),  # typo
+    (["in_froce", "in_froce", "in_froce"], 1),  # one distinct raw value
+    (["Not In Force"], 1),  # unknown; its canonical form differs from raw
+    (["verified"], 1),  # unknown; canonical form equals raw
+    (["un_force"], 1),  # negated distance-1 neighbour
+    (["in_forc\u0435"], 1),  # look-alike letter
+    ([_OVERLONG_STATUS], 1),  # past corpus_status_max_chars
+    ([3], 1),  # not text
+    (["in_froce", "verified", "in_froce", "verified", _IN_FORCE], 2),
+]
+
+
+def _analyze_through_real_prompt(monkeypatch, statuses: List[Any]) -> Tuple[AnalysisPayload, List[str]]:
+    """One analyze_text request with the real LocalAIClient.analyze and the
+    real build_user_prompt (the HTTP call is stubbed offline); returns the
+    payload and every prompt built."""
+    import httpx
+
+    from app.services import localai as localai_module
+
+    built: List[str] = []
+    real_build = localai_module.build_user_prompt
+
+    def _spy(**kwargs: Any) -> str:
+        out = real_build(**kwargs)
+        built.append(out)
+        return out
+
+    class _Offline:
+        def __init__(self, *a: Any, **k: Any) -> None:
+            raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr(localai_module, "build_user_prompt", _spy)
+    monkeypatch.setattr(httpx, "AsyncClient", _Offline)
+    chunks = [{**_CHUNKS[0], "status": st, "score": 0.5} for st in statuses]
+    kb = _StatusKB(RetrievalResult(chunks, status=RetrievalStatus.OK))
+    monkeypatch.setattr(analyzer_module, "get_legal_kb", lambda: kb)
+    payload = asyncio.run(analyzer_module.analyze_text("We sell your data.", ["GDPR"])).payload
+    return payload, built
+
+
+@pytest.mark.parametrize(
+    "statuses,expected",
+    _REQUEST_WARNING_ROWS,
+    ids=[ascii([str(s)[:12] for s in row]) for row, _ in _REQUEST_WARNING_ROWS],
+)
+def test_corpus_status_logs_one_warning_per_distinct_raw_value_per_analysis_request(
+    monkeypatch, min_score, caplog, statuses, expected
+):
+    # The relevance floor is on, so the authoritative flag reads every label.
+    min_score(0.3)
+    caplog.set_level(logging.WARNING)
+    # Baseline: the same request with a canonical status. Whatever else the
+    # offline LLM path logs is subtracted, so only status WARNINGs count.
+    _analyze_through_real_prompt(monkeypatch, [_IN_FORCE])
+    baseline = len(_warning_messages(caplog))
+    for request in range(2):  # every request logs again: no global cache
+        caplog.clear()
+        payload, built = _analyze_through_real_prompt(monkeypatch, statuses)
+        # The prompt was really built, once, with a passage per chunk.
+        assert len(built) == 1 and built[0].count("[GDPR Article 17 Right to erasure]") == len(statuses)
+        warnings = _warning_messages(caplog)
+        assert len(warnings) - baseline == expected, (request, warnings)
+        # Each distinct raw text value is named (escaped) in exactly one of them.
+        for raw in {s for s in statuses if isinstance(s, str)}:
+            if normalise_corpus_status(raw) == raw:
+                continue  # canonical: silent, checked by the count
+            named = raw[:_MIN_NAMED_PREFIX].encode("unicode_escape").decode("ascii")
+            hits = [m for m in warnings if named in m]
+            if expected:
+                assert len(hits) == 1, (raw, warnings)
+        # Dedup must not change the outcome: statuses stay canonical and
+        # labels stay on, so the flag is unchanged.
+        assert [c.status for c in payload.legal_context] == [normalise_corpus_status(s) for s in statuses]
+        assert payload.legal_grounding_authoritative is (
+            any(normalise_corpus_status(s) == _IN_FORCE for s in statuses)
+        )
+
+
+# Threads Ul61 / UK1p: an env override may only ADD negation tokens. The
+# built-in tokens are whatever the config yields with the variable unset (F13:
+# not restated here). Any override missing one of them fails at load; under
+# every override that loads, no negated value is ever in force.
+_NEGATION_ENV = app_config._ENV_NAMES["corpus_status_negation_tokens"]
+_EXTRA_TOKENS = ("zzz", "yyy")
+
+
+def _builtin_negation_tokens(monkeypatch) -> Tuple[str, ...]:
+    monkeypatch.delenv(_NEGATION_ENV, raising=False)
+    tokens = tuple(app_config.Settings().corpus_status_negation_tokens)
+    assert tokens, "the built-in negation tokens must not be empty"
+    return tokens
+
+
+def _dropping_overrides(builtin: Tuple[str, ...]) -> List[str]:
+    """Overrides that each lose at least one built-in token (generated)."""
+    overrides = {"not", "zzz", ",".join(_EXTRA_TOKENS)}
+    for tok in builtin:
+        rest = [t for t in builtin if t != tok]
+        overrides.add(tok)  # one token alone
+        if rest:
+            overrides.add(",".join(rest))  # all but one
+        overrides.add(",".join(rest + list(_EXTRA_TOKENS)))  # all but one, plus extras
+        overrides.add(",".join(rest + [tok.upper()]))  # case look-alike of the dropped one
+    return sorted(overrides)
+
+
+def _adding_overrides(builtin: Tuple[str, ...]) -> List[str]:
+    """Overrides that keep every built-in token and add others."""
+    return [
+        ",".join(builtin),
+        ",".join(builtin + _EXTRA_TOKENS),
+        ",".join(tuple(reversed(builtin)) + _EXTRA_TOKENS),
+        " , ".join(_EXTRA_TOKENS + builtin),
+    ]
+
+
+def _negated_in_force_vectors(tokens: Tuple[str, ...]) -> List[str]:
+    generated = {
+        value
+        for tok in tokens
+        for sep in (" ", "-", "_", ".", "")
+        for base in ("in force", "in_froce", "inforce")
+        for value in (f"{tok}{sep}{base}", f"{base}{sep}{tok}")
+    }
+    edits = {e for e in _distance_one_edits(_IN_FORCE) if _token_negated(_oracle_canonical(e))}
+    return sorted(set(_NEGATED_IN_FORCE) | generated | edits)
+
+
+def test_config_corpus_status_negation_override_missing_a_builtin_token_fails_startup(monkeypatch):
+    builtin = _builtin_negation_tokens(monkeypatch)
+    overrides = _dropping_overrides(builtin)
+    accepted = []
+    for raw in overrides:
+        monkeypatch.setenv(_NEGATION_ENV, raw)
+        try:
+            app_config.Settings()
+        except ValueError as exc:
+            assert _NEGATION_ENV in str(exc), str(exc)  # names the variable to fix
+        else:
+            accepted.append(raw)
+    print(f"#176 negation-override rejection vectors: {len(overrides)}")
+    assert not accepted, f"{len(accepted)} of {len(overrides)} overrides dropped a built-in token: {accepted[:10]}"
+
+
+def test_config_corpus_status_negation_override_dropping_a_token_fails_at_import():
+    # Wiring (F12): the real module-level settings refuse to load, exit 1.
+    env = {k: v for k, v in os.environ.items() if k != _NEGATION_ENV}
+    env[_NEGATION_ENV] = "not"
+    out = subprocess.run(
+        [sys.executable, "-c", "from app.config import settings"],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(Path(__file__).resolve().parents[1]),
+        timeout=60,
+    )
+    assert out.returncode == 1, out.stderr
+    assert _NEGATION_ENV in out.stderr
+
+
+def test_config_corpus_status_negation_override_may_add_tokens(monkeypatch):
+    # Positive control (green today): adding tokens is allowed and kept.
+    builtin = _builtin_negation_tokens(monkeypatch)
+    for raw in _adding_overrides(builtin):
+        monkeypatch.setenv(_NEGATION_ENV, raw)
+        tokens = set(app_config.Settings().corpus_status_negation_tokens)
+        assert tokens >= set(builtin), raw
+        assert tokens >= ({t.strip() for t in raw.split(",")} - set(builtin)), raw
+
+
+def test_corpus_status_no_accepted_negation_override_makes_a_negated_value_in_force(monkeypatch):
+    # Hard rule 3 under config: whatever override loads, un_force & co. never
+    # become in_force. Rejected overrides are fine (fail closed at load).
+    builtin = _builtin_negation_tokens(monkeypatch)
+    vectors = _negated_in_force_vectors(builtin)
+    candidates = _dropping_overrides(builtin) + _adding_overrides(builtin)
+    loaded = 0
+    crossed = []
+    for raw in candidates:
+        monkeypatch.setenv(_NEGATION_ENV, raw)
+        try:
+            candidate = app_config.Settings()
+        except ValueError:
+            continue
+        loaded += 1
+        monkeypatch.setattr(app_config, "settings", candidate)
+        for value in vectors:
+            if (
+                normalise_corpus_status(value) == _IN_FORCE
+                or passage_label_keys(value, "GDPR", ["GDPR"]) != _unknown_labels()
+            ):
+                crossed.append((raw, value))
+    print(f"#176 negation-override vectors: {len(candidates)} overrides x {len(vectors)} values, {loaded} loaded")
+    assert loaded >= len(_adding_overrides(builtin)), "the adding overrides must load"
+    assert not crossed, f"{len(crossed)} negated values in force, e.g. {crossed[:10]}"
