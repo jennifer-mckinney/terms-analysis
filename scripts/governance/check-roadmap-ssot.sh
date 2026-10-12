@@ -119,7 +119,6 @@ FENCE_OPEN_RE = re.compile(r" {0,3}(`{3,}|~{3,})")
 # A fence marker at any indent; which container it belongs to is decided by
 # its indent relative to the list content columns.
 FENCE_ANY_INDENT_RE = re.compile(r"[ \t]*(`{3,}|~{3,})")
-ATX_RE = re.compile(r" {0,3}(#{1,6})(?:[ \t]+(.*?))??(?:[ \t]+#+)?[ \t]*\Z")
 SETEXT_RE = re.compile(r" {0,3}(=+|-+)[ \t]*\Z")
 # CommonMark grammar, not a tunable: 4 columns of indent start an indented
 # code block, and tab stops are 4 columns apart.
@@ -312,6 +311,35 @@ def list_content_column(line: str, item: re.Match[str]) -> int:
     return marker_col + (gap if 1 <= gap <= CODE_INDENT else 1)
 
 
+def parse_atx(line: str) -> tuple[int, str] | None:
+    """Return an ATX heading's level and text with linear scans."""
+    marker_start = 0
+    while marker_start < min(3, len(line)) and line[marker_start] == " ":
+        marker_start += 1
+    marker_end = marker_start
+    while marker_end < len(line) and line[marker_end] == "#" and marker_end - marker_start < 7:
+        marker_end += 1
+    level = marker_end - marker_start
+    if not 1 <= level <= 6 or (marker_end < len(line) and line[marker_end] not in " \t"):
+        return None
+
+    text_start = marker_end
+    while text_start < len(line) and line[text_start] in " \t":
+        text_start += 1
+    text_end = len(line)
+    while text_end > text_start and line[text_end - 1] in " \t":
+        text_end -= 1
+
+    closing_start = text_end
+    while closing_start > marker_end and line[closing_start - 1] == "#":
+        closing_start -= 1
+    if closing_start < text_end and line[closing_start - 1] in " \t":
+        text_end = closing_start
+        while text_end > text_start and line[text_end - 1] in " \t":
+            text_end -= 1
+    return level, line[text_start:text_end]
+
+
 def fence_match(line: str, container_column: int) -> re.Match[str] | None:
     """Match a fence indented at most three columns from its container."""
     prefix_length = len(line) - len(line.lstrip(" \t"))
@@ -368,7 +396,7 @@ def content_lines(text: str) -> Iterator[tuple[int, str]]:
             continue
         indent = indent_columns(line)
         item = LIST_ITEM_RE.match(line)
-        heading = ATX_RE.match(line) is not None
+        heading = parse_atx(line) is not None
         # A paragraph line straight after another (no blank between) is a lazy
         # continuation and keeps its list open. Anything else closes the list
         # items it is not indented under.
@@ -435,9 +463,9 @@ def headings(text: str) -> Iterator[tuple[int, int, str]]:
     """(line number, level, text) for ATX and setext headings in content."""
     previous: str | None = None
     for number, line in content_lines(text):
-        atx = ATX_RE.match(line)
+        atx = parse_atx(line)
         if atx:
-            yield number, len(atx.group(1)), atx.group(2) or ""
+            yield number, atx[0], atx[1]
             previous = None
             continue
         setext = SETEXT_RE.match(line)
