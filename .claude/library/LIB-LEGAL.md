@@ -51,7 +51,7 @@ Approved by owner decision 2026-10-11 (#152), HR2b judged on licence per plan R1
 | Tool | License | Origin | Notes |
 |------|---------|--------|-------|
 | **onnxruntime** | MIT | Microsoft | Runs ONNX-exported models; no PyTorch needed at runtime |
-| sentence-transformers[onnx] | Apache 2.0 | UKP Lab (Germany) | Wraps onnxruntime with HuggingFace model support. Condition: requires torch (Requires-Dist `torch>=2.2`, v6.1.0); usable only after the torch ruling (LIB-STACK S5) is revisited; open owner card |
+| sentence-transformers[onnx] | Apache 2.0 | UKP Lab (Germany) | Wraps onnxruntime with HuggingFace model support. Condition: requires torch (Requires-Dist `torch>=2.2`, v6.1.0), which ADR 0006 allows only as this runtime dependency (pinned, CPU build, audited; #327) |
 
 ## vector-store
 
@@ -74,7 +74,7 @@ because: legal risk findings — approximate NN introduces false negatives = mis
 | Voyage Law 2 | Proprietary API-only; fails open-source + local-only |
 | Ollama GUI/Turbo | Unclear license (GUI), proprietary (Turbo) |
 | FAISS / faiss-cpu | Meta origin; fails no-Meta requirement |
-| torch / PyTorch | Meta origin (donated to Linux Foundation but Meta-created); rejected under LIB-STACK S5 until that ruling is revisited. ONNX-exported models run on onnxruntime without it |
+| torch / PyTorch | Meta origin (donated to Linux Foundation but Meta-created); rejected under LIB-STACK S5 except as the runtime dependency of sentence-transformers[onnx] under ADR 0006 (#327). ONNX-exported models run on onnxruntime without it |
 | BAAI/bge-m3 | Beijing Academy of AI — Chinese government-affiliated |
 | Qwen / Qwen3-* | Alibaba (Chinese company); fails no-Chinese-company requirement |
 | Any HNSW-based vector store | Approximate search; unacceptable for legal risk analysis |

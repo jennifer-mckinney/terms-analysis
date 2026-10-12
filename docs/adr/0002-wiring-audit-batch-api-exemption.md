@@ -3,6 +3,7 @@
 - **Status:** Accepted (the owner's merge of PR #268 is the acceptance; decision card #267, option a)
 - **Date:** 2026-10-09
 - **Decided by:** owner, by merging PR #268 (#267)
+- **Approved-by:** @jennifer-mckinney, 2026-10-09
 - **Governs:** `.claude/CLAUDE.md` hard requirements HR1 (open source only), HR2 (no investor-lawsuit vendors), HR3 (IRP Grade A or higher), HR4 (local-only data, no external API calls) and HR6 (no OpenAI, local-only LLM inference), as scoped by ADR 0001, plus their restatements in `.claude/library/LIB-PRINCIPLES.md` P5 and `.claude/library/LIB-STACK.md` S1
 - **Companion:** legal-corpus-ingester ADR-016 records the same decision for that repo's constraints C3, C4 and C7
 - **Supersedes:** nothing. ADR 0001 stays in force; its last consequence ("Other development-time tools are not exempted by this ADR. Each one needs its own decision.") is what this ADR answers for one tool.
