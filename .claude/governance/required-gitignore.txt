@@ -31,3 +31,4 @@ node_modules/
 *.db-journal
 *.db
 .claude/_governance-manifest.local.json
+docs/evidence/
