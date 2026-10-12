@@ -119,7 +119,6 @@ FENCE_OPEN_RE = re.compile(r" {0,3}(`{3,}|~{3,})")
 # A fence marker at any indent; which container it belongs to is decided by
 # its indent relative to the list content columns.
 FENCE_ANY_INDENT_RE = re.compile(r"[ \t]*(`{3,}|~{3,})")
-ATX_RE = re.compile(r" {0,3}(#{1,6})(?:[ \t]+(.*?))??(?:[ \t]+#+)?[ \t]*\Z")
 SETEXT_RE = re.compile(r" {0,3}(=+|-+)[ \t]*\Z")
 # CommonMark grammar, not a tunable: 4 columns of indent start an indented
 # code block, and tab stops are 4 columns apart.
@@ -312,6 +311,14 @@ def list_content_column(line: str, item: re.Match[str]) -> int:
     return marker_col + (gap if 1 <= gap <= CODE_INDENT else 1)
 
 
+def fence_info_ok(opener: re.Match[str] | None, line: str) -> bool:
+    """CommonMark: a backtick fence's info string may not contain a backtick
+    (otherwise the line is a paragraph with code spans); a tilde fence's may."""
+    if opener is None:
+        return False
+    return opener.group(1)[0] == "~" or "`" not in line[opener.end():]
+
+
 def fence_match(line: str, container_column: int) -> re.Match[str] | None:
     """Match a fence indented at most three columns from its container."""
     prefix_length = len(line) - len(line.lstrip(" \t"))
@@ -319,12 +326,34 @@ def fence_match(line: str, container_column: int) -> re.Match[str] | None:
     if indent < container_column or indent - container_column > 3:
         return None
     relative_line = " " * (indent - container_column) + line[prefix_length:]
-    return FENCE_OPEN_RE.match(relative_line)
+    opener = FENCE_OPEN_RE.match(relative_line)
+    return opener if fence_info_ok(opener, relative_line) else None
 
 
-def content_lines(text: str) -> Iterator[tuple[int, str]]:
-    """Lines that markdown renders as content: not in fences, HTML comments or
-    indented code blocks.
+def parse_atx(line: str) -> tuple[int, str] | None:
+    """(level, text) of an ATX heading line, or None. Linear (#337): up to
+    three spaces, 1-6 '#', then whitespace or the end; the text loses its
+    surrounding whitespace, then a closing '#' run, but only when whitespace
+    precedes that run (or the run is all the text), then whitespace again."""
+    stripped = line.lstrip(" ")
+    if len(line) - len(stripped) > 3:
+        return None
+    level = len(stripped) - len(stripped.lstrip("#"))
+    rest = stripped[level:]
+    if not 1 <= level <= 6 or (rest and rest[0] not in " \t"):
+        return None
+    text = rest.strip(" \t")
+    body = text.rstrip("#")
+    if not body:
+        return level, ""
+    if len(body) < len(text) and body[-1] in " \t":
+        text = body.rstrip(" \t")
+    return level, text
+
+
+def content_lines(text: str) -> Iterator[tuple[int, str, bool]]:
+    """(line number, line, is a list item) for lines that markdown renders as
+    content: not in fences, HTML comments or indented code blocks.
 
     An indented code block is a non-blank line indented CODE_INDENT columns
     past the content column of the enclosing list item (or past the margin
@@ -364,18 +393,30 @@ def content_lines(text: str) -> Iterator[tuple[int, str]]:
             continue
         if not line.strip(" \t"):
             may_start_code = previous_blank = True
-            yield number, line
+            yield number, line, False
             continue
         indent = indent_columns(line)
         item = LIST_ITEM_RE.match(line)
-        heading = ATX_RE.match(line) is not None
+        heading = parse_atx(line) is not None
+        if item and indent >= (list_cols[-1] if list_cols else 0) + CODE_INDENT:
+            # A list marker 4+ columns past the container cannot start an
+            # item. Straight after paragraph text the line is a lazy
+            # continuation of that paragraph (not a task, not code); after a
+            # blank line it is indented code and is skipped below.
+            item = None
         # A paragraph line straight after another (no blank between) is a lazy
         # continuation and keeps its list open. Anything else closes the list
         # items it is not indented under.
         container_column = list_cols[-1] if list_cols else 0
         # A fence opener interrupts a paragraph at any container depth, so
         # it closes the list items it is not indented under.
-        if previous_blank or item_ended or item or heading or FENCE_ANY_INDENT_RE.match(line):
+        if (
+            previous_blank
+            or item_ended
+            or item
+            or heading
+            or fence_info_ok(FENCE_ANY_INDENT_RE.match(line), line)
+        ):
             while list_cols and indent < list_cols[-1]:
                 list_cols.pop()
             container_column = list_cols[-1] if list_cols else 0
@@ -398,7 +439,7 @@ def content_lines(text: str) -> Iterator[tuple[int, str]]:
             if "-->" not in line[comment.end():]:
                 in_comment = True
             continue
-        yield number, line
+        yield number, line, item is not None
 
 
 def blank_code_spans(line: str) -> str:
@@ -434,10 +475,10 @@ def blank_code_spans(line: str) -> str:
 def headings(text: str) -> Iterator[tuple[int, int, str]]:
     """(line number, level, text) for ATX and setext headings in content."""
     previous: str | None = None
-    for number, line in content_lines(text):
-        atx = ATX_RE.match(line)
+    for number, line, _ in content_lines(text):
+        atx = parse_atx(line)
         if atx:
-            yield number, len(atx.group(1)), atx.group(2) or ""
+            yield number, atx[0], atx[1]
             previous = None
             continue
         setext = SETEXT_RE.match(line)
@@ -570,7 +611,7 @@ def main(argv: list[str]) -> int:
         link_re = re.compile(
             r"(?<![!\\])\[[^\[\]]*\]\((?:\./)?" + re.escape(link_target) + r"(?:[ \t]+\"[^\"]*\")?\)"
         )
-        if not any(link_re.search(blank_code_spans(line)) for _, line in content_lines(todo_text)):
+        if not any(link_re.search(blank_code_spans(line)) for _, line, _ in content_lines(todo_text)):
             violations.append((
                 "todo-roadmap-link",
                 f"{todo_rel} has no markdown link to {link_target}. Add [roadmap]({link_target}), "
@@ -603,10 +644,10 @@ def main(argv: list[str]) -> int:
                 if number > start and lvl <= level:
                     end = number
                     break
-            for number, line in content_lines(brd_text):
+            for number, line, is_item in content_lines(brd_text):
                 if number <= start or (end is not None and number >= end):
                     continue
-                task = TASK_RE.match(line)
+                task = TASK_RE.match(line) if is_item else None
                 if task:
                     if task.group(1) == " ":
                         unchecked += 1
