@@ -490,6 +490,21 @@ VECTORS: tuple[Vector, ...] = (
            lambda b: make_tree(b, todo=sprint_todo(link=f"~~~\n[Roadmap]({LINK_TARGET})\n~~~"))),
     Vector("link only inside an indented code block", "todo-roadmap-link", False,
            lambda b: make_tree(b, todo=sprint_todo(link=f"Example:\n\n    [Roadmap]({LINK_TARGET})\n"))),
+    # PR #331 round 2 (CommonMark oracle): a fence inside a list item may be
+    # indented 0-3 columns past the item's content column, not past the margin.
+    Vector("link only inside a fence nested in a list item", "todo-roadmap-link", False,
+           lambda b: make_tree(b, todo=sprint_todo(link=f"- item\n\n    ```\n    [Roadmap]({LINK_TARGET})\n    ```"))),
+    Vector("link only inside a tab-indented fence in an ordered item", "todo-roadmap-link", False,
+           lambda b: make_tree(b, todo=sprint_todo(link=f"1. item\n\n\t```\n\t[Roadmap]({LINK_TARGET})\n\t```"))),
+    Vector("link in the list item after its nested fence closes", "todo-roadmap-link", True,
+           lambda b: make_tree(b, todo=sprint_todo(
+               link=f"- item\n\n    ```\n    code\n    ```\n\n  [Roadmap]({LINK_TARGET})"))),
+    Vector("link on an indented paragraph continuation line", "todo-roadmap-link", True,
+           lambda b: make_tree(b, todo=sprint_todo(link=f"See the\n    [Roadmap]({LINK_TARGET})"))),
+    Vector("unclosed '``' before a code span that holds the link", "todo-roadmap-link", False,
+           lambda b: make_tree(b, todo=sprint_todo(link=f"``x `[Roadmap]({LINK_TARGET})`"))),
+    Vector("unclosed backtick before a real link is literal text", "todo-roadmap-link", True,
+           lambda b: make_tree(b, todo=sprint_todo(link=f"Run `make then read [Roadmap]({LINK_TARGET})."))),
     # brd-file
     Vector("brd regular file", "brd-file", True, lambda b: make_tree(b)),
     Vector("brd symlink", "brd-file", False, _symlinked_brd),
@@ -564,6 +579,65 @@ VECTORS: tuple[Vector, ...] = (
            lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0,
                                               inside="#" * (HEADING_LEVEL + 1) + " Examples\n\n"
                                               + "    1. [x] example\n" * MIN_CHECKED))),
+    # PR #331 round 2 (CommonMark oracle): fences nested in list items. A fence
+    # opener or closer is indented 0-3 columns past the enclosing item's
+    # content column; 4 or more is indented code. A line that leaves the item
+    # (less indented, not blank) ends the item and the fence inside it.
+    Vector("checked boxes in a fence nested in a bullet item", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "- item\n\n    ```\n" + "    - [x] fake\n" * MIN_CHECKED + "    ```")))),
+    Vector("checked boxes in a fence nested in a '1.' item", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "1. item\n\n    ```\n" + "    - [x] fake\n" * MIN_CHECKED + "    ```")))),
+    Vector("checked boxes in a fence at the content column of a '10.' item", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "10. item\n\n    ```\n" + "    - [x] fake\n" * MIN_CHECKED + "    ```")))),
+    Vector("checked boxes in a fence 5 spaces into a '1.' item", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "1. item\n\n     ```\n" + "     - [x] fake\n" * MIN_CHECKED + "     ```")))),
+    Vector("checked boxes in a tab-indented fence in a list item", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "- item\n\n\t```\n" + "\t- [x] fake\n" * MIN_CHECKED + "\t```")))),
+    Vector("checked boxes in a tilde fence nested in a list item", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "- item\n\n    ~~~\n" + "    - [x] fake\n" * MIN_CHECKED + "    ~~~")))),
+    Vector("checked boxes in a fence nested two list levels deep", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "- a\n  - b\n\n      ```\n" + "      - [x] fake\n" * MIN_CHECKED + "      ```")))),
+    Vector("checked boxes in a nested fence that interrupts the item text", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "- item\n    ```\n" + "    - [x] fake\n" * MIN_CHECKED + "    ```")))),
+    Vector("checked boxes in a list-nested fence, CRLF file", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "- item\n\n    ```\n" + "    - [x] fake\n" * MIN_CHECKED + "    ```")).replace("\n", "\r\n"))),
+    Vector("closer 4 columns past the content column does not close the fence", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "- item\n\n    ```\n      ```\n" + "    - [x] fake\n" * MIN_CHECKED + "    ```")))),
+    Vector("column-0 fence after a nested fence opens a new fence", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "- item\n\n    ```\n    x\n```\n" + "- [x] fake\n" * MIN_CHECKED + "```")))),
+    Vector("fence 4 columns past the content column is indented code", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "- item\n\n      ```\n" + "      - [x] fake\n" * MIN_CHECKED + "      ```")))),
+    Vector("real task after a list-nested fence closes", "brd-roadmap-checked", True,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "- item\n\n    ```\n    - [ ] fake\n    ```\n" + "- [x] real\n" * MIN_CHECKED)))),
+    Vector("leaving the list item ends its unclosed fence", "brd-roadmap-checked", True,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "- item\n\n    ```\n    code\n\n" + "- [x] real\n" * MIN_CHECKED)))),
+    Vector("nested task after a closed fence in the same item", "brd-roadmap-checked", True,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "- item\n\n    ```\n    code\n    ```\n\n" + "    - [x] real\n" * MIN_CHECKED)))),
+    # PR #331 round 2: mutation killers from the coder's mutation run.
+    Vector("nested task after a lazy continuation line", "brd-roadmap-checked", True,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "- parent\nlazy continuation\n\n" + "    - [x] child\n" * MIN_CHECKED)))),
+    Vector("4-space task straight after a closing fence is code", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "```\ncode\n```\n" + "    - [x] x\n" * MIN_CHECKED)))),
+    Vector("wide item (5 spaces after the marker): 6-space child is code", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "-     wide item\n\n" + "      - [x] x\n" * MIN_CHECKED)))),
     # stray-todo-reference
     Vector("no references", "stray-todo-reference", True, lambda b: make_tree(b)),
     Vector("references to a valid sprint list", "stray-todo-reference", True,
