@@ -1819,11 +1819,17 @@ def test_tracked_evidence_corpus_is_clean() -> None:
     # N5 (QUALITY-BAR R2 benign corpus): every TRACKED evidence blob and every
     # tracked evidence path name scans CLEAN through the CLI. Unlike the tree
     # scan (find), untracked local files cannot make this red or green.
+    # #367 untracks docs/evidence/, so the corpus also takes every tracked
+    # Markdown doc under docs/ (where evidence summaries are published); the
+    # CI test job checks out depth 1, so old evidence blobs are not available.
     listing = subprocess.run(
-        ["git", "ls-files", "-z", "--", "docs/evidence/"], cwd=_REPO_ROOT, capture_output=True, check=True
+        ["git", "ls-files", "-z", "--", "docs/evidence/", ":(glob)docs/**/*.md"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        check=True,
     ).stdout
     paths = [p.decode() for p in listing.split(b"\0") if p]
-    assert paths, "no tracked evidence files: the corpus check would attest nothing"
+    assert any(not p.startswith("docs/evidence/") for p in paths), "no tracked docs: the corpus would attest nothing"
     leaking = []
     for rel in paths:
         blob = subprocess.run(["git", "show", f":{rel}"], cwd=_REPO_ROOT, capture_output=True, check=True).stdout
