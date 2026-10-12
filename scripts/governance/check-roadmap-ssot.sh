@@ -118,6 +118,12 @@ LINE_SPLIT_RE = re.compile(r"\r\n|\r|\n")
 FENCE_OPEN_RE = re.compile(r" {0,3}(`{3,}|~{3,})")
 ATX_RE = re.compile(r" {0,3}(#{1,6})(?:[ \t]+(.*?))??(?:[ \t]+#+)?[ \t]*\Z")
 SETEXT_RE = re.compile(r" {0,3}(=+|-+)[ \t]*\Z")
+# CommonMark grammar, not a tunable: 4 columns of indent start an indented
+# code block, and tab stops are 4 columns apart.
+CODE_INDENT = 4
+# A run of backticks; a code span is a run closed by the next run of the same
+# length on the line.
+BACKTICK_RUN_RE = re.compile(r"`+")
 LIST_ITEM_RE = re.compile(r"[ \t]*(?:[-*+]|[0-9]{1,9}[.)])[ \t]")
 TASK_RE = re.compile(r"[ \t]*(?:[-*+]|[0-9]{1,9}[.)])[ \t]+\[([ xX])\](?:[ \t]|\Z)")
 DATE = r"([0-9]{4})-([0-9]{2})-([0-9]{2})"
@@ -278,20 +284,79 @@ def read_doc(root: str, rel: str, cap: int) -> tuple[str | None, str | None]:
         return None, "is not valid UTF-8"
 
 
+def indent_columns(line: str) -> int:
+    """Width of the leading spaces and tabs, with CommonMark tab stops."""
+    col = 0
+    for c in line:
+        if c == "\t":
+            col += CODE_INDENT - col % CODE_INDENT
+        elif c == " ":
+            col += 1
+        else:
+            break
+    return col
+
+
+def list_content_column(line: str, item: re.Match[str]) -> int:
+    """Column where a list item's content starts. CommonMark: 1 to 4 columns
+    of space after the marker; 5 or more means content starts 1 column after
+    it (the rest is an indented code block inside the item)."""
+    marker_end = item.end() - 1  # LIST_ITEM_RE ends with one space or tab
+    marker_col = indent_columns(line) + len(line[:marker_end].lstrip(" \t"))
+    rest = line[marker_end:]
+    # Measure the gap from the marker's column so tab stops land correctly.
+    gap = indent_columns(" " * marker_col + rest) - marker_col
+    return marker_col + (gap if 1 <= gap <= CODE_INDENT else 1)
+
+
 def content_lines(text: str) -> Iterator[tuple[int, str]]:
-    """Lines that markdown renders as content: not in fences or HTML comments."""
+    """Lines that markdown renders as content: not in fences, HTML comments or
+    indented code blocks.
+
+    An indented code block is a non-blank line indented CODE_INDENT columns
+    past the content column of the enclosing list item (or past the margin
+    outside a list) that cannot continue a paragraph. A line nested under a
+    list item is list content, not code, so nested tasks still count.
+    """
     fence: str | None = None
     in_comment = False
+    list_cols: list[int] = []  # content columns of the open list items
+    may_start_code = True  # the previous line was blank, a heading or a block end
+    previous_blank = True
     for number, line in enumerate(LINE_SPLIT_RE.split(text), 1):
         if fence is not None:
             close = re.fullmatch(r" {0,3}(`{3,}|~{3,})[ \t]*", line)
             if close and close.group(1)[0] == fence[0] and len(close.group(1)) >= len(fence):
                 fence = None
+                may_start_code, previous_blank = True, False
             continue
         if in_comment:
             if "-->" in line:
                 in_comment = False
+                may_start_code, previous_blank = True, False
             continue
+        if not line.strip(" \t"):
+            may_start_code = previous_blank = True
+            yield number, line
+            continue
+        indent = indent_columns(line)
+        item = LIST_ITEM_RE.match(line)
+        heading = ATX_RE.match(line) is not None
+        # A paragraph line straight after another (no blank between) is a lazy
+        # continuation and keeps its list open. Anything else closes the list
+        # items it is not indented under.
+        if previous_blank or item or heading or FENCE_OPEN_RE.match(line):
+            while list_cols and indent < list_cols[-1]:
+                list_cols.pop()
+        floor = (list_cols[-1] if list_cols else 0) + CODE_INDENT
+        previous_blank = False
+        # may_start_code stays set through the block, so following lines
+        # indented as far are code too, until a line indented less.
+        if may_start_code and indent >= floor:
+            continue
+        if item:
+            list_cols.append(list_content_column(line, item))
+        may_start_code = heading
         opened = FENCE_OPEN_RE.match(line)
         if opened:
             fence = opened.group(1)
@@ -302,6 +367,36 @@ def content_lines(text: str) -> Iterator[tuple[int, str]]:
                 in_comment = True
             continue
         yield number, line
+
+
+def blank_code_spans(line: str) -> str:
+    """The line with every inline code span replaced by spaces, so nothing
+    inside backticks reads as markdown. Linear: each backtick run is visited
+    once, and each run length keeps a forward-only pointer to its next run."""
+    runs = [m.span() for m in BACKTICK_RUN_RE.finditer(line)]
+    by_length: dict[int, list[int]] = {}
+    for index, (start, end) in enumerate(runs):
+        by_length.setdefault(end - start, []).append(index)
+    pointer = dict.fromkeys(by_length, 0)
+    out: list[str] = []
+    pos = index = 0
+    while index < len(runs):
+        start, end = runs[index]
+        same = by_length[end - start]
+        p = pointer[end - start]
+        while p < len(same) and same[p] <= index:
+            p += 1
+        pointer[end - start] = p
+        if p == len(same):
+            index += 1  # no closer: the backticks are literal text
+            continue
+        close = same[p]
+        out.append(line[pos:start])
+        out.append(" " * (runs[close][1] - start))
+        pos = runs[close][1]
+        index = close + 1
+    out.append(line[pos:])
+    return "".join(out)
 
 
 def headings(text: str) -> Iterator[tuple[int, int, str]]:
@@ -438,10 +533,12 @@ def main(argv: list[str]) -> int:
                 f"'# {cfg['sprint_keyword']} YYYY-MM-DD to YYYY-MM-DD' (plain text, real dates, start <= end).",
             ))
             todo_state = "invalid"
+        # A real inline link: '[text](target)' with no '!' (an image) or backslash
+        # (an escaped bracket) before the '[', outside code spans.
         link_re = re.compile(
-            r"\]\((?:\./)?" + re.escape(link_target) + r"(?:[ \t]+\"[^\"]*\")?\)"
+            r"(?<![!\\])\[[^\[\]]*\]\((?:\./)?" + re.escape(link_target) + r"(?:[ \t]+\"[^\"]*\")?\)"
         )
-        if not any(link_re.search(line) for _, line in content_lines(todo_text)):
+        if not any(link_re.search(blank_code_spans(line)) for _, line in content_lines(todo_text)):
             violations.append((
                 "todo-roadmap-link",
                 f"{todo_rel} has no markdown link to {link_target}. Add [roadmap]({link_target}), "
