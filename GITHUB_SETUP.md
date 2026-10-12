@@ -145,13 +145,10 @@ The `/archive/` folder contains 19 legacy files. Options:
 
 Current recommendation: **Keep in repo** for historical reference.
 
-## License Consideration
+## License
 
-Before making the repository public, add a LICENSE file. Common options:
-- MIT License (permissive)
-- Apache 2.0 (permissive with patent grant)
-- GPL v3 (copyleft)
-- Proprietary/All Rights Reserved
+The project is licensed under Apache-2.0 (#333). The licence text is in
+`LICENSE` and the attribution notice is in `NOTICE`, both at the repository root.
 
 ## Contributing Guidelines
 

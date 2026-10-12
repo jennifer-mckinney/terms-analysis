@@ -3,45 +3,47 @@ loads: on-trigger
 scope: project
 xref: [[LIB-ARCH]] [[LIB-RULES]] [[LIB-CONTEXT]] [[.claude/rules/testing.md#R2]]
 
-status (2026-07-31): endpoint map = 25 business routes + `/health` = 26 total, verified against `main.py` `@app.*` decorators (grep count = 26). `/infer` added per SO8.
+status (2026-10-12): endpoint map = 26 business routes + `/health` = 27 total, verified against the `@app.*` decorators in `main.py` (grep count = 30, minus the three key-protected docs routes `/openapi.json`, `/docs` and `/redoc`, which are not listed). `/infer` added per SO8.
 
 ## endpoint-map
 
 | Method | Path | Auth | Request | Response | Notes |
 |--------|------|------|---------|----------|-------|
-| GET | `/health` | None | — | `{status, model_world, model_eu, review_threshold}` | Health check |
-| POST | `/infer` | None | `InferRequest` (JSON: `url?`, `text?`) | `InferResponse` (jurisdictions, doc_type, industry hints) | TLD/text signals; `@lru_cache` on hot paths; see SO8 |
-| POST | `/analyze` | None | `AnalyzeRequest` (JSON) | `AnalysisPayload` | Text analysis |
-| POST | `/analyze/url` | None | `AnalyzeUrlRequest` (JSON) | `AnalysisPayload` | URL fetch + analysis |
-| POST | `/analyze/file` | None | multipart: `file`, `name?`, `doc_type?`, `jurisdictions?` | `AnalysisPayload` | File upload |
-| POST | `/analyze/batch` | None | `AnalyzeBatchRequest` | `dict` (per-item) | Batch of URLs/files |
-| GET | `/analyses` | None | query: `skip`, `limit` | `List[AnalysisSummary]` | Paginated list |
-| GET | `/rubric` | None | — | `RubricScores \| None` | Computed from all analyses |
-| GET | `/analyses/{id}` | None | path: `id` | `AnalysisPayload` | 404 if missing |
-| GET | `/exports/analyses.csv` | None | — | CSV download | |
-| GET | `/exports/analysis/{id}.pdf` | None | path: `id` | PDF download | Requires reportlab; route registered BEFORE JSON export below so not shadowed |
-| GET | `/exports/analysis/{id}` | None | path: `id` | JSON download | |
-| GET | `/reviews` | None | — | `List[ReviewItemPayload]` | Pending reviews |
-| POST | `/reviews/{id}` | None | `ReviewUpdate` | `ReviewItemPayload` | Approve/reject |
-| GET | `/watchlist` | None | — | `List[WatchlistItemPayload]` | All items |
-| POST | `/watchlist` | None | `WatchlistCreateRequest` | `WatchlistItemPayload` | Add vendor |
-| DELETE | `/watchlist/{id}` | None | path: `id` | `{detail}` | Remove vendor |
-| POST | `/watchlist/{id}/refresh` | None | path: `id` | `WatchlistItemPayload` | Re-fetch + diff |
-| GET | `/snapshots` | None | — | `List[PolicySnapshotListItem]` | Lightweight (no `raw_text`) |
-| GET | `/snapshots/detail/{id}` | None | path: `id` | `PolicySnapshotPayload` | Full incl. `raw_text` |
-| POST | `/snapshots` | None | body: `{url}` | `PolicySnapshotPayload` | Fetch + hash + store |
-| GET | `/diff/{id1}/{id2}` | None | path: two snapshot ids | `DiffResult` | Token-level diff |
-| POST | `/policy-watch` | None | `PolicyWatchCreateRequest` | `PolicyWatchPayload` | Register watch |
-| GET | `/policy-watch` | None | — | `List[PolicyWatchPayload]` | All watches |
-| DELETE | `/policy-watch/{id}` | None | path: `id` | `{detail}` | Remove watch |
-| POST | `/policy-watch/{id}/snapshot` | None | path: `id` | `PolicySnapshotPayload` | Manually trigger snapshot |
+| GET | `/health` | None (own rate limit) | — | `{status, model_world, model_eu, review_threshold}` | Health check |
+| POST | `/infer` | API key | `InferRequest` (JSON: `url?`, `text?`) | `InferResponse` (jurisdictions, doc_type, industry hints) | TLD/text signals; `@lru_cache` on hot paths; see SO8 |
+| POST | `/analyze` | API key + analysis admission | `AnalyzeRequest` (JSON) | `AnalysisPayload` | Text analysis |
+| POST | `/analyze/url` | API key + analysis admission | `AnalyzeUrlRequest` (JSON) | `AnalysisPayload` | URL fetch + analysis |
+| POST | `/analyze/file` | API key + analysis admission | multipart: `file`, `name?`, `doc_type?`, `jurisdictions?` | `AnalysisPayload` | File upload |
+| POST | `/analyze/batch` | API key + batch admission | `AnalyzeBatchRequest` | `dict` (per-item) | Batch of URLs/files |
+| GET | `/analyses` | API key | query: `skip`, `limit` | `List[AnalysisSummary]` | Paginated list |
+| GET | `/rubric` | API key | — | `RubricScores \| None` | Computed from all analyses |
+| GET | `/analyses/{id}` | API key | path: `id` | `AnalysisPayload` | 404 if missing |
+| GET | `/exports/analyses.csv` | API key | — | CSV download | |
+| GET | `/exports/analysis/{id}.pdf` | API key | path: `id` | PDF download | Requires reportlab; route registered BEFORE both JSON routes below so not shadowed |
+| GET | `/exports/analysis/{id}.json` | API key | path: `id` | JSON attachment: stored analysis + `schema_version`, indent 2 | PRD F5.2 path (#36); registered BEFORE the alias below |
+| GET | `/exports/analysis/{id}` | API key | path: `id` | JSON attachment (as `.json`) | Alias of `.json`: same handler, byte-identical response |
+| GET | `/reviews` | API key | — | `List[ReviewItemPayload]` | Pending reviews |
+| POST | `/reviews/{id}` | API key | `ReviewUpdate` | `ReviewItemPayload` | Approve/reject |
+| GET | `/watchlist` | API key | — | `List[WatchlistItemPayload]` | All items |
+| POST | `/watchlist` | API key | `WatchlistCreateRequest` | `WatchlistItemPayload` | Add vendor |
+| DELETE | `/watchlist/{id}` | API key | path: `id` | `{detail}` | Remove vendor |
+| POST | `/watchlist/{id}/refresh` | API key | path: `id` | `WatchlistItemPayload` | Re-fetch + diff |
+| GET | `/snapshots` | API key | — | `List[PolicySnapshotListItem]` | Lightweight (no `raw_text`) |
+| GET | `/snapshots/detail/{id}` | API key | path: `id` | `PolicySnapshotPayload` | Full incl. `raw_text` |
+| POST | `/snapshots` | API key | body: `{url}` | `PolicySnapshotPayload` | Fetch + hash + store |
+| GET | `/diff/{id1}/{id2}` | API key | path: two snapshot ids | `DiffResult` | Token-level diff |
+| POST | `/policy-watch` | API key | `PolicyWatchCreateRequest` | `PolicyWatchPayload` | Register watch |
+| GET | `/policy-watch` | API key | — | `List[PolicyWatchPayload]` | All watches |
+| DELETE | `/policy-watch/{id}` | API key | path: `id` | `{detail}` | Remove watch |
+| POST | `/policy-watch/{id}/snapshot` | API key | path: `id` | `PolicySnapshotPayload` | Manually trigger snapshot |
 
-### API1: no-auth-currently
-rule: no route requires authentication; there is no API-key or session auth layer in the shipped backend
+### API1: api-key-auth
+rule: since #133 every route runs the global `security.enforce_access` dependency: a pre-auth rate limit by peer, then the `X-API-Key` check (401 on a missing or wrong key). `/health` has its own limit and needs no key. With `DEPLOY_ENV=local`, an empty key and a loopback bind, loopback peers without a forwarding header are served without a key. In the Auth column, "API key" means this global check; "analysis admission" / "batch admission" add the per-client and per-key limits and the concurrency cap (`security.analysis_admission` / `security.batch_admission`)
 
-### API2: pdf-route-ordering
-rule: `/exports/analysis/{id}.pdf` MUST be registered BEFORE `/exports/analysis/{id}` in `main.py`
-because: FastAPI would otherwise shadow the PDF route with the JSON route
+### API2: export-route-ordering
+rule: in `main.py` the export routes register in this order: `/exports/analysis/{id}.pdf`, then `/exports/analysis/{id}.json`, then the alias `/exports/analysis/{id}`
+because: Starlette matches routes in registration order and `{id}` is greedy, so the alias registered earlier would capture `<id>.pdf` or `<id>.json` as a literal ID and 404
+body (PRD F5.2, #36): both JSON routes share one handler. It returns the stored analysis plus one top-level `schema_version` (`schemas.EXPORT_SCHEMA_VERSION`), as `json.dumps(indent=2)` UTF-8 with `Content-Type: application/json` and `Content-Disposition: attachment; filename="analysis-<id>.json"`. Any character in the ID outside `A-Z a-z 0-9 . _ -` becomes `_` in the filename. Errors (404, 401, 429) stay compact JSON with no Content-Disposition
 
 ### API3: cross-endpoint-field-parity
 rule: a field validated on `/analyze` MUST be validated identically on `/analyze/url`, `/analyze/file`, `/analyze/batch`

@@ -125,4 +125,4 @@ Historical versions and duplicates (22 files):
 - [ ] Deployment guide
 - [ ] Contributing guidelines
 - [ ] Code of conduct
-- [ ] License selection
+- [x] License selection

@@ -330,6 +330,37 @@ class AnalyzeUrlRequest(InboundModel):
         return v
 
 
+# #36 / PRD F5.2: the JSON export format (``/exports/analysis/{id}.json`` and
+# its alias). One owner for the format: the handler calls the two functions
+# below and restates none of these values. Bump the version when the exported
+# shape changes incompatibly.
+EXPORT_SCHEMA_VERSION = "1.0"
+EXPORT_SCHEMA_KEY = "schema_version"
+EXPORT_JSON_INDENT = 2
+# Allowlist (not a deny-list) for the ID inside the attachment filename: plain
+# ASCII letters, digits, ".", "_" and "-". Everything else, including quotes,
+# backslashes, controls, bidi marks and any non-latin-1 text that would make
+# the header unencodable, becomes "_", so a stored ID can never forge or break
+# the Content-Disposition header. Linear: one character class, no quantifier.
+_EXPORT_FILENAME_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def render_analysis_export(stored: Dict[str, Any]) -> bytes:
+    """The F5.2 export body: the stored analysis plus ``schema_version``, indented.
+
+    ``ensure_ascii=False`` keeps non-ASCII text readable; the bytes are UTF-8,
+    which is what ``application/json`` means (RFC 8259).
+    """
+    body = {**stored, EXPORT_SCHEMA_KEY: EXPORT_SCHEMA_VERSION}
+    return json.dumps(body, indent=EXPORT_JSON_INDENT, ensure_ascii=False).encode("utf-8")
+
+
+def export_content_disposition(analysis_id: str) -> str:
+    """RFC 6266 attachment header naming the export after its (sanitised) ID."""
+    safe_id = _EXPORT_FILENAME_UNSAFE.sub("_", analysis_id)
+    return f'attachment; filename="analysis-{safe_id}.json"'
+
+
 # Corpus status marking synthetic, non-authoritative passages. Lives here (not
 # in services.legal_kb) so prompts.py can share it without an import cycle
 # (localai -> prompts -> legal_kb -> localai); legal_kb re-exports it.
