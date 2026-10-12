@@ -1402,7 +1402,6 @@ def test_rubric_doc_parsers_reject_generated_hostile_characters() -> None:
             except RubricDocError:
                 continue
             accepted.append(f"U+{ord(char):04X} in {template!r}")
-    print(f"generated hostile cases: {generated}")
     assert generated >= 3 * 2000, f"only {generated} hostile cases generated"
     assert not accepted, f"forbidden characters accepted: {accepted[:10]}"
 
