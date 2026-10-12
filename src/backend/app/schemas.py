@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import unicodedata
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional, get_args
 
 from pydantic import BaseModel, Field, StrictFloat, field_validator, model_validator
+
+from . import config as app_config
+
+logger = logging.getLogger(__name__)
 
 Jurisdiction = Literal[
     "US-CA",
@@ -367,18 +372,133 @@ PASSAGE_LABELS = {
 }
 
 
+# #176: every corpus status the vocabulary knows, derived from the constants
+# above: the authoritative one(s) plus the two labelled ones.
+KNOWN_CORPUS_STATUSES = frozenset(AUTHORITATIVE_STATUSES | {NOT_YET_IN_FORCE_STATUS, PLACEHOLDER_STATUS})
+_LONGEST_KNOWN_STATUS = max(len(s) for s in KNOWN_CORPUS_STATUSES)
+# Padding trimmed from the ends of a status: ASCII whitespace only.
+# str.strip() would also trim NEL, U+2028 / U+2029 and the C0 separators,
+# which are hostile structure (fail closed), not padding.
+_STATUS_TRIM = " \t\n\r\v\f"
+# A run of space, ".", "_" or "-" is one "_" ("In Force" -> "in_force").
+_STATUS_SEPARATOR_RUN = re.compile(r"[ ._\-]+")
+# The canonical-status alphabet (F1 allowlist). Only a value made of it can be
+# a misspelling; a look-alike letter, a format / control / line-separator
+# character or a surrogate is forgery and never resolves.
+_CANONICAL_STATUS_RE = re.compile(r"[a-z_]+")
+
+
+def _canonical_status(text: str) -> str:
+    """NFKC + case-fold, trim ASCII whitespace, collapse separator runs to "_".
+
+    NFKC runs again after case-folding so the result is a fixed point: a
+    canonical value re-normalises to itself.
+    """
+    folded = unicodedata.normalize("NFKC", unicodedata.normalize("NFKC", text).casefold())
+    return _STATUS_SEPARATOR_RUN.sub("_", folded.strip(_STATUS_TRIM))
+
+
+def _osa_distance(a: str, b: str) -> int:
+    """Damerau-Levenshtein (optimal string alignment) distance of two short strings."""
+    prev2: List[int] = []
+    prev = list(range(len(b) + 1))
+    for i in range(1, len(a) + 1):
+        row = [i] + [0] * len(b)
+        for j in range(1, len(b) + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            row[j] = min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + cost)
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                row[j] = min(row[j], prev2[j - 2] + 1)
+        prev2, prev = prev, row
+    return prev[len(b)]
+
+
+def _resolve_status_typo(canonical: str) -> Optional[str]:
+    """The one known status ``canonical`` misspells, or None (unknown).
+
+    Within ``corpus_status_max_edit_distance`` of exactly one known status,
+    made only of the canonical alphabet, and, when that status is
+    authoritative, holding no negation token: "un_force" is one edit from
+    "in_force" but must never become it. The length check bounds the work:
+    the distance is only computed on values of at most a status' length.
+    """
+    settings = app_config.settings
+    limit = settings.corpus_status_max_edit_distance
+    if limit < 1 or len(canonical) > _LONGEST_KNOWN_STATUS + limit or not _CANONICAL_STATUS_RE.fullmatch(canonical):
+        return None
+    near = [
+        status
+        for status in sorted(KNOWN_CORPUS_STATUSES)
+        if abs(len(status) - len(canonical)) <= limit and _osa_distance(canonical, status) <= limit
+    ]
+    if len(near) != 1:
+        return None
+    if near[0] in AUTHORITATIVE_STATUSES and any(t in canonical for t in settings.corpus_status_negation_tokens):
+        return None
+    return near[0]
+
+
+def _render_raw_status(raw: str) -> str:
+    """``raw`` for a log line: truncated, then escaped to printable ASCII.
+
+    F2 / CWE-117: a corpus value can't forge a log line, hide text or break a
+    UTF-8 handler, because every non-ASCII, control or format character
+    (lone surrogates included) is shown as its escape sequence.
+    """
+    limit = app_config.settings.corpus_status_log_max_chars
+    shown = raw[:limit].encode("unicode_escape").decode("ascii")
+    if len(raw) > limit:
+        return f"'{shown}' (first {limit} of {len(raw)} characters)"
+    return f"'{shown}'"
+
+
 def normalise_corpus_status(raw: Any) -> Optional[str]:
-    """Strip + lower-case a legal-corpus status; non-string / blank -> None.
+    """The canonical form of a legal-corpus status; None when none was declared.
 
     Issue #91 (grumpy F2): corpus files declare ``# Status: PLACEHOLDER`` in
     upper case and the parser keeps meta values verbatim. Single source of
     truth for both the analyzer (authoritative-flag computation) and the
     ``LegalCitation`` validator (stored rows, any other producer).
+
+    Issue #176 (owner ruling 2026-10-12, "misspelling need to be accounted
+    for"): case, width and separator variants ("In Force", "in-force") map
+    to the known status silently; a misspelling of exactly one known status
+    ("in_froce") maps to it with one WARNING naming the raw value and the
+    status. Anything else is unknown: one WARNING, and the canonical value is
+    returned, which is never a known status, so it stays unverified. That
+    covers negated values ("not in force", "un_force"), look-alike or hidden
+    characters and distance 2 or more. Non-strings and values longer than
+    ``corpus_status_max_chars`` (not normalised at all: bounded work) are
+    unknown and returned as None. None and blank values are "no status
+    declared": None, no warning.
     """
-    if not isinstance(raw, str):
+    if raw is None:
         return None
-    normalised = raw.strip().lower()
-    return normalised or None
+    if not isinstance(raw, str):
+        logger.warning("corpus status of type %s is not text; treated as unknown", type(raw).__name__)
+        return None
+    max_chars = app_config.settings.corpus_status_max_chars
+    if len(raw) > max_chars:
+        logger.warning(
+            "corpus status %s is longer than %d characters; treated as unknown (unverified provenance)",
+            _render_raw_status(raw),
+            max_chars,
+        )
+        return None
+    canonical = _canonical_status(raw)
+    if not canonical:
+        return None
+    if canonical in KNOWN_CORPUS_STATUSES:
+        return canonical
+    resolved = _resolve_status_typo(canonical)
+    if resolved is None:
+        logger.warning(
+            "corpus status %s is not a known status; treated as unknown (unverified provenance)",
+            _render_raw_status(raw),
+        )
+        return canonical
+    logger.warning("corpus status %s is not a known status; read as the misspelling %r", _render_raw_status(raw), resolved)
+    return resolved
 
 
 def has_format_character(text: str) -> bool:
@@ -419,9 +539,15 @@ def normalise_jurisdiction(raw: Any) -> Optional[str]:
     widen the allowlist: an invisibly padded "GDPR<U+200B>" from crafted
     metadata would count as known. Rejecting fails closed whatever the
     allowlist holds, and the UNKNOWN label tells the LLM not to rely on it.
+
+    Issue #176: no longer delegates to ``normalise_corpus_status``, which now
+    resolves status misspellings and logs. A jurisdiction code is never
+    typo-corrected ("GPDR" stays unknown) and never logged as a status.
     """
-    code = normalise_corpus_status(raw)
-    if code is not None and has_format_character(code):
+    if not isinstance(raw, str):
+        return None
+    code = raw.strip().lower()
+    if not code or has_format_character(code):
         return None
     return code
 
@@ -541,9 +667,10 @@ class LegalCitation(BaseModel):
     # vocabulary is owned by the corpus / legal-corpus-ingester and is open
     # ("placeholder" here; "in_force" / "not_yet_in_force" from the ingester;
     # authority is decided by AUTHORITATIVE_STATUSES above), so a Literal would turn a new
-    # corpus status into a response-validation 500. Normalisation (strip +
-    # lower-case) happens here as well as in the analyzer so stored rows and
-    # any other producer can never expose "PLACEHOLDER" (grumpy F2).
+    # corpus status into a response-validation 500. Normalisation (the
+    # canonical form, with #176 misspellings resolved) happens here as well
+    # as in the analyzer so stored rows and any other producer can never
+    # expose "PLACEHOLDER" (grumpy F2).
     status: Optional[str] = Field(
         default=None,
         description=(

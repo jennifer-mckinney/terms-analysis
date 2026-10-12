@@ -195,6 +195,30 @@ class Settings:
     legal_kb_min_score: Optional[float] = field(
         default_factory=lambda: _parse_min_score(os.getenv("LEGAL_KB_MIN_SCORE"))
     )
+    # ── Corpus status resolution (#176, owner ruling 2026-10-12) ────────────
+    # Read by schemas.normalise_corpus_status. A status within this many edits
+    # (Damerau-Levenshtein, on the canonical form) of exactly one known status
+    # resolves to it with a WARNING. 0 turns typo resolution off. At most
+    # CORPUS_STATUS_MAX_EDIT_DISTANCE_CEILING: the known statuses are >= 3
+    # edits apart, so distance 1 can never be ambiguous.
+    corpus_status_max_edit_distance: int = _env_int("CORPUS_STATUS_MAX_EDIT_DISTANCE", "1")
+    # Characters of a raw status a WARNING shows (escaped, then marked as
+    # truncated), so a huge corpus value can't flood the log.
+    corpus_status_log_max_chars: int = _env_int("CORPUS_STATUS_LOG_MAX_CHARS", "64")
+    # Longest raw status that is normalised at all (F6: bounded work). A
+    # longer value is unknown without being read further: one WARNING, None.
+    corpus_status_max_chars: int = _env_int("CORPUS_STATUS_MAX_CHARS", "256")
+    # A typo that contains any of these tokens never resolves to an
+    # authoritative status ("un_force" is one edit from "in_force").
+    # Lower-case ASCII letters, compared against the canonical status.
+    corpus_status_negation_tokens: Tuple[str, ...] = field(
+        default_factory=lambda: tuple(
+            _split_env_list(
+                "CORPUS_STATUS_NEGATION_TOKENS",
+                "not,no,non,never,un,repealed,revoked,expired,superseded,draft",
+            )
+        )
+    )
 
     # ── Core settings ────────────────────────────────────────────────────────
     database_url: str = os.getenv(
@@ -311,6 +335,9 @@ class Settings:
         # Same for auth and rate limits (#133 ruling 3).
         validate_security_settings(self)
         object.__setattr__(self, "trusted_proxy_cidrs", tuple(self.trusted_proxy_cidrs))
+        # Same for corpus status resolution (#176): a bad edit distance or an
+        # empty negation list would widen what counts as in force.
+        _validate_corpus_status_settings(self)
 
 
 def _is_int(value: object) -> bool:
@@ -404,6 +431,10 @@ _ENV_NAMES = {
     "concurrency_retry_after_s": "CONCURRENCY_RETRY_AFTER_S",
     "max_batch_items": "MAX_BATCH_ITEMS",
     "allowed_origins": "ALLOWED_ORIGINS",
+    "corpus_status_max_edit_distance": "CORPUS_STATUS_MAX_EDIT_DISTANCE",
+    "corpus_status_log_max_chars": "CORPUS_STATUS_LOG_MAX_CHARS",
+    "corpus_status_max_chars": "CORPUS_STATUS_MAX_CHARS",
+    "corpus_status_negation_tokens": "CORPUS_STATUS_NEGATION_TOKENS",
 }
 
 
@@ -653,6 +684,45 @@ def _validate_allowed_origins(s: Settings) -> None:
         if reason is not None:
             raise ValueError(f"{_label('allowed_origins')} entry {index} {reason}")
     object.__setattr__(s, "allowed_origins", tuple(origins))
+
+
+# ── #176 corpus status resolution ────────────────────────────────────────────
+
+# Typo resolution reaches at most this many edits. The known statuses are
+# >= 3 apart, so 1 is the largest distance that can never tie or pull an
+# unrelated value onto a status; a security ceiling, not a tunable.
+CORPUS_STATUS_MAX_EDIT_DISTANCE_CEILING = 1
+# A WARNING must show the whole of the longest known status
+# ("not_yet_in_force", 16 characters), or a mis-typed status can't be told
+# from the log; the ceiling keeps one log line bounded.
+CORPUS_STATUS_LOG_MIN_CHARS = 16
+CORPUS_STATUS_LOG_MAX_CHARS_CEILING = 1024
+# A raw status may be cut off only well past any padded known status, and
+# never so long that normalising it costs real time (NFKC can expand 18x).
+CORPUS_STATUS_MAX_CHARS_FLOOR = 32
+CORPUS_STATUS_MAX_CHARS_CEILING = 65536
+# A negation token: lower-case ASCII letters, the alphabet of a canonical status.
+_NEGATION_TOKEN_RE = re.compile(r"[a-z]{1,32}")
+
+
+def _validate_corpus_status_settings(s: Settings) -> None:
+    """Raise ValueError on a bad corpus-status setting; store tokens as a tuple."""
+    _check_int(s, "corpus_status_max_edit_distance", 0, CORPUS_STATUS_MAX_EDIT_DISTANCE_CEILING)
+    _check_int(
+        s, "corpus_status_log_max_chars", CORPUS_STATUS_LOG_MIN_CHARS, CORPUS_STATUS_LOG_MAX_CHARS_CEILING
+    )
+    _check_int(s, "corpus_status_max_chars", CORPUS_STATUS_MAX_CHARS_FLOOR, CORPUS_STATUS_MAX_CHARS_CEILING)
+    tokens = s.corpus_status_negation_tokens
+    if (
+        not isinstance(tokens, (list, tuple))
+        or not tokens
+        or not all(isinstance(t, str) and _NEGATION_TOKEN_RE.fullmatch(t) for t in tokens)
+    ):
+        raise ValueError(
+            f"{_label('corpus_status_negation_tokens')} must be a non-empty list of "
+            "lower-case ASCII words"
+        )
+    object.__setattr__(s, "corpus_status_negation_tokens", tuple(tokens))
 
 
 settings = Settings()
