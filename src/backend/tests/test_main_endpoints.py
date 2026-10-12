@@ -28,6 +28,7 @@ Naming: test_<module>_<function>_<scenario>
 from __future__ import annotations
 
 import dataclasses
+import http
 import json
 import re
 import typing
@@ -1727,26 +1728,40 @@ def test_main_analyze_invalid_answer_reports_invalid(app_client, llm_transport):
 # not loaded, backend OOM) is an upstream problem, reported as
 # fallback_llm_upstream; a 4xx (our request was wrong) stays
 # fallback_llm_error. Both edges of the 5xx range, and 499 just below it.
+# #288 ("approve c"): a 429 means LocalAI is healthy but we exceeded its
+# capacity, so it is its own class, fallback_llm_rate_limited (the remedy is
+# MAX_CONCURRENT_ANALYSES or capacity, not our code or the server). A
+# Retry-After header changes nothing; 428 and 430 around it stay errors.
+_RATE_LIMITED = http.HTTPStatus.TOO_MANY_REQUESTS.value
+_RETRY_AFTER = {"Retry-After": "120"}
 _HTTP_STATUS_TO_LLM_STATUS = [
-    *[(code, "fallback_llm_upstream") for code in (500, 502, 503, 504, 599)],
-    *[(code, "fallback_llm_error") for code in (400, 404, 422, 429, 499)],
+    *[(code, "fallback_llm_upstream", {}) for code in (500, 502, 503, 504, 599)],
+    (503, "fallback_llm_upstream", _RETRY_AFTER),
+    (_RATE_LIMITED, "fallback_llm_rate_limited", {}),
+    (_RATE_LIMITED, "fallback_llm_rate_limited", _RETRY_AFTER),
+    *[(code, "fallback_llm_error", {}) for code in (400, 404, 422, _RATE_LIMITED - 1, _RATE_LIMITED + 1, 499)],
+    (_RATE_LIMITED - 1, "fallback_llm_error", _RETRY_AFTER),
 ]
+_HTTP_STATUS_IDS = [f"http-{c}{'-retry-after' if h else ''}" for c, _, h in _HTTP_STATUS_TO_LLM_STATUS]
 
 
-@pytest.mark.parametrize(
-    "code,expected", _HTTP_STATUS_TO_LLM_STATUS, ids=[f"http-{c}" for c, _ in _HTTP_STATUS_TO_LLM_STATUS]
-)
+def _hostile_error_body(code: int) -> dict:
+    # The error body is untrusted and claims a different class.
+    return {"error": {"code": 400 if code >= 500 else 503, "message": _LLM_HOSTILE}}
+
+
+@pytest.mark.parametrize("code,expected,headers", _HTTP_STATUS_TO_LLM_STATUS, ids=_HTTP_STATUS_IDS)
 def test_main_analyze_localai_http_error_status_reaches_api_storage_and_export(
-    app_client, llm_transport, monkeypatch, code, expected
+    app_client, llm_transport, monkeypatch, code, expected, headers
 ):
     # HR7: force review through config (an override, not a restated value)
-    # so a 5xx fallback is shown to queue a human review like any fallback.
+    # so a 5xx or 429 fallback is shown to queue a human review like any
+    # fallback.
     monkeypatch.setattr(
         analyzer_module, "settings", dataclasses.replace(analyzer_module.settings, review_threshold=1.0)
     )
-    # The error body is untrusted and claims the opposite class.
-    hostile = {"error": {"code": 400 if code >= 500 else 503, "message": _LLM_HOSTILE}}
-    sent = llm_transport(lambda request: httpx.Response(code, json=hostile))
+    hostile = _hostile_error_body(code)
+    sent = llm_transport(lambda request: httpx.Response(code, json=hostile, headers=headers))
     resp = app_client.post("/analyze", json={"text": _LLM_DOC, "jurisdictions": ["GDPR"]})
     assert resp.status_code == 200
     body = resp.json()
@@ -1769,6 +1784,53 @@ def test_main_analyze_localai_http_error_status_reaches_api_storage_and_export(
     reviews = app_client.get("/reviews")
     assert reviews.status_code == 200
     assert [r["analysis_id"] for r in reviews.json()].count(body["id"]) == 1
+
+
+@pytest.mark.parametrize(
+    "code,expected,headers",
+    [
+        (_RATE_LIMITED, "fallback_llm_rate_limited", _RETRY_AFTER),
+        (_RATE_LIMITED, "fallback_llm_rate_limited", {}),
+        (503, "fallback_llm_upstream", {}),
+        (_RATE_LIMITED - 1, "fallback_llm_error", _RETRY_AFTER),
+    ],
+    ids=["http-429-retry-after", "http-429", "http-503", "http-428-retry-after"],
+)
+def test_main_analyze_batch_localai_http_error_status_reaches_every_item_and_storage(
+    app_client, llm_transport, monkeypatch, code, expected, headers
+):
+    """#288: /analyze/batch reports the same llm_status as /analyze for every
+    item, persists it, exports it, and queues each item for review (HR5/HR7).
+    A 429 is fallback_llm_rate_limited on the batch path too, and it is not
+    retried: one LocalAI call per document."""
+    monkeypatch.setattr(
+        analyzer_module, "settings", dataclasses.replace(analyzer_module.settings, review_threshold=1.0)
+    )
+
+    async def fake_fetch(url: str) -> str:
+        return _LLM_DOC
+
+    monkeypatch.setattr("app.main.fetch_url_text", fake_fetch)
+    hostile = _hostile_error_body(code)
+    sent = llm_transport(lambda request: httpx.Response(code, json=hostile, headers=headers))
+    urls = ["https://example.com/a", "https://example.com/b"]
+    resp = app_client.post(
+        "/analyze/batch",
+        json={"items": [{"url": u} for u in urls], "jurisdictions": ["GDPR"], "mode": "full"},
+    )
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert len(items) == len(urls)
+    assert len(sent) == len(urls), "one LocalAI call per document, no retry"
+    assert [i["llm_status"] for i in items] == [expected] * len(urls)
+    assert all(i["summary"] is None and i["review_required"] is True for i in items)
+    assert "victim" not in resp.text and "FORGED" not in resp.text
+    review_ids = [r["analysis_id"] for r in app_client.get("/reviews").json()]
+    for item in items:
+        assert app_client.get(f"/analyses/{item['id']}").json()["llm_status"] == expected
+        exported = app_client.get(f"/exports/analysis/{item['id']}.json")
+        assert json.loads(exported.content)["llm_status"] == expected
+        assert review_ids.count(item["id"]) == 1
 
 
 def test_main_analyze_ok_answer_reports_ok(app_client, llm_transport):

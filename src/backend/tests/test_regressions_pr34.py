@@ -934,11 +934,16 @@ class TestCategoryIInferenceEdges:
 # The API7 contract: the complete set of llm_status values a client may see.
 # Pinned (not derived) on purpose: adding, renaming or dropping a value is an
 # API change and must turn this red. #288 (owner ruling 2026-10-12, option c)
-# added fallback_llm_upstream for a LocalAI HTTP 5xx.
+# added fallback_llm_upstream for a LocalAI HTTP 5xx, and (owner ruling
+# 2026-10-12, "approve c", an approved data-model change)
+# fallback_llm_rate_limited for a LocalAI HTTP 429: the server is healthy but
+# we exceeded its capacity, so the fix is MAX_CONCURRENT_ANALYSES or more
+# capacity, not our code (error) or the server (upstream).
 _EXPECTED_LLM_STATUSES = frozenset({
     "ok",
     "fallback_llm_unreachable",
     "fallback_llm_upstream",
+    "fallback_llm_rate_limited",
     "fallback_llm_invalid",
     "fallback_llm_error",
     "disabled",
@@ -1026,6 +1031,25 @@ class TestLLMStatusSchemaContract:
         with pytest.raises(ValueError):
             _payload(llm_status=value)
 
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "fallback_llm_rate_limit",
+            "fallback_llm_ratelimited",
+            "fallback_llm_rate_limiting",
+            "fallback_llm_throttled",
+            "fallback_llm_429",
+            "fallback_rate_limited",
+            "rate_limited",
+            "fallback_llm_too_many_requests",
+        ],
+    )
+    def test_near_miss_names_for_the_rate_limited_status_are_rejected(self, value):
+        # #288 ("approve c"): only the ruled spelling is a member.
+        _llm_status_literal()
+        with pytest.raises(ValueError):
+            _payload(llm_status=value)
+
     def test_field_description_names_every_member(self):
         # The OpenAPI description is the client-facing copy of API7; it is
         # tested against the Literal so a new value can't leave it stale.
@@ -1049,7 +1073,9 @@ class TestLLMStatusSchemaContract:
 
     def test_forged_look_alikes_are_rejected(self):
         values = get_args(_llm_status_literal())
-        variants = [v for value in values for v in _forged_status_variants(value)]
+        # The pinned set too, so look-alikes of a value the Literal lacks
+        # (#288 fallback_llm_rate_limited before the fix) are still fed.
+        variants = [v for value in sorted(set(values) | _EXPECTED_LLM_STATUSES) for v in _forged_status_variants(value)]
         accepted = []
         for variant in variants:
             if variant in values:
