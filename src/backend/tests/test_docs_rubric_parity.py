@@ -557,7 +557,13 @@ _UNARY_OPERATORS: dict[type[ast.unaryop], Callable[[float], float]] = {
 
 def _walk(node: ast.expr, names: Mapping[str, float], clamp: Callable[[float], float]) -> float:
     if isinstance(node, ast.Constant) and type(node.value) in (int, float):
-        return float(node.value)
+        try:
+            value = float(node.value)
+        except OverflowError as exc:
+            raise RubricDocError("formula constant is out of float range") from exc
+        if not math.isfinite(value):
+            raise RubricDocError("formula constant is out of float range")
+        return value
     if isinstance(node, ast.Name):
         if node.id not in names:
             raise RubricDocError(f"formula uses unknown name {_show(node.id)}")
@@ -1186,6 +1192,7 @@ VECTORS: tuple[Vector, ...] = (
     Vector("formula", "string", lambda: _compute("'1'", _SIGNAL_NAMES, _ident), REJECT),
     Vector("formula", "bool", lambda: _compute("True", _SIGNAL_NAMES, _ident), REJECT),
     Vector("formula", "complex", lambda: _compute("1j", _SIGNAL_NAMES, _ident), REJECT),
+    Vector("formula", "huge-int-constant", lambda: _compute("1" * 400, _SIGNAL_NAMES, _ident), REJECT),
     Vector("formula", "other-call", lambda: _compute("max(base, 1)", _SIGNAL_NAMES, _ident), REJECT),
     Vector("formula", "clamp-two-args", lambda: _compute("clamp(base, 1)", _SIGNAL_NAMES, _ident), REJECT),
     Vector("formula", "clamp-keyword", lambda: _compute("clamp(x=base)", _SIGNAL_NAMES, _ident), REJECT),
@@ -1402,7 +1409,6 @@ def test_rubric_doc_parsers_reject_generated_hostile_characters() -> None:
             except RubricDocError:
                 continue
             accepted.append(f"U+{ord(char):04X} in {template!r}")
-    print(f"generated hostile cases: {generated}")
     assert generated >= 3 * 2000, f"only {generated} hostile cases generated"
     assert not accepted, f"forbidden characters accepted: {accepted[:10]}"
 
