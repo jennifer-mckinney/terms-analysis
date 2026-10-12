@@ -6,7 +6,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple, get_args
+from typing import Any, Dict, List, Optional, Set, Tuple, get_args
 from uuid import uuid4
 
 from ..config import settings
@@ -815,7 +815,10 @@ async def analyze_text(
     elapsed_time = time.time() - start_time
     # Issue #91: project chunks once so the authoritative flag is computed
     # from exactly the (status-normalised) citations the response exposes.
-    citations = [_legal_citation(c) for c in legal_context]
+    # #176 review round 2: this is where each status is read with logging, so
+    # a non-canonical one warns once per distinct raw value per request.
+    seen_statuses: Set[Any] = set()
+    citations = [_legal_citation(c, seen_statuses) for c in legal_context]
 
     payload = AnalysisPayload(
         id=str(uuid4()),
@@ -892,8 +895,11 @@ async def _retrieve_legal_context(
     return list(result.chunks), True
 
 
-def _legal_citation(chunk: Dict[str, Any]) -> Dict[str, Any]:
-    """Project a retrieved chunk onto the public ``LegalCitation`` shape."""
+def _legal_citation(chunk: Dict[str, Any], seen_statuses: Set[Any]) -> Dict[str, Any]:
+    """Project a retrieved chunk onto the public ``LegalCitation`` shape.
+
+    ``seen_statuses`` is the request's dedupe set for status warnings (#176).
+    """
     score = chunk.get("score")
     return {
         "jurisdiction": chunk.get("jurisdiction"),
@@ -901,7 +907,7 @@ def _legal_citation(chunk: Dict[str, Any]) -> Dict[str, Any]:
         "section": chunk.get("section"),
         # Grumpy F2: normalised so "PLACEHOLDER" in the corpus is exposed
         # (and compared) as the documented "placeholder".
-        "status": normalise_corpus_status(chunk.get("status")),
+        "status": normalise_corpus_status(chunk.get("status"), seen_statuses),
         "score": float(score) if isinstance(score, (int, float)) else None,
     }
 
