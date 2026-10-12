@@ -27,6 +27,7 @@ Naming: test_<module>_<function>_<scenario>
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 import typing
@@ -1720,6 +1721,54 @@ def test_main_analyze_invalid_answer_reports_invalid(app_client, llm_transport):
     resp = app_client.post("/analyze", json={"text": _LLM_DOC, "jurisdictions": ["GDPR"]})
     assert resp.status_code == 200
     assert resp.json()["llm_status"] == "fallback_llm_invalid"
+
+
+# Issue #288 (owner ruling 2026-10-12, option c): a LocalAI HTTP 5xx (model
+# not loaded, backend OOM) is an upstream problem, reported as
+# fallback_llm_upstream; a 4xx (our request was wrong) stays
+# fallback_llm_error. Both edges of the 5xx range, and 499 just below it.
+_HTTP_STATUS_TO_LLM_STATUS = [
+    *[(code, "fallback_llm_upstream") for code in (500, 502, 503, 504, 599)],
+    *[(code, "fallback_llm_error") for code in (400, 404, 422, 429, 499)],
+]
+
+
+@pytest.mark.parametrize(
+    "code,expected", _HTTP_STATUS_TO_LLM_STATUS, ids=[f"http-{c}" for c, _ in _HTTP_STATUS_TO_LLM_STATUS]
+)
+def test_main_analyze_localai_http_error_status_reaches_api_storage_and_export(
+    app_client, llm_transport, monkeypatch, code, expected
+):
+    # HR7: force review through config (an override, not a restated value)
+    # so a 5xx fallback is shown to queue a human review like any fallback.
+    monkeypatch.setattr(
+        analyzer_module, "settings", dataclasses.replace(analyzer_module.settings, review_threshold=1.0)
+    )
+    # The error body is untrusted and claims the opposite class.
+    hostile = {"error": {"code": 400 if code >= 500 else 503, "message": _LLM_HOSTILE}}
+    sent = llm_transport(lambda request: httpx.Response(code, json=hostile))
+    resp = app_client.post("/analyze", json={"text": _LLM_DOC, "jurisdictions": ["GDPR"]})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(sent) == 1
+    assert body["llm_status"] == expected
+    # HR5 on the wire: rules-only findings, no LLM summary.
+    assert body["summary"] is None
+    assert body["findings"]
+    assert body["review_required"] is True
+    assert body["status"] == "needs_review"
+    assert "victim" not in resp.text and "FORGED" not in resp.text
+    # Every consumer of the stored payload carries the value unchanged:
+    # GET /analyses/{id}, the #36 JSON export, and the review queue.
+    stored = app_client.get(f"/analyses/{body['id']}")
+    assert stored.status_code == 200
+    assert stored.json()["llm_status"] == expected
+    exported = app_client.get(f"/exports/analysis/{body['id']}.json")
+    assert exported.status_code == 200
+    assert json.loads(exported.content)["llm_status"] == expected
+    reviews = app_client.get("/reviews")
+    assert reviews.status_code == 200
+    assert [r["analysis_id"] for r in reviews.json()].count(body["id"]) == 1
 
 
 def test_main_analyze_ok_answer_reports_ok(app_client, llm_transport):

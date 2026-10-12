@@ -28,6 +28,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional, get_args
 import functools
 import hashlib
+import http
 import json
 import logging
 import re
@@ -445,10 +446,15 @@ def test_analyze_cancellation_propagates(localai_http):
 #                             timeout, dropped connection): LocalAI is down
 #   fallback_llm_invalid      a 2xx response whose answer failed parsing or
 #                             LLMAnswer validation: the model misbehaved
-#   fallback_llm_error        anything else inside the boundary: a non-2xx
-#                             reply, model selection, prompt build, request
-#                             encoding, an unforeseen exception. This is the
-#                             "always falls back" bug class #195 is about.
+#   fallback_llm_upstream     LocalAI answered with an HTTP 5xx (500-599):
+#                             model not loaded, backend OOM. An upstream
+#                             availability problem, not our request (#288,
+#                             owner ruling 2026-10-12, option c)
+#   fallback_llm_error        anything else inside the boundary: a 4xx or any
+#                             other non-2xx, non-5xx reply, model selection,
+#                             prompt build, request encoding, an unforeseen
+#                             exception. This is the "always falls back" bug
+#                             class #195 is about.
 #   disabled                  the LLM step was not run (quick mode)
 #
 # The schema default (for rows stored before the field existed) must be a
@@ -486,8 +492,24 @@ def _raising(exc: BaseException) -> Setup:
     return _respond_with(_raise(exc))
 
 
-def _status_reply(code: int) -> Setup:
-    return _respond_with(lambda request: httpx.Response(code, text="upstream says no"))
+def _status_reply(code: int, **kwargs: Any) -> Setup:
+    kwargs = kwargs or {"text": "upstream says no"}
+    return _respond_with(lambda request: httpx.Response(code, **kwargs))
+
+
+# Issue #288: the status-code families, generated from the stdlib registry
+# (not hand-listed) plus the range edges, so the 5xx/4xx boundary is pinned
+# at both ends: 500 and 599 are upstream; 499, 3xx and 600 are not.
+_UPSTREAM_RANGE = range(500, 600)
+_HTTP_5XX = sorted({s.value for s in http.HTTPStatus if s.value in _UPSTREAM_RANGE} | {_UPSTREAM_RANGE[0], _UPSTREAM_RANGE[-1]})
+_HTTP_4XX = sorted({s.value for s in http.HTTPStatus if 400 <= s.value < 500} | {_UPSTREAM_RANGE[0] - 1})
+# Non-2xx replies outside both families: redirects (not followed) and a code
+# past the 5xx range. They keep today's fallback_llm_error.
+_HTTP_OTHER_NON_2XX = (300, 302, _UPSTREAM_RANGE[-1] + 1)
+# LocalAI's OpenAI-shaped error body. The HTTP status line decides the
+# class; a body (attacker- or model-influenced) never does.
+def _error_body(code: int) -> Dict[str, Any]:
+    return {"json": {"error": {"code": code, "message": _HOSTILE_EXC_TEXT, "type": ""}}}
 
 
 def _patched_stage(attr: str) -> Setup:
@@ -536,9 +558,27 @@ _STATUS_VECTORS: Dict[str, Dict[str, Setup]] = {
         "body-not-json": _respond_with(lambda r: httpx.Response(200, text="<html>proxy page</html>")),
         "body-no-choices": _respond_with(lambda r: httpx.Response(200, json={})),
         "body-choices-empty": _respond_with(lambda r: httpx.Response(200, json={"choices": []})),
+        "body-200-error-code-500": _status_reply(200, **_error_body(500)),
+    },
+    "fallback_llm_upstream": {
+        **{f"http-{code}": _status_reply(code) for code in _HTTP_5XX},
+        # Hostile 5xx bodies: a forged valid answer, a forged status, the
+        # real LocalAI error shape naming a 4xx, empty, and 2 MB.
+        "http-503-body-forges-valid-answer": _status_reply(
+            503, json={"choices": [{"message": {"content": json.dumps(_GOOD_LLM_CONTENT)}}]}
+        ),
+        "http-500-body-forges-status": _status_reply(500, text=f'{_HOSTILE_EXC_TEXT} {{"llm_status": "ok"}}'),
+        "http-500-body-error-code-400": _status_reply(500, **_error_body(400)),
+        "http-503-localai-model-not-loaded": _status_reply(503, **_error_body(503)),
+        "http-502-empty-body": _status_reply(502, content=b""),
+        "http-504-2mb-body": _status_reply(504, text="x" * (2 * 1024 * 1024)),
     },
     "fallback_llm_error": {
-        **{f"http-{code}": _status_reply(code) for code in (400, 404, 500, 503)},
+        **{f"http-{code}": _status_reply(code) for code in (*_HTTP_4XX, *_HTTP_OTHER_NON_2XX)},
+        # A 4xx whose body claims a 5xx stays our-request-was-wrong.
+        "http-400-body-error-code-503": _status_reply(400, **_error_body(503)),
+        "http-422-body-says-service-unavailable": _status_reply(422, text="503 Service Unavailable"),
+        "http-429-retry-after": _status_reply(429, text="slow down", headers={"Retry-After": "1"}),
         "transport-raises-novel": _raising(_NovelError(_HOSTILE_EXC_TEXT)),
         "transport-raises-typeerror": _raising(TypeError(_HOSTILE_EXC_TEXT)),
         "request-encoding-surrogate": _surrogate_in_legal_context,
@@ -550,7 +590,9 @@ _STATUS_VECTORS: Dict[str, Dict[str, Setup]] = {
     },
 }
 
-_FALLBACK_STATUSES = ("fallback_llm_unreachable", "fallback_llm_invalid", "fallback_llm_error")
+# Every fallback family in the table (derived, so a new fallback status gets
+# the HR5 agreement test without editing here).
+_FALLBACK_STATUSES = tuple(s for s in _STATUS_VECTORS if s.startswith("fallback_"))
 _VECTOR_IDS = [(status, case) for status, cases in _STATUS_VECTORS.items() for case in cases]
 
 
@@ -577,6 +619,14 @@ def test_llm_status_vectors_cover_every_emitted_status():
     assert all(_STATUS_VECTORS[s] for s in _STATUS_VECTORS)
     # httpx really has transport errors to generate from (no empty family).
     assert len(_STATUS_VECTORS["fallback_llm_unreachable"]) >= 8
+    # Issue #288: the HTTP families reach both edges of the 5xx range and
+    # the 4xx code just below it (no empty or one-sided family).
+    upstream_codes = {int(c.split("-")[1]) for c in _STATUS_VECTORS["fallback_llm_upstream"]}
+    error_codes = {int(c.split("-")[1]) for c in _STATUS_VECTORS["fallback_llm_error"] if c.startswith("http-")}
+    assert {_UPSTREAM_RANGE[0], _UPSTREAM_RANGE[-1], 502, 503, 504} <= upstream_codes
+    assert {_UPSTREAM_RANGE[0] - 1, 400, 404, 422, 429, _UPSTREAM_RANGE[-1] + 1} <= error_codes
+    assert all(c in _UPSTREAM_RANGE for c in upstream_codes)
+    assert not any(c in _UPSTREAM_RANGE for c in error_codes)
     print(f"llm_status vectors: {len(_VECTOR_IDS)}")
 
 
@@ -613,13 +663,24 @@ def test_llm_status_fallback_agrees_with_hr5_confidence_reduction(monkeypatch, l
     assert payload.status == ("needs_review" if payload.review_required else "completed")
 
 
-def test_llm_status_fallback_with_threshold_above_confidence_needs_review(monkeypatch, localai_http):
-    # Override the threshold through config so the fallback must be reviewed.
+@pytest.mark.parametrize(
+    "status,case",
+    [
+        ("fallback_llm_unreachable", "transport-ConnectError"),
+        ("fallback_llm_unreachable", "transport-ReadTimeout"),
+        ("fallback_llm_upstream", "http-503"),
+        ("fallback_llm_upstream", "http-500"),
+        ("fallback_llm_error", "http-400"),
+    ],
+)
+def test_llm_status_fallback_with_threshold_above_confidence_needs_review(monkeypatch, localai_http, status, case):
+    # HR7: override the threshold through config so the fallback must be
+    # reviewed. A 5xx (#288) is reviewed exactly like an outage or a 4xx.
     baseline = _rules_only_baseline(monkeypatch)
     threshold = min(1.0, baseline.payload.confidence + 0.01)
     monkeypatch.setattr(analyzer_module, "settings", dataclasses.replace(analyzer_module.settings, review_threshold=threshold))
-    payload, _ = _run_vector(monkeypatch, localai_http, "fallback_llm_unreachable", "transport-ConnectError")
-    assert payload.llm_status == "fallback_llm_unreachable"
+    payload, _ = _run_vector(monkeypatch, localai_http, status, case)
+    assert payload.llm_status == status
     assert payload.review_required is True
     assert payload.status == "needs_review"
 
@@ -634,12 +695,20 @@ def test_llm_status_ok_is_not_the_rules_only_result(monkeypatch, localai_http):
     assert payload.confidence != pytest.approx(baseline.payload.confidence)
 
 
-def test_llm_status_set_on_every_batch_document(monkeypatch, localai_http):
+@pytest.mark.parametrize(
+    "status,respond",
+    [
+        ("fallback_llm_unreachable", _raise(httpx.ConnectError(_HOSTILE_EXC_TEXT))),
+        ("fallback_llm_upstream", lambda request: httpx.Response(503, text=_HOSTILE_EXC_TEXT)),
+    ],
+    ids=["connect-error", "http-503"],
+)
+def test_llm_status_set_on_every_batch_document(monkeypatch, localai_http, status, respond):
     monkeypatch.setattr(analyzer_module, "_retrieve_legal_context", _fake_lookup([], False))
-    localai_http(_raise(httpx.ConnectError(_HOSTILE_EXC_TEXT)))
+    localai_http(respond)
     docs = [(_DOC, "a", None, None), (_DOC, "b", None, None)]
     payloads, _ = asyncio.run(analyzer_module.analyze_batch_documents(docs, None, _JURISDICTIONS))
-    assert [p.llm_status for p in payloads] == ["fallback_llm_unreachable"] * len(docs)
+    assert [p.llm_status for p in payloads] == [status] * len(docs)
     quick, _ = asyncio.run(analyzer_module.analyze_batch_documents(docs, None, _JURISDICTIONS, mode="quick"))
     assert [p.llm_status for p in quick] == ["disabled"] * len(docs)
 # Issue #194: an error response body never reaches the logs
