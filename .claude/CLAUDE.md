@@ -31,9 +31,9 @@ xref: [[LIB-ARCH]] [[LIB-STACK]] [[LIB-LEGAL]] [[LIB-TEST]] [[LIB-API]] [[LIB-RU
 These identifiers mean different things in the ingester repo. Never cite a bare "HR7" across repos.
 
 - HR1 open-source-only: Apache-2.0, MIT or BSD preferred.
-- HR2 no vendors facing investor lawsuits, so no Meta-origin dependencies (FAISS excluded). Split HR2a (vendor, zero hops) / HR2b (licence, not origin) is approved (plan R1).
+- HR2 no vendors facing investor lawsuits, so no Meta-origin dependencies (FAISS excluded). Split HR2a (vendor, zero hops) / HR2b (licence, not origin) is approved (plan R1) and recorded in ADR 0003; torch exception in ADR 0006.
 - HR3 every dependency at IRP grade A or higher (`/dependency-audit`).
-- HR4 local-only data. Amended by D10 for Railway; see the plan.
+- HR4 local-only data. Amended by ADR 0005 (D10 Railway).
 - HR5 an LLM failure falls back to rule-only findings with reduced confidence. The LLM answer is validated by `schemas.LLMAnswer` inside `analyze()`.
 - HR6 no OpenAI; LocalAI only. EuroLLM-22B for EU/legal, Apertus-8B for multilingual.
 - HR7 confidence below 0.80 triggers human-in-the-loop review.
