@@ -53,6 +53,11 @@ VIOLATION_IDS = (
 FAIL_LINE_RE = re.compile(r"^FAIL \[([a-z-]+)\]: ", re.MULTILINE)
 HARNESS_TIMEOUT_S = 60  # harness bound per script run, not product config
 FAKE_GIT_SLEEP_FACTOR = 5  # fake git sleeps this many times the configured timeout
+# Harness bound for one run on a document holding one very long line (#337).
+# A linear parser reads it in well under a second; the quadratic ATX regex
+# needs minutes for a line of LONG_LINE_FRACTION of max_doc_bytes.
+LINEAR_BUDGET_S = 10
+LONG_LINE_FRACTION = 5  # the hostile line is max_doc_bytes // this, so the doc fits the cap
 
 # Hostile characters: every line-break code point Python or Unicode knows of,
 # beyond the three CommonMark line endings (CR LF, CR, LF).
@@ -175,12 +180,13 @@ class Result:
 
 
 def run_check(root: Path, *args: str, cwd: Path | None = None, env: dict[str, str] | None = None,
-              redact: Path | None = None) -> Result:
-    """Run the real script; assert no absolute path leaks into its output (F8)."""
+              redact: Path | None = None, timeout: float = HARNESS_TIMEOUT_S) -> Result:
+    """Run the real script; assert no absolute path leaks into its output (F8).
+    The script execs python3, so a timeout kills the checker itself."""
     argv = ["bash", str(SCRIPT), *args] if args else ["bash", str(SCRIPT)]
     proc = subprocess.run(
         argv, cwd=cwd or root, env=env or clean_env(), capture_output=True,
-        timeout=HARNESS_TIMEOUT_S,
+        timeout=timeout,
     )
     out = proc.stdout.decode("utf-8", "replace")
     err = proc.stderr.decode("utf-8", "replace")
@@ -505,6 +511,15 @@ VECTORS: tuple[Vector, ...] = (
            lambda b: make_tree(b, todo=sprint_todo(link=f"``x `[Roadmap]({LINK_TARGET})`"))),
     Vector("unclosed backtick before a real link is literal text", "todo-roadmap-link", True,
            lambda b: make_tree(b, todo=sprint_todo(link=f"Run `make then read [Roadmap]({LINK_TARGET})."))),
+    # PR #331 round 3 (CommonMark oracle): a tab-indented continuation line is
+    # still paragraph text, and a backtick opener whose info string holds a
+    # backtick is not a fence, so the link after it is live.
+    Vector("link on a tab-indented paragraph continuation line", "todo-roadmap-link", True,
+           lambda b: make_tree(b, todo=sprint_todo(link=f"See the\n\t[Roadmap]({LINK_TARGET})"))),
+    Vector("link after a backtick opener with a backtick in its info string", "todo-roadmap-link", True,
+           lambda b: make_tree(b, todo=sprint_todo(link=f"```code``` text\n[Roadmap]({LINK_TARGET})"))),
+    Vector("link between a non-fence '```js`x' and a later fence opener", "todo-roadmap-link", True,
+           lambda b: make_tree(b, todo=sprint_todo(link=f"```js`x\n[Roadmap]({LINK_TARGET})\n```"))),
     # brd-file
     Vector("brd regular file", "brd-file", True, lambda b: make_tree(b)),
     Vector("brd symlink", "brd-file", False, _symlinked_brd),
@@ -515,6 +530,22 @@ VECTORS: tuple[Vector, ...] = (
     Vector("one section", "brd-roadmap-section", True, lambda b: make_tree(b)),
     Vector("closing hashes on the section heading", "brd-roadmap-section", True,
            lambda b: make_tree(b, brd_doc=brd(heading=HEADING + " " + "#" * HEADING_LEVEL))),
+    # PR #331 round 3 (#337, CommonMark oracle): heading text extraction.
+    # Trailing whitespace and a closing '#' run (any length, after a space or
+    # tab, with whitespace after it) are stripped; anything else is text.
+    Vector("trailing spaces on the section heading", "brd-roadmap-section", True,
+           lambda b: make_tree(b, brd_doc=brd(heading=HEADING + "   "))),
+    Vector("closing hashes then spaces and a tab", "brd-roadmap-section", True,
+           lambda b: make_tree(b, brd_doc=brd(heading=HEADING + " " + "#" * HEADING_LEVEL + "  \t"))),
+    Vector("tab before a closing run longer than six", "brd-roadmap-section", True,
+           lambda b: make_tree(b, brd_doc=brd(heading=HEADING + "\t" + "#" * 7))),
+    Vector("spaces and a tab between the marker and the text", "brd-roadmap-section", True,
+           lambda b: make_tree(b, brd_doc=brd(
+               heading="#" * HEADING_LEVEL + " \t " + HEADING[HEADING_LEVEL:].lstrip(" ")))),
+    Vector("'#' glued to the heading text is text", "brd-roadmap-section", False,
+           lambda b: make_tree(b, brd_doc=brd(heading=HEADING + "#"))),
+    Vector("hashes followed by more text are text", "brd-roadmap-section", False,
+           lambda b: make_tree(b, brd_doc=brd(heading=HEADING + " " + "#" * HEADING_LEVEL + " x"))),
     Vector("section heading at the wrong level", "brd-roadmap-section", False,
            lambda b: make_tree(b, brd_doc=brd(heading="#" + HEADING))),
     Vector("zero-width space in the section heading", "brd-roadmap-section", False,
@@ -643,6 +674,45 @@ VECTORS: tuple[Vector, ...] = (
     Vector("wide item (5 spaces after the marker): 6-space child is code", "brd-roadmap-checked", False,
            lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
                "-     wide item\n\n" + "      - [x] x\n" * MIN_CHECKED)))),
+    # PR #331 round 3 (CommonMark oracle). A line indented 4+ columns past the
+    # container straight after paragraph text is a lazy continuation of that
+    # paragraph: not a list item and not indented code.
+    Vector("4-space task line continuing a paragraph is text", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "para\n" + "    - [x] task\n" * MIN_CHECKED)))),
+    Vector("tab-indented task line continuing a paragraph is text", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "para\n" + "\t- [x] task\n" * MIN_CHECKED)))),
+    Vector("8-space task line continuing a paragraph is text", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "para\n" + "        - [x] task\n" * MIN_CHECKED)))),
+    Vector("task 4 columns past an item's content continues its text", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "- item\n" + "      - [x] t\n" * MIN_CHECKED)))),
+    Vector("control: task 2 columns past an item's content is a nested item", "brd-roadmap-checked", True,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "- parent\n" + "    - [x] child\n" * MIN_CHECKED)))),
+    # A backtick fence opener whose info string holds a backtick is not a
+    # fence (LOW PRRT_kwDOQNiQUM6rTO_a); a tilde opener's info string may.
+    Vector("task after a backtick opener with a backtick in its info string", "brd-roadmap-checked", True,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "```code``` text\n" + "- [x] real\n" * MIN_CHECKED)))),
+    Vector("'```' after a non-fence '```js`x' opens a fence", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "```js`x\n```\n" + "- [x] fenced\n" * MIN_CHECKED + "```")))),
+    Vector("tilde fence with a backtick in its info string", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "~~~ a`b\n" + "- [x] fenced\n" * MIN_CHECKED + "~~~")))),
+    # The coder's three surviving mutants from round 2.
+    Vector("unindented line ends a list-nested fence; later 4-space task is code", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "- item\n\n  ```\n  code\nend\n\n" + "    - [x] t\n" * MIN_CHECKED)))),
+    Vector("fence closes a wide inner item and opens in the outer item", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "- a\n\n  -    b\n     ```\n" + "     - [x] f\n" * MIN_CHECKED + "     ```")))),
+    Vector("blank line inside a list-nested fence keeps it open", "brd-roadmap-checked", False,
+           lambda b: make_tree(b, brd_doc=brd(checked=0, unchecked=0, inside=(
+               "- item\n\n    ```\n\n" + "    - [x] fenced\n" * MIN_CHECKED + "    ```")))),
     # stray-todo-reference
     Vector("no references", "stray-todo-reference", True, lambda b: make_tree(b)),
     Vector("references to a valid sprint list", "stray-todo-reference", True,
@@ -774,6 +844,53 @@ def test_check_roadmap_ssot_many_references_are_capped(tmp_path: Path) -> None:
     assert f"{cap + 3} reference(s)" in result.stderr
     assert result.stderr.count(" (1)") == cap
     assert ", and 3 more file(s)" in result.stderr
+
+
+def _long_gap(sep: str) -> str:
+    """Whitespace filling LONG_LINE_FRACTION of max_doc_bytes (read from config)."""
+    return sep * (int(CFG["max_doc_bytes"]) // LONG_LINE_FRACTION // len(sep))
+
+
+def _long_line_cases() -> list[tuple[str, Callable[[Path], Tree], str | None]]:
+    """(name, tree builder, expected violation id or None for OK). Each line is
+    '<hashes> <text><long whitespace><non-hash char>', the shape that makes
+    the ATX regex backtrack quadratically (MEDIUM PRRT_kwDOQNiQUM6rTO-O)."""
+    sub = "#" * (HEADING_LEVEL + 1)
+    cases: list[tuple[str, Callable[[Path], Tree], str | None]] = []
+    for label, sep in (("spaces", " "), ("tabs", "\t"), ("space-tab", " \t")):
+        cases.append((f"subheading gap of {label}", lambda b, s=sep: make_tree(
+            b, brd_doc=brd(inside=f"{sub} a{_long_gap(s)}b")), None))
+    # Extraction must stay exact on the long line: a trailing non-hash
+    # character is heading text (no section), a closing run is stripped.
+    cases.append(("section heading with a long gap then text", lambda b: make_tree(
+        b, brd_doc=brd(heading=HEADING + _long_gap(" ") + "x")), "brd-roadmap-section"))
+    cases.append(("section heading with a long gap then closing hashes", lambda b: make_tree(
+        b, brd_doc=brd(heading=HEADING + _long_gap(" ") + "#" * HEADING_LEVEL)), None))
+    # Before the link, so the link search has to read past it.
+    cases.append(("sprint list subheading with a long gap", lambda b: make_tree(
+        b, todo=sprint_todo(link=f"{sub} a{_long_gap(' ')}b\n\n[Roadmap]({LINK_TARGET})")), None))
+    return cases
+
+
+@pytest.mark.parametrize("name,build,violation", [pytest.param(*case, id=case[0]) for case in _long_line_cases()])
+def test_check_roadmap_ssot_long_heading_line_is_linear(
+        tmp_path: Path, name: str, build: Callable[[Path], Tree], violation: str | None) -> None:
+    """A document within max_doc_bytes must be checked inside LINEAR_BUDGET_S."""
+    tree = build(tmp_path)
+    for rel in (BRD_REL, TODO_REL):
+        path = tree.root / rel
+        if path.exists():
+            assert path.stat().st_size <= int(CFG["max_doc_bytes"]), "fixture must fit the configured cap"
+    tree.track()
+    try:
+        result = run_check(tree.root, str(tree.root), timeout=LINEAR_BUDGET_S)
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"checker ran past {LINEAR_BUDGET_S}s on a {name!r} line: heading parsing is not linear")
+    if violation is None:
+        todo_state = "sprint-list" if (tree.root / TODO_REL).exists() else "absent"
+        assert_ok(result, todo_state=todo_state)
+    else:
+        assert_violations(result, {violation})
 
 
 def _fake_git(tmp_path: Path, grep_body: str) -> dict[str, str]:
