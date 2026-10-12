@@ -156,7 +156,7 @@ Use it for triage and due diligence, not as a substitute for professional review
 
 ## License
 
-TBD
+Licensed under [Apache-2.0](LICENSE). Attribution notices are in [NOTICE](NOTICE).
 
 ## Contributing
 

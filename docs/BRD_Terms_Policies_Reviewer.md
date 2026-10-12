@@ -969,7 +969,7 @@ The two constraints below are non-negotiable operating requirements for the tool
 **Goal:** Launch to public with 500+ users in first week.
 
 **Key Deliverables:**
-- [ ] Open source GitHub repository
+- [x] Open source GitHub repository
 - [ ] Launch website and documentation
 - [ ] Product Hunt launch
 - [ ] Hacker News "Show HN" post
