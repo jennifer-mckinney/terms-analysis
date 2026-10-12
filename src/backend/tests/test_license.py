@@ -17,6 +17,10 @@ Owner ruling, 2026-10-12: "Apache sounds good". Acceptance, as tested here:
 - The README ``License`` section names ``Apache-2.0`` and links ``LICENSE``.
 - No file that speaks for this project claims a conflicting licence, and the
   only licence-named files in the tree are the root ``LICENSE`` and ``NOTICE``.
+  "Speaks for the project" excludes only the listed third-party and historical
+  prefixes; the status docs at the top of ``docs/`` are scanned (PR #350 r2).
+- No project markdown still shows the licence decision ("License selection",
+  "Open source GitHub repository") as an unchecked task-list item.
 
 The licence facts below are this card's acceptance values, defined once here
 (F10). No product code reads them, so there is no config to load them from.
@@ -80,12 +84,21 @@ PACKAGING_BASENAMES: frozenset[str] = frozenset({"pyproject.toml", "setup.cfg", 
 # may exist; any other one (a vendored tree, a stray LICENSE.md) needs a ruling.
 _LICENCE_FILE_NAME = re.compile(r"^(?:licen[cs]e|copying|notice)(?:[.-].*)?$", re.IGNORECASE)
 
-# Top-level directories excluded from the conflicting-claim scan, each with
-# its reason. Everything else in the tracked tree speaks for the project.
-CLAIM_SCAN_EXCLUDED_TOPS: dict[str, str] = {
-    "docs": "research, plans and reports describe third-party licences "
-    "(dependencies, corpora); they are not claims about this repository",
+# Directory prefixes excluded from the conflicting-claim and checklist scans,
+# each with its reason. Only third-party descriptions and historical records
+# are excluded; everything else in the tracked tree speaks for the project,
+# including the status docs at the top of docs/ (BRD, PRD, PROJECT_STRUCTURE).
+# Round 2 (PR #350): the whole of docs/ used to be excluded, which hid stale
+# licence checklist items in those status docs.
+CLAIM_SCAN_EXCLUDED_PREFIXES: dict[str, str] = {
+    "docs/research/": "research notes describe third-party tools and their licences",
+    "docs/reports/": "technology reports quote dependency licences (e.g. a vendor's MIT pledge)",
+    "docs/plans/": "dated plans cite dependency and corpus licences (MIT models, (c) ICJ)",
+    "docs/evidence/": "historical review and run evidence; quotes findings and scanner output",
 }
+_EXCLUDED_PREFIX_PARTS: tuple[tuple[str, ...], ...] = tuple(
+    PurePosixPath(prefix).parts for prefix in CLAIM_SCAN_EXCLUDED_PREFIXES
+)
 
 # This module holds conflicting phrases as test vectors, so the scan skips
 # it by its own path (derived, not restated). Residual: a claim planted in
@@ -322,12 +335,89 @@ def _project_name() -> str:
     return titles[0]
 
 
+def _claim_scan_excluded(rel: str) -> bool:
+    """True only for a file strictly under a listed prefix, compared by path
+    component (so docs/researchers/ is not docs/research/). A path carrying
+    '..' is never excluded: it could name a file outside the prefix (F7)."""
+    parts = PurePosixPath(rel).parts
+    if ".." in parts:
+        return False
+    return any(len(parts) > len(pre) and parts[: len(pre)] == pre for pre in _EXCLUDED_PREFIX_PARTS)
+
+
 def _claim_scan_paths(tracked: list[str]) -> list[str]:
+    return [p for p in tracked if not _claim_scan_excluded(p) and p != THIS_MODULE_REL]
+
+
+def _top_level_docs_markdown(tracked: list[str]) -> list[str]:
+    """Tracked docs/*.md directly under docs/: the project-status documents."""
     return [
         p
         for p in tracked
-        if PurePosixPath(p).parts[0] not in CLAIM_SCAN_EXCLUDED_TOPS and p != THIS_MODULE_REL
+        if len(PurePosixPath(p).parts) == 2
+        and PurePosixPath(p).parts[0] == "docs"
+        and PurePosixPath(p).suffix.casefold() == ".md"
     ]
+
+
+# Task-list items that #333 settles. A status doc that still shows one of
+# these as open contradicts the licence decision. Matched on _normalise()
+# output of the item text, so separators are optional (\s*).
+LICENCE_DECISION_ITEMS: dict[str, re.Pattern[str]] = {
+    "licence-selection": re.compile(
+        r"(?<![a-z0-9])licen[cs](?:e|ing)\s*(?:selection|choice|decision)"
+        r"|(?<![a-z0-9])(?:select|choos|chose|pick|decid)\w*\s*"
+        r"(?:(?:a|an|the|on|our|project|open\s*-?\s*source)\s*)*licen[cs]e(?![a-z0-9])"
+    ),
+    "open-source-repository": re.compile(
+        r"(?<![a-z0-9])open\s*-?\s*sourc(?:e|ed|ing)\s*(?:(?:the|this|our|a|project)\s*)*"
+        r"(?:github\s*)?repo(?:sitory)?(?![a-z0-9])"
+        r"|(?<![a-z0-9])(?:github\s*)?repo(?:sitory)?\s*(?:(?:is|as)\s*)?open\s*-?\s*sourc"
+    ),
+}
+
+# Parsed on _normalise() output: indentation, tabs and NBSP fold to one space,
+# Cf characters are gone and X is casefolded, so "[​]" reads as "[]".
+_TASK_ITEM = re.compile(r"^[ >]*(?:[-*+]|\d{1,9}[.)]) ?\[([^\]]*)\] ?(.*)$")
+_BLOCK_START = re.compile(r"^[ >]*(?:[-*+]|\d{1,9}[.)])(?: |$)")
+_HEADING_START = re.compile(r"^ ?#{1,6}(?: |$)")
+
+
+def _open_licence_items(text: str) -> list[tuple[int, str, str]]:
+    """(line number, item name, item text) for each task-list item that is not
+    ticked ``[x]`` and names a decision from LICENCE_DECISION_ITEMS.
+
+    A list item runs on over following lines until a blank line, a heading, a
+    code fence or the next list marker (CommonMark lazy continuation), so an
+    item wrapped by a line break of any kind is read whole. Fenced code is an
+    example, not a status, and is skipped.
+    """
+    blocks: list[tuple[int, list[str]]] = []
+    current: tuple[int, list[str]] | None = None
+    for number, line in enumerate(_lines(text), start=1):
+        flat = _normalise(line.text)
+        if line.in_code or not flat.strip():
+            current = None
+            continue
+        if _HEADING_START.match(flat):
+            current = None
+            continue
+        if current is None or _BLOCK_START.match(flat):
+            current = (number, [line.text])
+            blocks.append(current)
+        else:
+            current[1].append(line.text)
+    found: list[tuple[int, str, str]] = []
+    for number, raw_lines in blocks:
+        item = _TASK_ITEM.match(_normalise("\n".join(raw_lines)))
+        if not item or item.group(1).strip() == "x":
+            continue
+        found.extend(
+            (number, name, item.group(2))
+            for name, pattern in LICENCE_DECISION_ITEMS.items()
+            if pattern.search(item.group(2))
+        )
+    return found
 
 
 # --------------------------------------------------------------------------
@@ -404,8 +494,14 @@ def test_no_tracked_file_claims_a_conflicting_licence() -> None:
     tracked = _tracked_paths()
     scope = _claim_scan_paths(tracked)
     # Did-nothing guard (F5): the scan must cover the root files that speak
-    # for the project, and must not be empty.
+    # for the project, and the status docs at the top of docs/.
     assert README_REL in scope and scope, "claim scan scope lost the README"
+    status_docs = _top_level_docs_markdown(tracked)
+    unscanned = sorted(set(status_docs) - set(scope))
+    assert status_docs and unscanned == [], (
+        f"claim scan skips project-status docs {[_show(p) for p in unscanned]} "
+        f"({len(status_docs)} top-level docs/*.md tracked)"
+    )
     hits: list[str] = []
     binaries = 0
     for rel in scope:
@@ -424,6 +520,26 @@ def test_no_tracked_file_claims_a_conflicting_licence() -> None:
         hits.extend(f"{_show(rel)}: {name}" for name in _conflict_hits(text))
     print(f"claim scan: {len(scope)} files in scope, {binaries} binary skipped")
     assert hits == [], f"conflicting licence claims: {hits}"
+
+
+def test_status_docs_leave_no_licence_decision_unchecked() -> None:
+    """Copilot, PR #350 round 2: once the licence is decided, no project doc may
+    still show "License selection" or "Open source GitHub repository" as an
+    open task. Scope is every tracked markdown file the claim scan covers."""
+    tracked = _tracked_paths()
+    scope = [p for p in _claim_scan_paths(tracked) if PurePosixPath(p).suffix.casefold() == ".md"]
+    status_docs = _top_level_docs_markdown(tracked)
+    unscanned = sorted(set(status_docs) - set(scope))
+    assert status_docs and unscanned == [], f"checklist scan skips status docs {[_show(p) for p in unscanned]}"
+    open_items = [
+        f"{_show(rel)}:{number}: {name} {_show(item)}"
+        for rel in scope
+        for number, name, item in _open_licence_items(_read_text(REPO_ROOT, rel))
+    ]
+    print(f"checklist scan: {len(scope)} markdown files, {len(status_docs)} top-level status docs")
+    assert open_items == [], (
+        f"#333 decided the licence ({LICENSE_SPDX_ID}); tick these items [x] or remove them: {open_items}"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -675,16 +791,115 @@ def test_generated_hidden_characters_rejected_everywhere() -> None:
             escaped.append(f"readme/U+{ord(char):04X}")
         if "mit-license" not in _conflict_hits(f"MIT{char}License"):
             escaped.append(f"conflict/U+{ord(char):04X}")
-    print(f"generated hidden characters: {len(points)} x 5 fields")
+        # A hidden character in the item text or in the checkbox must not let
+        # a stale licence item pass as ticked or as something else.
+        for field, item_md in (
+            ("checklist-text", f"- [ ] License{char}selection\n"),
+            ("checklist-box", f"- [{char}] License selection\n"),
+        ):
+            if "licence-selection" not in [found[1] for found in _open_licence_items(item_md)]:
+                escaped.append(f"{field}/U+{ord(char):04X}")
+    print(f"generated hidden characters: {len(points)} x 7 fields")
     assert len(points) > 0
     assert escaped == [], f"{len(escaped)} hidden characters got through: {escaped[:10]}"
 
 
-def test_claim_scan_scope_excludes_only_listed_tops() -> None:
-    sample = ["README.md", "GITHUB_SETUP.md", "src/a.py", "docs/plans/x.md", ".github/w.yml", "archive/y.py"]
-    assert _claim_scan_paths(sample + [THIS_MODULE_REL]) == [p for p in sample if not p.startswith("docs/")]
+def test_claim_scan_scope_excludes_only_listed_prefixes() -> None:
+    """Round 2 (PR #350): only files strictly under a listed prefix are
+    excluded; status docs at the top of docs/ and look-alike paths are scanned."""
+    scanned = [
+        "README.md", "GITHUB_SETUP.md", "src/a.py", ".github/w.yml", "archive/y.py",
+        "docs/BRD_Terms_Policies_Reviewer.md", "docs/PRD_Terms_Policies_Reviewer.md",
+        "docs/PROJECT_STRUCTURE.md", "docs/adr/0001-x.md", "docs/specs/s.md", "docs/reviews/r.md",
+        "docs/researchers/x.md",          # shares a prefix string, not a path component
+        "docs/research",                  # the prefix itself as a file name
+        "docs/research/../PRD.md",        # '..' never earns an exclusion
+        "src/docs/research/z.md",         # same components, not at the root
+        "DOCS/research/x.md",             # git paths are case-sensitive
+    ]
+    excluded = [
+        f"{prefix}{leaf}" for prefix in CLAIM_SCAN_EXCLUDED_PREFIXES for leaf in ("x.md", "deep/y.log")
+    ]
+    assert _claim_scan_paths(scanned + excluded + [THIS_MODULE_REL]) == scanned
     assert THIS_MODULE_REL == "src/backend/tests/test_license.py"
-    assert all(reason.strip() for reason in CLAIM_SCAN_EXCLUDED_TOPS.values())
+    assert all(reason.strip() for reason in CLAIM_SCAN_EXCLUDED_PREFIXES.values())
+    # No prefix may widen back to a top-level directory (the round-1 bug).
+    assert all(len(parts) >= 2 for parts in _EXCLUDED_PREFIX_PARTS), CLAIM_SCAN_EXCLUDED_PREFIXES
+
+
+def test_top_level_docs_markdown_selects_only_direct_children() -> None:
+    sample = ["docs/BRD.md", "docs/TODO.MD", "docs/plans/p.md", "docs/a.png", "README.md", "src/docs/x.md"]
+    assert _top_level_docs_markdown(sample) == ["docs/BRD.md", "docs/TODO.MD"]
+    assert _top_level_docs_markdown([]) == []
+
+
+# (item name, markdown, expected open) for the checklist scan. The item text
+# comes from the real stale lines (PROJECT_STRUCTURE "License selection", BRD
+# "Open source GitHub repository") plus structure-forging variants of them.
+_LICENCE_ITEM = "License selection"
+_REPO_ITEM = "Open source GitHub repository"
+CHECKLIST_VECTORS: list[tuple[str, str, bool]] = [
+    ("licence-selection", f"- [ ] {_LICENCE_ITEM}\n", True),
+    ("licence-selection", "* [ ] Licence choice\n", True),
+    ("licence-selection", "1. [ ] Choose a license\n", True),
+    ("licence-selection", "- [ ] Select the project licence\n", True),
+    ("licence-selection", f"  - [ ] {_LICENCE_ITEM}\n", True),                  # nested
+    ("licence-selection", f"> - [ ] {_LICENCE_ITEM}\n", True),                  # blockquote
+    ("licence-selection", "- [ ] License\nselection\n", True),                  # wrapped (lazy continuation)
+    ("licence-selection", "- [ ] License\rselection\n", True),                  # CR line ending
+    ("licence-selection", "- [ ] License selection\n", True),              # Unicode line separator
+    ("licence-selection", f"- [\r] {_LICENCE_ITEM}\n", True),                   # box split across lines
+    ("licence-selection", f"- [] {_LICENCE_ITEM}\n", True),                     # empty box
+    ("licence-selection", f"- [​] {_LICENCE_ITEM}\n", True),               # zero-width box
+    ("licence-selection", f"- [ ] {_LICENCE_ITEM}\n", True),               # NBSP box
+    ("licence-selection", f"- [-] {_LICENCE_ITEM}\n", True),                    # "in progress" is not ticked
+    ("licence-selection", f"- [?] {_LICENCE_ITEM}\n", True),
+    ("licence-selection", f"-\t[ ]\t{_LICENCE_ITEM}\n", True),                  # tabs
+    ("licence-selection", "- [ ] ＬＩＣＥＮＳＥ selection\n", True),  # full-width
+    ("licence-selection", "- [ ] " + "a " * 1_000_000 + _LICENCE_ITEM + "\n", True),  # 2 MB item
+    ("licence-selection", f"- [x] {_LICENCE_ITEM}\n", False),                   # ticked
+    ("licence-selection", f"- [X] {_LICENCE_ITEM}\n", False),
+    ("licence-selection", "- [ ] White-label licensing option\n", False),       # BRD product feature
+    ("licence-selection", "- [ ] License compliance audit for dependencies\n", False),
+    ("licence-selection", "- [ ] Select licensed corpora\n", False),
+    ("licence-selection", f"{_LICENCE_ITEM} is done.\n", False),                # not a task item
+    ("licence-selection", f"```\n- [ ] {_LICENCE_ITEM}\n```\n", False),         # fenced example
+    ("licence-selection", f"- [ ] Code of conduct\n\n{_LICENCE_ITEM}\n", False),  # blank line ends the item
+    ("licence-selection", "", False),
+    ("open-source-repository", f"- [ ] {_REPO_ITEM}\n", True),
+    ("open-source-repository", "- [ ] Open-source the repository\n", True),
+    ("open-source-repository", "- [ ] Open​source repo\n", True),
+    ("open-source-repository", "- [ ] Make the GitHub repository open source\n", True),
+    ("open-source-repository", "- [ ] Open source GitHub\nrepository\n", True),
+    ("open-source-repository", f"- [x] {_REPO_ITEM}\n", False),
+    ("open-source-repository", "- [ ] Reddit posts in r/privacy, r/opensource\n", False),  # PRD
+    ("open-source-repository", "- [ ] Open source RAG pipeline\n", False),
+    ("open-source-repository", "- [ ] Repository pattern for storage adapters\n", False),
+    ("open-source-repository", "- [ ] Open-source dependencies only (HR1)\n", False),
+]
+
+
+@pytest.mark.parametrize(
+    "name,text,is_open", CHECKLIST_VECTORS, ids=[f"{v[0]}-{i}" for i, v in enumerate(CHECKLIST_VECTORS)]
+)
+def test_vectors_licence_checklist(name: str, text: str, is_open: bool) -> None:
+    names = [found[1] for found in _open_licence_items(text)]
+    assert (name in names) is is_open, f"{name} open={is_open} expected for {_show(text)}; got {names}"
+
+
+def test_vectors_checklist_table_has_positive_and_negative_per_item() -> None:
+    for name in sorted(LICENCE_DECISION_ITEMS):
+        rows = [v for v in CHECKLIST_VECTORS if v[0] == name]
+        assert any(v[2] for v in rows), f"{name} has no open-item vector"
+        assert any(not v[2] for v in rows), f"{name} has no closed or benign vector"
+    assert {v[0] for v in CHECKLIST_VECTORS} == set(LICENCE_DECISION_ITEMS)
+
+
+def test_checklist_reports_the_item_line_number() -> None:
+    """The message points at the item's own line, derived from the text."""
+    text = f"# Status\n\n- [x] Done thing\n- [ ] Code of conduct\n- [ ] {_LICENCE_ITEM}\n"
+    expected = text.split("\n").index(f"- [ ] {_LICENCE_ITEM}") + 1
+    assert _open_licence_items(text) == [(expected, "licence-selection", _LICENCE_ITEM.casefold())]
 
 
 LICENCE_NAME_VECTORS: list[tuple[str, bool]] = [
