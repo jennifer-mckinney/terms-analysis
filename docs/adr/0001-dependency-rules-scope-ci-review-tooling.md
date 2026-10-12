@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-09
 - **Decided by:** owner, 2026-10-09
+- **Approved-by:** @jennifer-mckinney, 2026-10-09
 - **Governs:** `.claude/CLAUDE.md` hard requirements HR1 (open source only), HR2 (no investor-lawsuit vendors), HR3 (IRP Grade A or higher), HR4 (local-only data, no external API calls) and HR6 (no OpenAI, local-only LLM inference), plus their restatements in `.claude/library/LIB-PRINCIPLES.md` P5 and `.claude/library/LIB-STACK.md` S1
 - **Companion:** legal-corpus-ingester ADR-015 records the same decision for that repo's constraints C3 and C7
 
