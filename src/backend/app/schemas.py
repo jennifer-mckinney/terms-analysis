@@ -158,17 +158,30 @@ ContextChip = Literal[
 #   ok                        an answer arrived and passed ``LLMAnswer``
 #   fallback_llm_unreachable  no HTTP response (httpx TransportError, incl.
 #                             every timeout): LocalAI is down or unreachable
+#   fallback_llm_upstream     LocalAI answered HTTP 5xx (500-599), e.g. model
+#                             not loaded or backend out of memory: a server
+#                             availability problem, not our request (#288)
+#   fallback_llm_rate_limited LocalAI answered HTTP 429: the server is healthy
+#                             but our load exceeded its capacity; align
+#                             MAX_CONCURRENT_ANALYSES with that capacity or add
+#                             capacity. Retry-After is not honoured: one
+#                             request, no wait, no retry (#288)
 #   fallback_llm_invalid      a 2xx response whose answer failed parsing or
 #                             ``LLMAnswer`` validation
-#   fallback_llm_error        anything else inside the HR5 boundary: a non-2xx
-#                             reply, model selection, prompt build, request
-#                             encoding, an unforeseen exception
+#   fallback_llm_error        anything else inside the HR5 boundary: any other
+#                             non-2xx reply (a 4xx other than 429, a 3xx, a
+#                             code above 599), model selection, prompt
+#                             build, request encoding, an unforeseen exception
 #   disabled                  the LLM step was not run (quick mode)
 #   unknown                   rows stored before this field existed; a fresh
 #                             analysis never reports it
+# The HTTP status line alone decides between upstream, rate_limited and error;
+# the response body and headers never do (#288).
 LLMStatus = Literal[
     "ok",
     "fallback_llm_unreachable",
+    "fallback_llm_upstream",
+    "fallback_llm_rate_limited",
     "fallback_llm_invalid",
     "fallback_llm_error",
     "disabled",
@@ -832,9 +845,14 @@ class AnalysisPayload(BaseModel):
         description=(
             "Outcome of the LLM step: 'ok' (a validated answer was used), "
             "'fallback_llm_unreachable' (LocalAI gave no HTTP response), "
+            "'fallback_llm_upstream' (LocalAI replied HTTP 5xx, e.g. model not "
+            "loaded), "
+            "'fallback_llm_rate_limited' (LocalAI replied HTTP 429: healthy but "
+            "over capacity; align MAX_CONCURRENT_ANALYSES with its capacity or "
+            "add capacity; the call is not retried), "
             "'fallback_llm_invalid' (a 2xx answer failed parsing or validation), "
-            "'fallback_llm_error' (any other failure, e.g. a non-2xx reply or an "
-            "internal error), 'disabled' (quick mode, no LLM call). Every "
+            "'fallback_llm_error' (any other failure, e.g. another non-2xx reply "
+            "or an internal error), 'disabled' (quick mode, no LLM call). Every "
             "fallback value means rules-only findings with reduced confidence "
             "(HR5). 'unknown' only appears on analyses stored before this field "
             "existed."

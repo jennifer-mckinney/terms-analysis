@@ -49,8 +49,10 @@ def _llm_status(llm_payload: Optional[Dict[str, Any]], client: Any) -> LLMStatus
     "ok" comes only from a returned answer (``LocalAIClient.analyze`` returns
     one only after ``LLMAnswer`` validated it), never from a client attribute
     or a key in the answer. With no answer, the client's recorded fallback
-    reason is used if it is a known fallback value; anything else (an unset,
-    stale-typed or foreign value, a stub client) fails closed to
+    reason is used if it is exactly a known fallback value (every fallback
+    member of ``LLMStatus``, including #288's upstream and rate_limited);
+    anything else (an unset, stale-typed or foreign value, a near-miss or
+    look-alike spelling, a stub client) fails closed to
     "fallback_llm_error", the "our code fell back" class.
     """
     if llm_payload:
