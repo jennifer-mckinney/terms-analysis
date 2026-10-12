@@ -129,3 +129,7 @@ ignore/
 
 # Session handoffs — local only per user directive 2026-07-03
 SESSION_HANDOFF_*.md
+
+# Evidence: local only, never tracked (#367). The CI evidence-scan job is the
+# backstop for force-adds; required by .claude/governance/required-gitignore.txt.
+docs/evidence/

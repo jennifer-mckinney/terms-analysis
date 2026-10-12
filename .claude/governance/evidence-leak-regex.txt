@@ -63,7 +63,7 @@
 # that starts with a compressed or archived signature (zip / docx / xlsx,
 # gzip, bzip2, xz, zstd, 7z, PDF; table leak_scan.CONTAINER_SIGNATURES) is
 # refused as "opaque-container", because a path inside it cannot be read.
-# Commit evidence as plain text.
+# Keep evidence as plain text.
 #
 # dashed-home (#91 r7): a slug token starts with "-" (the path's leading "/")
 # that is not preceded by a name character, then any number of "<seg>-"
