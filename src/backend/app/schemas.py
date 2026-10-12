@@ -5,7 +5,7 @@ import logging
 import re
 import unicodedata
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional, get_args
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple, get_args
 
 from pydantic import BaseModel, Field, StrictFloat, field_validator, model_validator
 
@@ -452,53 +452,75 @@ def _render_raw_status(raw: str) -> str:
     return f"'{shown}'"
 
 
-def normalise_corpus_status(raw: Any) -> Optional[str]:
-    """The canonical form of a legal-corpus status; None when none was declared.
+def classify_corpus_status(raw: Any) -> Tuple[Optional[str], Optional[str]]:
+    """``(status, warning)`` for a legal-corpus status, without logging.
+
+    ``status`` is the canonical form; None when none was declared. ``warning``
+    is the WARNING the value calls for (naming the raw value, escaped, and
+    what it was read as), or None for a known, variant or absent status.
 
     Issue #91 (grumpy F2): corpus files declare ``# Status: PLACEHOLDER`` in
     upper case and the parser keeps meta values verbatim. Single source of
-    truth for both the analyzer (authoritative-flag computation) and the
-    ``LegalCitation`` validator (stored rows, any other producer).
+    truth for the analyzer (citations, authoritative flag), the prompt labels
+    (``passage_label_keys``) and the ``LegalCitation`` validator.
 
     Issue #176 (owner ruling 2026-10-12, "misspelling need to be accounted
     for"): case, width and separator variants ("In Force", "in-force") map
     to the known status silently; a misspelling of exactly one known status
-    ("in_froce") maps to it with one WARNING naming the raw value and the
-    status. Anything else is unknown: one WARNING, and the canonical value is
-    returned, which is never a known status, so it stays unverified. That
+    ("in_froce") maps to it, with a warning naming the raw value and the
+    status. Anything else is unknown, with a warning, and the canonical value
+    is returned, which is never a known status, so it stays unverified. That
     covers negated values ("not in force", "un_force"), look-alike or hidden
     characters and distance 2 or more. Non-strings and values longer than
     ``corpus_status_max_chars`` (not normalised at all: bounded work) are
     unknown and returned as None. None and blank values are "no status
-    declared": None, no warning.
+    declared": None, no warning. The result is a fixed point: re-classifying
+    the returned status gives the same status.
     """
     if raw is None:
-        return None
+        return None, None
     if not isinstance(raw, str):
-        logger.warning("corpus status of type %s is not text; treated as unknown", type(raw).__name__)
-        return None
+        return None, f"corpus status of type {type(raw).__name__} is not text; treated as unknown"
     max_chars = app_config.settings.corpus_status_max_chars
     if len(raw) > max_chars:
-        logger.warning(
-            "corpus status %s is longer than %d characters; treated as unknown (unverified provenance)",
-            _render_raw_status(raw),
-            max_chars,
+        return None, (
+            f"corpus status {_render_raw_status(raw)} is longer than {max_chars} characters; "
+            "treated as unknown (unverified provenance)"
         )
-        return None
     canonical = _canonical_status(raw)
     if not canonical:
-        return None
+        return None, None
     if canonical in KNOWN_CORPUS_STATUSES:
-        return canonical
+        return canonical, None
     resolved = _resolve_status_typo(canonical)
     if resolved is None:
-        logger.warning(
-            "corpus status %s is not a known status; treated as unknown (unverified provenance)",
-            _render_raw_status(raw),
+        return canonical, (
+            f"corpus status {_render_raw_status(raw)} is not a known status; "
+            "treated as unknown (unverified provenance)"
         )
-        return canonical
-    logger.warning("corpus status %s is not a known status; read as the misspelling %r", _render_raw_status(raw), resolved)
-    return resolved
+    return resolved, (
+        f"corpus status {_render_raw_status(raw)} is not a known status; read as the misspelling {resolved!r}"
+    )
+
+
+def normalise_corpus_status(raw: Any, seen: Optional[Set[Any]] = None) -> Optional[str]:
+    """``classify_corpus_status(raw)``'s status, logging its warning.
+
+    Review round 2 (threads Uk0c, Ukz1): one WARNING per distinct raw value
+    per analysis request. The analyzer passes one ``seen`` set per request,
+    so a value repeated across chunks warns once; every later reader of the
+    status (prompt labels, the authoritative flag, the payload and response
+    validation) classifies silently. Without ``seen`` every call logs.
+    """
+    status, warning = classify_corpus_status(raw)
+    if warning is not None:
+        # A non-text value is keyed by its type: it may be unhashable.
+        key = raw if isinstance(raw, str) else type(raw)
+        if seen is None or key not in seen:
+            logger.warning("%s", warning)
+            if seen is not None:
+                seen.add(key)
+    return status
 
 
 def has_format_character(text: str) -> bool:
@@ -630,7 +652,8 @@ def passage_label_keys(status: Any, jurisdiction: Any, requested: Any) -> List[s
     a US-CA analysis; it is labelled out of jurisdiction, never authoritative.
     """
     keys: List[str] = []
-    normalised = normalise_corpus_status(status)
+    # Silent: the analyzer has already logged this status once per request.
+    normalised, _ = classify_corpus_status(status)
     if normalised == PLACEHOLDER_STATUS:
         keys.append("placeholder")
     elif normalised == NOT_YET_IN_FORCE_STATUS:
@@ -688,7 +711,9 @@ class LegalCitation(BaseModel):
     @field_validator("status", mode="before")
     @classmethod
     def _normalise_status(cls, v: Any) -> Optional[str]:
-        return normalise_corpus_status(v)
+        # Silent: re-validation (stored rows, response_model) must not log
+        # again; the analyzer logs once per request (review round 2).
+        return classify_corpus_status(v)[0]
 
 
 class AnalysisPayload(BaseModel):

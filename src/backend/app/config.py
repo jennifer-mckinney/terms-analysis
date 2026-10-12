@@ -196,7 +196,7 @@ class Settings:
         default_factory=lambda: _parse_min_score(os.getenv("LEGAL_KB_MIN_SCORE"))
     )
     # ── Corpus status resolution (#176, owner ruling 2026-10-12) ────────────
-    # Read by schemas.normalise_corpus_status. A status within this many edits
+    # Read by schemas.classify_corpus_status. A status within this many edits
     # (Damerau-Levenshtein, on the canonical form) of exactly one known status
     # resolves to it with a WARNING. 0 turns typo resolution off. At most
     # CORPUS_STATUS_MAX_EDIT_DISTANCE_CEILING: the known statuses are >= 3
@@ -210,12 +210,14 @@ class Settings:
     corpus_status_max_chars: int = _env_int("CORPUS_STATUS_MAX_CHARS", "256")
     # A typo that contains any of these tokens never resolves to an
     # authoritative status ("un_force" is one edit from "in_force").
-    # Lower-case ASCII letters, compared against the canonical status.
+    # Lower-case ASCII letters, compared against the canonical status. The
+    # default is CORPUS_STATUS_BUILTIN_NEGATION_TOKENS; an override may only
+    # add tokens (review round 2, thread Ul61: dropping one fails startup).
     corpus_status_negation_tokens: Tuple[str, ...] = field(
         default_factory=lambda: tuple(
             _split_env_list(
                 "CORPUS_STATUS_NEGATION_TOKENS",
-                "not,no,non,never,un,repealed,revoked,expired,superseded,draft",
+                ",".join(CORPUS_STATUS_BUILTIN_NEGATION_TOKENS),
             )
         )
     )
@@ -703,6 +705,22 @@ CORPUS_STATUS_MAX_CHARS_FLOOR = 32
 CORPUS_STATUS_MAX_CHARS_CEILING = 65536
 # A negation token: lower-case ASCII letters, the alphabet of a canonical status.
 _NEGATION_TOKEN_RE = re.compile(r"[a-z]{1,32}")
+# The negation tokens that always apply: the env default and the floor every
+# CORPUS_STATUS_NEGATION_TOKENS override must contain. A security floor, not a
+# tunable: an override without "un" would let "un_force" resolve to in_force.
+# The single home of the list; nothing else restates it.
+CORPUS_STATUS_BUILTIN_NEGATION_TOKENS: Tuple[str, ...] = (
+    "not",
+    "no",
+    "non",
+    "never",
+    "un",
+    "repealed",
+    "revoked",
+    "expired",
+    "superseded",
+    "draft",
+)
 
 
 def _validate_corpus_status_settings(s: Settings) -> None:
@@ -721,6 +739,13 @@ def _validate_corpus_status_settings(s: Settings) -> None:
         raise ValueError(
             f"{_label('corpus_status_negation_tokens')} must be a non-empty list of "
             "lower-case ASCII words"
+        )
+    # Fail closed (thread Ul61): an override may add tokens, never drop one.
+    missing = [t for t in CORPUS_STATUS_BUILTIN_NEGATION_TOKENS if t not in tokens]
+    if missing:
+        raise ValueError(
+            f"{_label('corpus_status_negation_tokens')} must keep every built-in token "
+            f"and may only add more; missing: {','.join(missing)}"
         )
     object.__setattr__(s, "corpus_status_negation_tokens", tuple(tokens))
 
