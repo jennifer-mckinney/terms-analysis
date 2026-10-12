@@ -1108,7 +1108,15 @@ def export_analysis_pdf(analysis_id: str, db: Session = Depends(get_db)):
 # ending in ".pdf" too, silently shadowing the PDF export route (issue found
 # by independent UI/UX review — both frontends' "PDF export" were actually
 # hitting this JSON route and getting a 404 for a literal "<id>.pdf" lookup).
+#
+# #36 (owner ruling "Add .json, keep alias"): ".json" is the PRD export path
+# and the bare path stays as an alias; both serve this one handler, behind the
+# same global auth and rate limit. Decorators apply bottom-up, so ".json"
+# (nearest the def) registers BEFORE the alias. The order is .pdf, .json, alias:
+# registered the other way round, the alias would capture "<id>.json" as a
+# literal ID and 404 it, which is the bug #36 fixes.
 @app.get("/exports/analysis/{analysis_id}")
+@app.get("/exports/analysis/{analysis_id}.json")
 def export_analysis_json(analysis_id: str, db: Session = Depends(get_db)):
     record = db.query(Analysis).filter(Analysis.id == analysis_id).first()
     if not record:

@@ -19,8 +19,9 @@ status (2026-07-31): endpoint map = 25 business routes + `/health` = 26 total, v
 | GET | `/rubric` | None | — | `RubricScores \| None` | Computed from all analyses |
 | GET | `/analyses/{id}` | None | path: `id` | `AnalysisPayload` | 404 if missing |
 | GET | `/exports/analyses.csv` | None | — | CSV download | |
-| GET | `/exports/analysis/{id}.pdf` | None | path: `id` | PDF download | Requires reportlab; route registered BEFORE JSON export below so not shadowed |
-| GET | `/exports/analysis/{id}` | None | path: `id` | JSON download | |
+| GET | `/exports/analysis/{id}.pdf` | None | path: `id` | PDF download | Requires reportlab; route registered BEFORE both JSON routes below so not shadowed |
+| GET | `/exports/analysis/{id}.json` | None | path: `id` | JSON download | PRD F5.2 path (#36); registered BEFORE the alias below |
+| GET | `/exports/analysis/{id}` | None | path: `id` | JSON download | Alias of `.json`: same handler, same response |
 | GET | `/reviews` | None | — | `List[ReviewItemPayload]` | Pending reviews |
 | POST | `/reviews/{id}` | None | `ReviewUpdate` | `ReviewItemPayload` | Approve/reject |
 | GET | `/watchlist` | None | — | `List[WatchlistItemPayload]` | All items |
@@ -36,12 +37,12 @@ status (2026-07-31): endpoint map = 25 business routes + `/health` = 26 total, v
 | DELETE | `/policy-watch/{id}` | None | path: `id` | `{detail}` | Remove watch |
 | POST | `/policy-watch/{id}/snapshot` | None | path: `id` | `PolicySnapshotPayload` | Manually trigger snapshot |
 
-### API1: no-auth-currently
-rule: no route requires authentication; there is no API-key or session auth layer in the shipped backend
+### API1: api-key-auth
+rule: since #133 every route runs the global `security.enforce_access` dependency: a pre-auth rate limit by peer, then the `X-API-Key` check (401 on a missing or wrong key). `/health` has its own limit and needs no key. With `DEPLOY_ENV=local`, an empty key and a loopback bind, loopback peers without a forwarding header are served without a key. The Auth column above predates #133
 
-### API2: pdf-route-ordering
-rule: `/exports/analysis/{id}.pdf` MUST be registered BEFORE `/exports/analysis/{id}` in `main.py`
-because: FastAPI would otherwise shadow the PDF route with the JSON route
+### API2: export-route-ordering
+rule: in `main.py` the export routes register in this order: `/exports/analysis/{id}.pdf`, then `/exports/analysis/{id}.json`, then the alias `/exports/analysis/{id}`
+because: Starlette matches routes in registration order and `{id}` is greedy, so the alias registered earlier would capture `<id>.pdf` or `<id>.json` as a literal ID and 404
 
 ### API3: cross-endpoint-field-parity
 rule: a field validated on `/analyze` MUST be validated identically on `/analyze/url`, `/analyze/file`, `/analyze/batch`
