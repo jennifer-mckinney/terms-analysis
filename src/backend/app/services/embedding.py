@@ -1,35 +1,24 @@
 from __future__ import annotations
 
 """
-3-way embedding ensemble for legal document retrieval.
+Chunking, BM25, RRF and query-format primitives for legal retrieval.
 
-Architecture:
-  Layer 1 — BM25 (sparse, rank_bm25, MIT, no model)
-             Critical for exact legal citations and defined terms.
-  Layer 2 — Apertus mean pooling (dense, Swiss AI Initiative, 1,000+ languages)
-             World-language semantic coverage.
-  Layer 3 — EuroLLM mean pooling (dense, EU Horizon/EuroHPC, EU legal corpus)
-             EU regulatory language specialisation.
-  Fusion   — Reciprocal Rank Fusion (k=60), no trainable parameters.
+Used by the legal KB (legal_kb.py):
+  BM25   — sparse, rank_bm25 (MIT, no model). Exact legal citations and
+           defined terms.
+  Dense  — settings.embedding_model (multilingual-e5-large-instruct) via
+           LocalAIClient.embed. Queries use format_e5_query; passages are
+           embedded raw.
+  Fusion — Reciprocal Rank Fusion (settings.rrf_k), no trainable parameters.
 
-Primary use: select the most legally relevant chunks from over-length documents
-instead of naively truncating the head. Falls back to head truncation when the
-embedding endpoint is unreachable.
-
-Plug-in options for future 4th embedding layer (all qualified under ethical criteria):
-  - AI4Bharat IndicBERT (IIT Madras / MeitY, Apache 2.0, 22 Indian languages)
-  - Masakhane community models (Pan-African grassroots, Apache 2.0, 40+ African languages)
-  - Helsinki-NLP OPUS-MT encoder (Univ. Helsinki / EU, Apache 2.0, 1,000+ translation pairs)
+The former select_relevant_chunks (BM25 + Apertus + EuroLLM mean-pool over a
+document's own chunks) was removed in #98-A: it had no caller, embedded with
+generative models (F7), and the e5 query task is legal-KB specific.
 """
 
 import logging
 import re
-from typing import TYPE_CHECKING, List, Tuple
-
-from ..config import settings
-
-if TYPE_CHECKING:
-    from .localai import LocalAIClient
+from typing import List, Tuple
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -131,84 +120,19 @@ def rrf_fuse(score_lists: List[List[float]], k: int = 60) -> List[float]:
     return combined
 
 
-# ── Main entry point ──────────────────────────────────────────────────────────
+# ── e5-instruct query format ─────────────────────────────────────────────────
 
-async def select_relevant_chunks(
-    text: str,
-    query: str,
-    max_chars: int,
-    client: "LocalAIClient",
-) -> str:
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+
+
+def format_e5_query(task: str, text: str) -> str:
+    r"""Return the e5-instruct query input: ``Instruct: <task>\nQuery: <text>``.
+
+    The task is validated in config (printable ASCII, single spaces). The
+    user text has every whitespace run (including every Unicode line break)
+    collapsed to one space, so the result holds exactly one line break and
+    user text cannot forge an ``Instruct:`` line (F5). Not stripped: the
+    collapse alone removes the structure, and leading/trailing spaces are
+    harmless to the model.
     """
-    Return the most legally relevant portion of text within max_chars.
-
-    Uses the 3-way ensemble (BM25 + Apertus + EuroLLM) to rank chunks,
-    then reassembles the top-scoring chunks in document order.
-
-    Falls back to head truncation if any embedding call fails, ensuring
-    the critical analysis path is never blocked by embedding availability.
-
-    Args:
-        text:      Full document text.
-        query:     Legal context string used as ranking query
-                   (e.g. jurisdiction names + key legal terms).
-        max_chars: Maximum characters to return.
-        client:    LocalAIClient instance for dense embedding calls.
-    """
-    if len(text) <= max_chars:
-        return text
-
-    chunks = chunk_text(text)
-    corpus = [chunk_text_part for _, chunk_text_part in chunks]
-
-    # Layer 1 — BM25 (exact legal keyword matching)
-    bm25 = bm25_scores(query, corpus)
-
-    # Layer 2 — Apertus embeddings (world-language semantic)
-    query_emb_world = await client.embed(query, model=settings.model_world)
-    if query_emb_world is None:
-        logger.info(
-            "Apertus embedding unavailable — falling back to head truncation"
-        )
-        return text[:max_chars]
-
-    chunk_scores_world: List[float] = []
-    for chunk in corpus:
-        emb = await client.embed(chunk, model=settings.model_world)
-        score = (
-            sum(a * b for a, b in zip(query_emb_world, emb)) if emb else 0.0
-        )
-        chunk_scores_world.append(score)
-
-    # Layer 3 — EuroLLM embeddings (EU legal domain)
-    query_emb_eu = await client.embed(query, model=settings.model_eu)
-    if query_emb_eu is not None:
-        chunk_scores_eu: List[float] = []
-        for chunk in corpus:
-            emb = await client.embed(chunk, model=settings.model_eu)
-            score = (
-                sum(a * b for a, b in zip(query_emb_eu, emb)) if emb else 0.0
-            )
-            chunk_scores_eu.append(score)
-    else:
-        chunk_scores_eu = [0.0] * len(corpus)
-
-    # RRF fusion
-    fused = rrf_fuse(
-        [bm25, chunk_scores_world, chunk_scores_eu],
-        k=settings.rrf_k,
-    )
-
-    # Select top chunks within budget, then re-sort by original position
-    ranked = sorted(enumerate(fused), key=lambda x: x[1], reverse=True)
-    selected: List[Tuple[int, str]] = []
-    budget = 0
-    for idx, _ in ranked:
-        chunk = corpus[idx]
-        if budget + len(chunk) > max_chars:
-            break
-        selected.append(chunks[idx])
-        budget += len(chunk)
-
-    selected.sort(key=lambda x: x[0])
-    return "\n...\n".join(c for _, c in selected)
+    return f"Instruct: {task}\nQuery: {_WHITESPACE_RUN_RE.sub(' ', text)}"

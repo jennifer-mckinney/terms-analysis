@@ -23,8 +23,8 @@ graph TB
 
         subgraph AI ["AI / ML Layer"]
             LLM["LocalAI\nApertus-8B-Instruct · EuroLLM-22B-Instruct"]:::ai
-            LKB["Legal KB\nnumpy-exhaustive + BM25/RRF\n(wired into analyze_text)"]:::ai
-            EMB["Doc-chunk Embedding Ensemble\nBM25 + dense + RRF\n(NOT wired into analyze_text)"]:::ai
+            LKB["Legal KB\nmultilingual-e5-large-instruct dense + BM25/RRF\nnumpy-exhaustive (wired into analyze_text)"]:::ai
+            EMB["Retrieval primitives (embedding.py)\nchunk · BM25 · RRF · e5 query format\n(used by Legal KB)"]:::ai
             RULES["Rule Engine\n64 patterns · ~50 categories · 30 jurisdictions"]:::ai
         end
 
@@ -108,7 +108,7 @@ graph TB
         VAL["validation.py\nvalidate_findings()"]:::svc
         DIF["diffing.py\ncontent_hash()\ndiff_tokens()\ndiff_summary()"]:::svc
         LKB["legal_kb.py\nLegalKnowledgeBase\nbuild() / retrieve()\nnumpy-exhaustive + BM25/RRF"]:::svc
-        EMB["embedding.py\nchunk_text() / bm25_scores() / rrf_fuse()\nselect_relevant_chunks() — NOT called by analyzer.py"]:::dead
+        EMB["embedding.py\nchunk_text() / bm25_scores() / rrf_fuse()\nformat_e5_query() — used by legal_kb.py"]:::svc
         LOC["localai.py\nLocalAIClient\n_select_model() · embed()"]:::svc
     end
 

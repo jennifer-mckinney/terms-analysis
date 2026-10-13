@@ -287,9 +287,12 @@ class LocalAIClient:
     ) -> Optional[List[float]]:
         """
         Get a dense embedding vector via LocalAI's /embeddings endpoint.
-        Used by the embedding ensemble (embedding.py) for chunk ranking.
+        Used by the legal KB (legal_kb.py) for build and retrieve. The
+        default is settings.embedding_model; a generative model is never
+        used as a fallback (F7), so an outage returns None and the caller
+        drops to rule-only findings (HR5).
         """
-        selected = model or settings.model_world
+        selected = model or settings.embedding_model
         endpoint = f"{self._base_url}/embeddings"
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:

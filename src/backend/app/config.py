@@ -138,6 +138,22 @@ class Settings:
     # Download: https://huggingface.co/utter-project/EuroLLM-22B-Instruct-GGUF
     model_eu: str = os.getenv("MODEL_EU", "eurollm-22b-instruct")
 
+    # ── Legal-KB embedder (#98-A) ───────────────────────────────────────────
+    # The LocalAI model that embeds legal-KB passages (build) and queries
+    # (retrieve): multilingual-e5-large-instruct (MIT, intfloat). A bare
+    # LocalAI model name; never a generative model (F7: an outage must not
+    # fall back to Apertus/EuroLLM vectors). Checked by
+    # _validate_embedding_settings, so a bad value stops startup.
+    embedding_model: str = os.getenv("EMBEDDING_MODEL", "multilingual-e5-large-instruct")
+    # One-sentence task for the e5-instruct query format
+    # "Instruct: <task>\nQuery: <text>" (model card). Query side only;
+    # passages are embedded raw. Printable ASCII words, single spaces.
+    embedding_query_task: str = os.getenv(
+        "EMBEDDING_QUERY_TASK",
+        "Given an excerpt from a terms of service or privacy policy, "
+        "retrieve the legal provisions that apply to it",
+    )
+
     # Language routing: these ISO 639-1 codes route to EuroLLM; all others → Apertus
     eu_language_codes: List[str] = field(
         default_factory=lambda: _split_env_list(
@@ -149,8 +165,8 @@ class Settings:
         os.getenv("LANGUAGE_DETECTION_ENABLED", "true").lower() == "true"
     )
 
-    # ── Embedding ensemble ───────────────────────────────────────────────────
-    # BM25 + Apertus mean-pool + EuroLLM mean-pool fused via Reciprocal Rank Fusion
+    # ── Legal-KB fusion ──────────────────────────────────────────────────────
+    # BM25 + embedding_model dense scores fused via Reciprocal Rank Fusion
     rrf_k: int = int(os.getenv("RRF_K", "60"))
 
     # ── Legal knowledge base (RAG) ──────────────────────────────────────────
@@ -184,8 +200,8 @@ class Settings:
     # candidate. Applied before RRF fusion; passages scoring strictly below it
     # are dropped, and if none survive the retrieval reports NO_MATCH.
     # Default None = floor DISABLED. The value is uncalibrated (no gold set
-    # yet for the Apertus mean-pooled embeddings, whose cosines sit in a
-    # compressed positive band), and a 0.0 default looked like a filter while
+    # yet for the EMBEDDING_MODEL cosines; e5 cosines sit in a compressed
+    # positive band), and a 0.0 default looked like a filter while
     # keeping every candidate. With the floor disabled NO_MATCH cannot be
     # reported, the app logs a WARNING at startup, and
     # legal_grounding_authoritative is forced False (nobody checked the
@@ -340,6 +356,9 @@ class Settings:
         # Same for corpus status resolution (#176): a bad edit distance or an
         # empty negation list would widen what counts as in force.
         _validate_corpus_status_settings(self)
+        # Same for the legal-KB embedder (#98-A, F4/F7): a URL, path,
+        # multi-line value or a generative model must stop startup.
+        _validate_embedding_settings(self)
 
 
 def _is_int(value: object) -> bool:
@@ -437,6 +456,10 @@ _ENV_NAMES = {
     "corpus_status_log_max_chars": "CORPUS_STATUS_LOG_MAX_CHARS",
     "corpus_status_max_chars": "CORPUS_STATUS_MAX_CHARS",
     "corpus_status_negation_tokens": "CORPUS_STATUS_NEGATION_TOKENS",
+    "model_world": "MODEL_WORLD",
+    "model_eu": "MODEL_EU",
+    "embedding_model": "EMBEDDING_MODEL",
+    "embedding_query_task": "EMBEDDING_QUERY_TASK",
 }
 
 
@@ -748,6 +771,58 @@ def _validate_corpus_status_settings(s: Settings) -> None:
             f"and may only add more; missing: {','.join(missing)}"
         )
     object.__setattr__(s, "corpus_status_negation_tokens", tuple(tokens))
+
+
+# ── Legal-KB embedder validation (#98-A) ────────────────────────────────────
+# Validator limits, not tunables: they bound what a model name / one-sentence
+# task can look like, so they live beside the patterns they guard.
+EMBEDDING_MODEL_MAX_CHARS = 128
+EMBEDDING_QUERY_TASK_MAX_CHARS = 512
+# Allowlist: a bare LocalAI model name. Lower-case ASCII letters, digits, and
+# "." "_" "-" only, starting with a letter or digit. No "/", ":", "\", spaces
+# or non-ASCII, so a URL, path, scheme or homoglyph cannot pass. Linear: one
+# character class, no nested quantifier.
+_EMBEDDING_MODEL_RE = re.compile(r"[a-z0-9][a-z0-9._-]*")
+# Allowlist: printable ASCII words separated by single spaces. No line break,
+# tab, control, format or non-ASCII character, so the task cannot forge a
+# second "Instruct:"/"Query:" line (F5). Linear: every repeat starts with the
+# literal space, which the word class [!-~] never matches.
+_EMBEDDING_TASK_RE = re.compile(r"[!-~]+(?: [!-~]+)*")
+
+
+def _validate_embedding_settings(s: Settings) -> None:
+    """Raise ValueError on a bad embedding_model / embedding_query_task.
+
+    Messages name the setting and its env var and never echo the value (F8).
+    """
+    model = s.embedding_model
+    if (
+        not isinstance(model, str)
+        or not 0 < len(model) <= EMBEDDING_MODEL_MAX_CHARS
+        or not _EMBEDDING_MODEL_RE.fullmatch(model)
+        or ".." in model
+    ):
+        raise ValueError(
+            f"{_label('embedding_model')} must be a bare model name of at most "
+            f"{EMBEDDING_MODEL_MAX_CHARS} lower-case ASCII letters, digits, '.', '_' or '-'"
+        )
+    # F7: the embedder is never a generative model, checked against the live
+    # values so an override of either side cannot make them collide.
+    if model in (s.model_world, s.model_eu):
+        raise ValueError(
+            f"{_label('embedding_model')} must differ from {_label('model_world')} "
+            f"and {_label('model_eu')}; a generative model is not an embedder"
+        )
+    task = s.embedding_query_task
+    if (
+        not isinstance(task, str)
+        or not 0 < len(task) <= EMBEDDING_QUERY_TASK_MAX_CHARS
+        or not _EMBEDDING_TASK_RE.fullmatch(task)
+    ):
+        raise ValueError(
+            f"{_label('embedding_query_task')} must be one sentence of at most "
+            f"{EMBEDDING_QUERY_TASK_MAX_CHARS} printable ASCII characters with single spaces"
+        )
 
 
 settings = Settings()

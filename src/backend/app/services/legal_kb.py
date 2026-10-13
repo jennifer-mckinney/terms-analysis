@@ -8,7 +8,9 @@ Architecture:
   Corpus   — data/legal_corpus/<jurisdiction>/<law>.txt (see .claude/skills/legal-kb)
   Chunking — reuses embedding.py::chunk_text, preserving "## Article/Section N —
              Title" boundaries where present so each chunk stays citable.
-  Dense    — Apertus embeddings via LocalAIClient.embed(), L2-normalized and
+  Dense    — settings.embedding_model (multilingual-e5-large-instruct) via
+             LocalAIClient.embed(): passages embedded raw at build, queries
+             sent as embedding.py::format_e5_query (#98-A). L2-normalized and
              persisted as a plain numpy matrix. Similarity is exact cosine
              (normalized dot product) computed exhaustively over the
              jurisdiction-filtered pool — no approximate/ANN index (FAISS was
@@ -17,8 +19,8 @@ Architecture:
              exhaustive search costs nothing).
   Sparse   — BM25 (rank_bm25, via embedding.py::bm25_scores) over the same
              pool, for exact citation/defined-term matches.
-  Fusion   — Reciprocal Rank Fusion (embedding.py::rrf_fuse), same k as the
-             document-chunk ensemble.
+  Fusion   — Reciprocal Rank Fusion (embedding.py::rrf_fuse, k =
+             settings.rrf_k).
 
 Retrieval never raises to the caller: analyze_text() must never be blocked by
 legal-KB availability (same fallback philosophy as embedding.py/localai.py,
@@ -47,7 +49,7 @@ from ..schemas import AUTHORITATIVE_STATUSES as _SCHEMA_AUTHORITATIVE_STATUSES
 from ..schemas import PLACEHOLDER_STATUS as _SCHEMA_PLACEHOLDER_STATUS
 from ..schemas import is_valid_utf8 as _is_valid_utf8
 from ..schemas import normalise_jurisdiction, normalise_section_title
-from .embedding import bm25_scores, chunk_text, rrf_fuse
+from .embedding import bm25_scores, chunk_text, format_e5_query, rrf_fuse
 from .localai import LocalAIClient
 
 logger = logging.getLogger("uvicorn.error")
@@ -174,10 +176,21 @@ def _check_matrix(matrix: np.ndarray, name: str) -> None:
         )
 
 
+def _is_blank_query(query: object) -> bool:
+    """True for an empty or whitespace-only query string (#98-A ruling Q3).
+
+    Same whitespace set as format_e5_query's collapse (str.isspace), so a
+    query is blank exactly when its collapsed form is empty or one space.
+    """
+    return isinstance(query, str) and (not query or query.isspace())
+
+
 class RetrievalStatus(str, Enum):
     """Outcome of one legal-KB retrieval (issue #91).
 
-    OK        -- index loaded, retrieval ran, at least one chunk returned.
+    OK        -- index loaded, retrieval ran, at least one chunk returned; or
+                 the query was empty/whitespace-only, so there was nothing to
+                 search for and no chunks are returned (#98-A ruling Q3).
     NO_MATCH  -- index loaded, retrieval ran, every candidate scored below
                  ``settings.legal_kb_min_score``. Unreachable while that floor
                  is unset (None = disabled, the default until calibrated).
@@ -422,7 +435,9 @@ class LegalKnowledgeBase:
         vectors: List[np.ndarray] = []
         kept_chunks: List[Dict[str, Any]] = []
         for chunk in chunks:
-            embedding = await client.embed(chunk["text"], model=settings.model_world)
+            # #98-A: passages go to the embedder raw (no e5 prefix); only
+            # queries carry the "Instruct: ...\nQuery: ..." format.
+            embedding = await client.embed(chunk["text"], model=settings.embedding_model)
             if embedding is None:
                 continue
             # Zero-norm or non-finite embeddings are skipped, never written.
@@ -630,7 +645,9 @@ class LegalKnowledgeBase:
         index and its 0 chunks), an unusable index or a failing retrieval step
         (including a zero-norm query embedding) yields ERROR (logged with the
         exception type and exc_info), and a loaded index whose candidates all
-        fall below ``settings.legal_kb_min_score`` yields NO_MATCH. Callers
+        fall below ``settings.legal_kb_min_score`` yields NO_MATCH. An empty
+        or whitespace-only query against a loaded index yields OK with no
+        chunks and never calls the embedder (#98-A ruling Q3). Callers
         must treat legal-KB context as optional, never load-bearing for
         analyze_text() (HR5).
         """
@@ -658,7 +675,13 @@ class LegalKnowledgeBase:
             )
             return RetrievalResult((), status=RetrievalStatus.ERROR)
 
-        status = RetrievalStatus.OK if chunks else RetrievalStatus.NO_MATCH
+        # #98-A ruling Q3: a blank query is OK with no chunks (nothing to
+        # search for), never NO_MATCH ("searched, no relevant law").
+        status = (
+            RetrievalStatus.OK
+            if chunks or _is_blank_query(query)
+            else RetrievalStatus.NO_MATCH
+        )
         return RetrievalResult(chunks, status=status)
 
     async def _retrieve(
@@ -714,9 +737,21 @@ class LegalKnowledgeBase:
         else:
             pool = list(range(len(chunks)))
 
+        if _is_blank_query(query):
+            # #98-A ruling Q3: nothing to search for; skip the embedder. The
+            # index was still loaded above, so a missing/corrupt index keeps
+            # its NO_INDEX/ERROR status.
+            return []
+
         # The failures below used to return [] (indistinguishable from "no
         # relevant law"); they now raise so retrieve() reports ERROR.
-        query_embedding = await client.embed(query, model=settings.model_world)
+        # #98-A: the e5-instruct query format, with every whitespace run in the
+        # user text collapsed so it cannot forge an Instruct: line (F5). BM25
+        # below keeps the raw query.
+        query_embedding = await client.embed(
+            format_e5_query(settings.embedding_query_task, query),
+            model=settings.embedding_model,
+        )
         if query_embedding is None:
             raise LegalKBRetrievalError("embedding endpoint returned no query vector")
         query_vec, defect = _normalize(query_embedding)
