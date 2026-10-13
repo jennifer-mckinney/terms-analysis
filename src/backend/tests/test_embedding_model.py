@@ -151,7 +151,7 @@ def override_settings() -> Iterator[Callable[..., None]]:
 
 
 @pytest.fixture
-def probe_embedding_settings(override_settings) -> Tuple[str, str]:
+def probe_embedding_settings(override_settings: Callable[..., None]) -> Tuple[str, str]:
     """Point the 98-A fields at probe values for one test.
 
     The field check runs in the test body (``_required``) so a missing field
@@ -163,7 +163,7 @@ def probe_embedding_settings(override_settings) -> Tuple[str, str]:
 
 
 @pytest.fixture
-def kb_paths(tmp_path, override_settings):
+def kb_paths(tmp_path: Path, override_settings: Callable[..., None]) -> Path:
     corpus_dir = tmp_path / "legal_corpus"
     override_settings(
         legal_corpus_dir=corpus_dir,
@@ -174,7 +174,7 @@ def kb_paths(tmp_path, override_settings):
 
 
 @pytest.fixture
-def fresh_kb(monkeypatch) -> LegalKnowledgeBase:
+def fresh_kb(monkeypatch: pytest.MonkeyPatch) -> LegalKnowledgeBase:
     """A fresh singleton so analyze_text() can't see another test's cached index."""
     kb = LegalKnowledgeBase()
     monkeypatch.setattr(legal_kb_module, "_legal_kb", kb)
@@ -314,7 +314,7 @@ def _load_settings_in_subprocess(env_overrides: Dict[str, Optional[str]]) -> sub
     )
 
 
-def test_embedding_settings_default_to_ruled_values():
+def test_embedding_settings_default_to_ruled_values() -> None:
     """With no env override, the loaded settings are the ruled e5 model and task."""
     proc = _load_settings_in_subprocess({v: None for v in _ENV.values()})
     assert proc.returncode == 0, proc.stderr[-2000:]
@@ -323,7 +323,7 @@ def test_embedding_settings_default_to_ruled_values():
     assert loaded["embedding_query_task"] == _RULED_QUERY_TASK
 
 
-def test_embedding_settings_load_from_environment():
+def test_embedding_settings_load_from_environment() -> None:
     """F13: both values come from the environment, not from code."""
     proc = _load_settings_in_subprocess(
         {_ENV["embedding_model"]: _PROBE_MODEL, _ENV["embedding_query_task"]: _PROBE_TASK}
@@ -347,7 +347,7 @@ def test_embedding_settings_load_from_environment():
         ),
     ],
 )
-def test_bad_embedding_env_fails_closed_at_load(env_name, bad_value):
+def test_bad_embedding_env_fails_closed_at_load(env_name: str, bad_value: str) -> None:
     """F4/F13: a bad value stops startup (import raises), it is never used."""
     if bad_value == "MODEL_WORLD":
         bad_value = settings.model_world
@@ -359,7 +359,7 @@ def test_bad_embedding_env_fails_closed_at_load(env_name, bad_value):
     assert env_name in proc.stderr, f"load error does not name {env_name}: {proc.stderr[-500:]!r}"
 
 
-def test_env_example_documents_embedding_defaults():
+def test_env_example_documents_embedding_defaults() -> None:
     """F10/F13: the documented defaults are the ones the code loads."""
     documented = dotenv_values(_REPO_ROOT / ".env.example")
     proc = _load_settings_in_subprocess({v: None for v in _ENV.values()})
@@ -468,7 +468,7 @@ def _resolve(value: Any) -> Any:
     return {"<model_world>": settings.model_world, "<model_eu>": settings.model_eu}.get(value, value) if isinstance(value, str) else value
 
 
-def test_validator_tables_have_block_and_allow_rows_and_report_counts():
+def test_validator_tables_have_block_and_allow_rows_and_report_counts() -> None:
     """QUALITY-BAR 9 contract: each family has both outcomes; R2 count printed."""
     for field_name, rows in _VALIDATOR_TABLES.items():
         outcomes = {allowed for _, _, allowed in rows}
@@ -494,7 +494,7 @@ def _validator_cases() -> List[Any]:
 
 
 @pytest.mark.parametrize("field_name, value, allowed", _validator_cases())
-def test_embedding_settings_validator(field_name, value, allowed):
+def test_embedding_settings_validator(field_name: str, value: Any, allowed: bool) -> None:
     """F4: Settings(...)/dataclasses.replace fail closed on every block row."""
     _require_embedding_fields()
     value = _resolve(value)
@@ -511,7 +511,7 @@ def test_embedding_settings_validator(field_name, value, allowed):
 
 
 @pytest.mark.parametrize("which", ["model_world", "model_eu"])
-def test_embedding_model_must_differ_from_generative_models_after_override(which):
+def test_embedding_model_must_differ_from_generative_models_after_override(which: str) -> None:
     """F4: the comparison is against the live generative settings, both ways round."""
     _require_embedding_fields()
     with pytest.raises(ValueError):
@@ -521,7 +521,7 @@ def test_embedding_model_must_differ_from_generative_models_after_override(which
 
 
 # ══ Build: passages raw, embedding_model (F1, PE ruling 1b) ══════════════════
-def test_build_embeds_every_passage_raw_with_embedding_model(kb_paths, localai, probe_embedding_settings):
+def test_build_embeds_every_passage_raw_with_embedding_model(kb_paths: Path, localai: _LocalAI, probe_embedding_settings: Tuple[str, str]) -> None:
     model, _task = _required(probe_embedding_settings)
     count = _build(kb_paths)
 
@@ -539,7 +539,7 @@ def test_build_embeds_every_passage_raw_with_embedding_model(kb_paths, localai, 
 
 
 # ══ Retrieve: exact instruct query (F1, F5, PE ruling 1a) ════════════════════
-def test_retrieve_sends_exact_instruct_query_with_embedding_model(kb_paths, localai, probe_embedding_settings):
+def test_retrieve_sends_exact_instruct_query_with_embedding_model(kb_paths: Path, localai: _LocalAI, probe_embedding_settings: Tuple[str, str]) -> None:
     model, task = _required(probe_embedding_settings)
     _build(kb_paths)
     localai.reset()
@@ -574,7 +574,7 @@ _QUERY_VECTORS = [
 
 
 @pytest.mark.parametrize("query", _QUERY_VECTORS)
-def test_retrieve_collapses_whitespace_so_only_one_instruction_line(kb_paths, localai, probe_embedding_settings, query):
+def test_retrieve_collapses_whitespace_so_only_one_instruction_line(kb_paths: Path, localai: _LocalAI, probe_embedding_settings: Tuple[str, str], query: str) -> None:
     model, task = _required(probe_embedding_settings)
     _build(kb_paths)
     localai.reset()
@@ -587,7 +587,7 @@ def test_retrieve_collapses_whitespace_so_only_one_instruction_line(kb_paths, lo
     assert sent == _expected_query_input(task, query)
 
 
-def test_retrieve_generated_hostile_characters_never_forge_a_line(kb_paths, localai, probe_embedding_settings):
+def test_retrieve_generated_hostile_characters_never_forge_a_line(kb_paths: Path, localai: _LocalAI, probe_embedding_settings: Tuple[str, str]) -> None:
     """R2: every Cc/Cf/Zl/Zp/Zs/whitespace code point between attacker headers."""
     _model, task = _required(probe_embedding_settings)
     _build(kb_paths)
@@ -614,7 +614,7 @@ def test_retrieve_generated_hostile_characters_never_forge_a_line(kb_paths, loca
         pytest.param("FR Droit à l'effacement: Löschung (decomposed)", id="decomposed-combining-mark"),
     ],
 )
-def test_retrieve_non_ascii_query_altered_only_by_whitespace_collapse(kb_paths, localai, probe_embedding_settings, query):
+def test_retrieve_non_ascii_query_altered_only_by_whitespace_collapse(kb_paths: Path, localai: _LocalAI, probe_embedding_settings: Tuple[str, str], query: str) -> None:
     _model, task = _required(probe_embedding_settings)
     _build(kb_paths)
     localai.reset()
@@ -684,7 +684,7 @@ def test_retrieve_blank_query_never_hides_a_missing_index(
     assert localai.embedding_bodies == []
 
 
-def test_retrieve_very_long_query_keeps_format(kb_paths, localai, probe_embedding_settings):
+def test_retrieve_very_long_query_keeps_format(kb_paths: Path, localai: _LocalAI, probe_embedding_settings: Tuple[str, str]) -> None:
     """2 MB of line breaks: one instruction line; the payload may be truncated
     but is otherwise the collapsed query, unaltered."""
     model, task = _required(probe_embedding_settings)
@@ -701,7 +701,7 @@ def test_retrieve_very_long_query_keeps_format(kb_paths, localai, probe_embeddin
     assert payload and collapsed.startswith(payload)
 
 
-def test_retrieve_lone_surrogate_query_does_not_crash(kb_paths, localai, probe_embedding_settings):
+def test_retrieve_lone_surrogate_query_does_not_crash(kb_paths: Path, localai: _LocalAI, probe_embedding_settings: Tuple[str, str]) -> None:
     """Encoding: a lone surrogate can't be UTF-8 encoded. Retrieval degrades
     (any status) and never raises; anything sent keeps the format."""
     _model, task = _required(probe_embedding_settings)
@@ -717,7 +717,7 @@ def test_retrieve_lone_surrogate_query_does_not_crash(kb_paths, localai, probe_e
 
 # ══ F7 / HR5: no generative fallback; outage degrades ════════════════════════
 @pytest.mark.parametrize("how", ["omitted", "none", "empty"])
-def test_embed_without_model_never_sends_a_generative_model(localai, probe_embedding_settings, how):
+def test_embed_without_model_never_sends_a_generative_model(localai: _LocalAI, probe_embedding_settings: Tuple[str, str], how: str) -> None:
     """embed() either requires a model (refuses, sends nothing) or defaults to
     embedding_model. It never falls back to model_world/model_eu."""
     model, _task = _required(probe_embedding_settings)
@@ -735,7 +735,7 @@ def test_embed_without_model_never_sends_a_generative_model(localai, probe_embed
     assert localai.models() in ([], [model]), localai.models()
 
 
-def test_embedder_down_retrieval_makes_one_call_with_embedding_model(kb_paths, localai, probe_embedding_settings):
+def test_embedder_down_retrieval_makes_one_call_with_embedding_model(kb_paths: Path, localai: _LocalAI, probe_embedding_settings: Tuple[str, str]) -> None:
     """F7: one /embeddings call with embedding_model, no retry on another model, ERROR."""
     model, _task = _required(probe_embedding_settings)
     _build(kb_paths)
@@ -749,7 +749,7 @@ def test_embedder_down_retrieval_makes_one_call_with_embedding_model(kb_paths, l
     assert result.chunks == ()
 
 
-def test_embedder_down_retrieval_degrades_control(kb_paths, localai):
+def test_embedder_down_retrieval_degrades_control(kb_paths: Path, localai: _LocalAI) -> None:
     """HR5 CONTROL (green today): an embedder outage is ERROR, never a raise."""
     _build(kb_paths)
     localai.reset()
@@ -772,7 +772,7 @@ def _analyze_full(text: str) -> Any:
     return asyncio.run(analyze_text(text, _JURISDICTIONS, mode="full")).payload
 
 
-def test_embedder_down_analysis_degrades_control(kb_paths, localai, fresh_kb):
+def test_embedder_down_analysis_degrades_control(kb_paths: Path, localai: _LocalAI, fresh_kb: LegalKnowledgeBase) -> None:
     """HR5 CONTROL (green today): embedder and LLM down -> rule findings, ungrounded, no raise."""
     _build(kb_paths)
     localai.reset()
@@ -786,8 +786,8 @@ def test_embedder_down_analysis_degrades_control(kb_paths, localai, fresh_kb):
 
 
 def test_analysis_f5_exploit_sends_one_instruction_line_with_embedding_model(
-    kb_paths, localai, fresh_kb, probe_embedding_settings
-):
+    kb_paths: Path, localai: _LocalAI, fresh_kb: LegalKnowledgeBase, probe_embedding_settings: Tuple[str, str]
+) -> None:
     """F5 end to end: the exploit document through analyze_text()."""
     model, task = _required(probe_embedding_settings)
     _build(kb_paths)
@@ -843,7 +843,7 @@ _WALKER_VECTORS = [
 
 
 @pytest.mark.parametrize("row_id, snippet, flagged", _WALKER_VECTORS, ids=[r[0] for r in _WALKER_VECTORS])
-def test_ast_walker_vectors(row_id, snippet, flagged):
+def test_ast_walker_vectors(row_id: str, snippet: str, flagged: bool) -> None:
     """The static check's own vectors: it flags each bad shape and passes each good one."""
     source = "async def f(client, c, q, settings, cfg):\n    " + snippet.replace("<WORLD>", repr(settings.model_world)) + "\n"
     calls, offenders = _generative_embed_calls(source, "vector.py")
@@ -851,11 +851,11 @@ def test_ast_walker_vectors(row_id, snippet, flagged):
     assert calls == (0 if row_id == "not-embed" else 1)
 
 
-def test_ast_walker_vectors_contract():
+def test_ast_walker_vectors_contract() -> None:
     assert {flagged for _, _, flagged in _WALKER_VECTORS} == {True, False}
 
 
-def test_no_embed_call_in_app_passes_a_generative_model():
+def test_no_embed_call_in_app_passes_a_generative_model() -> None:
     total = 0
     offenders: List[str] = []
     files = sorted(_APP_DIR.rglob("*.py"))
