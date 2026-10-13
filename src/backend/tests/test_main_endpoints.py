@@ -1904,6 +1904,18 @@ _CORRUPT_RESULT_JSON = {
     "json-string": '"ok"',
     "json-null": "null",
     "json-number": "1",
+    # Round 2: lax readers that would recover a success from a non-object.
+    "json-true": "true",
+    "json-string-marker": json.dumps(RAW_MARKER),
+    "double-encoded-object": json.dumps(json.dumps({"llm_status": OK})),
+    "array-of-ok-object": json.dumps([{"llm_status": OK}]),
+    "bom-prefixed-object": "﻿" + json.dumps({"llm_status": OK}),
+    "whitespace-only": " \r\n\t ",
+    "nul-byte": "\x00",
+    # A valid JSON array nested deeper than json.loads can follow: CPython
+    # raises RecursionError (not JSONDecodeError) at a stack-dependent depth.
+    # Either way it is not an object, so it reads unknown (LIB-API #368).
+    "deep-array": "[" * 2_000_000 + "]" * 2_000_000,
 }
 _CSV_FINDING = {
     "category": "Data Sharing",
@@ -1985,6 +1997,24 @@ class TestReviewsLLMStatus:
         updated = app_client.post(f"/reviews/{review.id}", json={"status": "approved"})
         assert updated.status_code == 200
         assert updated.json()["llm_status"] == UNKNOWN
+
+    def test_main_update_review_reads_the_reviewed_analysis_row(self, app_client, db_session):
+        # F7: the status comes from the reviewed item's own analysis, not the
+        # first, oldest or newest row. Every row has a distinct status, and the
+        # reviews are updated in an order that starts mid-table, so any
+        # wrong-row read returns another row's status.
+        statuses = _llm_members()
+        pairs = [_pending_review_for(db_session, status) for status in statuses]
+        assert len(pairs) >= 3, "needs a row that is neither first nor last"
+        want = {row.id: status for (row, _), status in zip(pairs, statuses)}
+        start = len(pairs) // 2
+        got: dict[str, Any] = {}
+        for row, review in pairs[start:] + pairs[:start]:
+            resp = app_client.post(f"/reviews/{review.id}", json={"status": "approved"})
+            assert resp.status_code == 200, resp.text[:500]
+            assert resp.json()["analysis_id"] == row.id
+            got[row.id] = resp.json()["llm_status"]
+        assert got == want
 
     def test_main_list_reviews_many_rows_with_forged_values(self, app_client, db_session):
         # Many: every member plus every generated look-alike, one GET.
@@ -2080,13 +2110,42 @@ def _shows(text: str, wanted: str) -> bool:
     return any(" ".join(v.split()) in text for v in visible_text_variants(wanted))
 
 
+# The metadata row header the PDF export prints before the label.
+_PDF_AI_REVIEW_ROW = "AI review"
+
+
+def _in_ai_review_row(text: str, wanted: str) -> bool:
+    return _shows(text, wanted) and any(
+        f"{_PDF_AI_REVIEW_ROW} {' '.join(v.split())}" in text for v in visible_text_variants(wanted)
+    )
+
+
+def _pdf_http_text(app_client, analysis_id: str) -> str:
+    # Through the real route and middleware (the .pdf route is registered
+    # before the JSON alias). TestClient re-raises a server exception, so a
+    # handler that raises fails here with that exception, not a bare 500.
+    from pypdf import PdfReader
+
+    resp = app_client.get(f"/exports/analysis/{analysis_id}.pdf")
+    assert resp.status_code == 200, resp.text[:500]
+    assert resp.headers["content-type"] == "application/pdf"
+    assert resp.content[:4] == b"%PDF"
+    pages = PdfReader(io.BytesIO(resp.content)).pages
+    return " ".join(" ".join((p.extract_text() or "") for p in pages).split())
+
+
+class _InjectedPdfError(Exception):
+    """Raised by a test fake; derives from Exception only, so a narrow
+    handler (JSONDecodeError, ValueError, RecursionError) never catches it."""
+
+
 class TestPdfExportLLMStatus:
     @pytest.mark.parametrize("status", _llm_members())
     def test_main_export_pdf_shows_each_status_label(self, db_session, status):
         row = _store_llm_status(db_session, _insert_analysis(db_session), status)
         text = _pdf_text(db_session, row.id)
         shown = _llm_label(status)
-        assert _shows(text, shown), shown
+        assert _in_ai_review_row(text, shown), shown
         # Exactly this status: no other label (unless it is part of this one).
         others = [m for m in _llm_members() if m != status and _llm_label(m) not in shown and _shows(text, _llm_label(m))]
         assert others == []
@@ -2108,6 +2167,51 @@ class TestPdfExportLLMStatus:
             if not _shows(text, unknown) or _shows(text, ok):
                 wrong.append(variant.encode("unicode_escape").decode("ascii"))
         assert wrong == []
+
+    @pytest.mark.parametrize("raw", list(_CORRUPT_RESULT_JSON.values()), ids=list(_CORRUPT_RESULT_JSON))
+    def test_main_export_pdf_corrupt_result_json_shows_unknown(self, app_client, db_session, raw):
+        # LIB-API API7 (#368): result_json that is not a JSON object, or not
+        # JSON at all, reads as unknown on the PDF too, the same as the CSV
+        # and /reviews. 200 with a PDF, never a 500.
+        row = _set_result_json(db_session, _insert_analysis(db_session), raw)
+        good = _store_llm_status(db_session, _insert_analysis(db_session), OK)
+        text = _pdf_http_text(app_client, row.id)
+        assert _in_ai_review_row(text, _llm_label(UNKNOWN))
+        assert not _shows(text, _llm_label(OK))
+        assert RAW_MARKER not in text
+        # A damaged row never degrades a good one.
+        assert _in_ai_review_row(_pdf_http_text(app_client, good.id), _llm_label(OK))
+
+    @pytest.mark.parametrize("raw_id", ["valid-row", "json-array", "not-json"])
+    @pytest.mark.parametrize("step", ["parse", "build"])
+    def test_main_export_pdf_unrelated_errors_propagate(self, app_client, db_session, monkeypatch, step, raw_id):
+        # F4: the corrupt-row handling catches what it means to and nothing
+        # else. An error injected into reading the stored payload ("parse")
+        # or into rendering the PDF ("build") reaches the caller unchanged;
+        # no broad except turns it into an unknown-status PDF.
+        row = _insert_analysis(db_session)
+        if raw_id != "valid-row":
+            row = _set_result_json(db_session, row, _CORRUPT_RESULT_JSON[raw_id])
+        stored = row.result_json
+
+        def boom(*_args, **_kwargs):
+            raise _InjectedPdfError(step)
+
+        if step == "parse":
+            real_loads = json.loads
+
+            def loads(s, *args, **kwargs):
+                if s == stored:
+                    boom()
+                return real_loads(s, *args, **kwargs)
+
+            monkeypatch.setattr(json, "loads", loads)
+        else:
+            from reportlab.platypus import SimpleDocTemplate
+
+            monkeypatch.setattr(SimpleDocTemplate, "build", boom)
+        with pytest.raises(_InjectedPdfError):
+            app_client.get(f"/exports/analysis/{row.id}.pdf")
 
 
 # ---------------------------------------------------------------------------
