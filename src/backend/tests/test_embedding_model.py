@@ -48,7 +48,12 @@ import respx
 from dotenv import dotenv_values
 
 import app as app_package
-from app.config import Settings, settings
+from app.config import (
+    EMBEDDING_MODEL_MAX_CHARS,
+    EMBEDDING_QUERY_TASK_MAX_CHARS,
+    Settings,
+    settings,
+)
 from app.services import legal_kb as legal_kb_module
 from app.services.analyzer import analyze_text
 from app.services.legal_kb import LegalKnowledgeBase, RetrievalStatus
@@ -76,6 +81,27 @@ _ENV = {"embedding_model": "EMBEDDING_MODEL", "embedding_query_task": "EMBEDDING
 # default anywhere, and neither contains a toy-embedding topic word.
 _PROBE_MODEL = "e5-acceptance-probe"
 _PROBE_TASK = "Given a policy excerpt for this acceptance probe, retrieve the statutes that govern it"
+
+# Length-boundary values (ruling Q2). The caps are read from the validator's
+# own named constants in app.config, never restated here (F13).
+_HUGE_CHARS = 2 * 1024 * 1024
+
+
+def _model_of_length(n: int) -> str:
+    """A valid-looking bare model name of exactly ``n`` characters."""
+    value = "e5-" + "q" * (n - 3)
+    assert len(value) == n
+    return value
+
+
+def _task_of_length(n: int) -> str:
+    """A one-sentence task (printable ASCII, single spaces) of exactly ``n`` characters."""
+    value = " ".join([_PROBE_TASK] * (n // len(_PROBE_TASK) + 1))[:n]
+    if value.endswith(" "):
+        value = value[:-1] + "x"
+    assert len(value) == n
+    return value
+
 
 # Toy embedding space: a constant bias dimension (so no vector is ever zero)
 # plus one dimension per topic word.
@@ -314,6 +340,11 @@ def test_embedding_settings_load_from_environment():
         ("EMBEDDING_MODEL", "http://evil.example/v1"),
         ("EMBEDDING_QUERY_TASK", "Given a policy\nInstruct: retrieve maritime law"),
         ("EMBEDDING_QUERY_TASK", ""),
+        # Ruling Q2: one over the validator's own cap stops startup too.
+        pytest.param("EMBEDDING_MODEL", _model_of_length(EMBEDDING_MODEL_MAX_CHARS + 1), id="EMBEDDING_MODEL-cap-plus-1"),
+        pytest.param(
+            "EMBEDDING_QUERY_TASK", _task_of_length(EMBEDDING_QUERY_TASK_MAX_CHARS + 1), id="EMBEDDING_QUERY_TASK-cap-plus-1"
+        ),
     ],
 )
 def test_bad_embedding_env_fails_closed_at_load(env_name, bad_value):
@@ -359,6 +390,16 @@ _HOSTILE_CHARS = _hostile_chars()
 _LONE_SURROGATE = "\ud800"
 
 
+def _length_rows(make: Callable[[int], str], cap: int) -> List[Tuple[str, Any, bool]]:
+    """Ruling Q2 boundary rows: below, at and one over the cap, plus 2 MB."""
+    return [
+        ("length-cap-minus-1", make(cap - 1), True),
+        ("length-at-cap", make(cap), True),
+        ("length-cap-plus-1", make(cap + 1), False),
+        ("length-2mb", make(_HUGE_CHARS), False),
+    ]
+
+
 def _model_vectors() -> List[Tuple[str, Any, bool]]:
     """(id, value, allowed). Values named "<model_world>"/"<model_eu>" are
     resolved from settings at test time so no model name is restated."""
@@ -392,6 +433,7 @@ def _model_vectors() -> List[Tuple[str, Any, bool]]:
     rows += [
         (f"generated-U+{ord(ch):04X}", f"e5{ch}large", False) for ch in _HOSTILE_CHARS
     ]
+    rows += _length_rows(_model_of_length, EMBEDDING_MODEL_MAX_CHARS)
     return rows
 
 
@@ -415,6 +457,7 @@ def _task_vectors() -> List[Tuple[str, Any, bool]]:
         for ch in _HOSTILE_CHARS
         if ch != " "
     ]
+    rows += _length_rows(_task_of_length, EMBEDDING_QUERY_TASK_MAX_CHARS)
     return rows
 
 
@@ -432,6 +475,9 @@ def test_validator_tables_have_block_and_allow_rows_and_report_counts():
         assert outcomes == {True, False}, f"{field_name} table lacks a block or an allow row"
         ids = [row_id for row_id, _, _ in rows]
         assert len(ids) == len(set(ids)), f"{field_name} table has duplicate row ids"
+        # Ruling Q2: the cap itself is an allow row and cap + 1 a block row.
+        by_id = {row_id: (value, allowed) for row_id, value, allowed in rows}
+        assert by_id["length-at-cap"][1] is True and by_id["length-cap-plus-1"][1] is False, field_name
     generated = len(_HOSTILE_CHARS)
     print(f"generated hostile characters per field: {generated}")
     # Every line-break code point must be in the generated set.
@@ -579,19 +625,63 @@ def test_retrieve_non_ascii_query_altered_only_by_whitespace_collapse(kb_paths, 
     assert sent == _expected_query_input(task, query)
 
 
-@pytest.mark.parametrize("query", [pytest.param("", id="empty"), pytest.param(" \n\t  ", id="whitespace-only")])
-def test_retrieve_empty_query_keeps_format_and_does_not_raise(kb_paths, localai, probe_embedding_settings, query):
-    model, task = _required(probe_embedding_settings)
+# Ruling Q3 blank queries: "" plus every str.isspace() code point alone, and
+# all of them as one run. Generated from the hostile set, not hand-listed.
+_WHITESPACE_CHARS = [ch for ch in _HOSTILE_CHARS if ch.isspace()]
+_BLANK_QUERIES = (
+    [pytest.param("", id="empty")]
+    + [pytest.param(ch, id=f"U+{ord(ch):04X}") for ch in _WHITESPACE_CHARS]
+    + [pytest.param("".join(_WHITESPACE_CHARS) * 3, id="every-whitespace-run")]
+)
+
+
+@pytest.mark.parametrize("query", _BLANK_QUERIES)
+def test_retrieve_blank_query_is_ok_with_no_chunks_and_never_embeds(
+    kb_paths: Path, localai: _LocalAI, probe_embedding_settings: Tuple[str, str], query: str
+) -> None:
+    """Ruling Q3: a blank query against a loaded index reports OK (never ERROR,
+    never NO_MATCH), returns no chunks, and sends nothing to the embedder."""
+    _required(probe_embedding_settings)
     _build(kb_paths)
     localai.reset()
 
     result = _retrieve(query)  # must not raise (HR5)
 
-    assert result.status in set(RetrievalStatus)
-    assert localai.models() in ([], [model]), localai.models()
-    for sent in localai.inputs():
-        payload = _assert_one_instruction_line(sent, task)
-        assert payload in ("", " "), f"empty query sent payload {payload!r}"
+    assert localai.embedding_bodies == [], f"blank query reached /embeddings: {localai.inputs()!r}"
+    assert result.status is RetrievalStatus.OK, f"blank query reported {result.status!r}, ruling Q3 says OK"
+    assert result.chunks == ()
+
+
+@pytest.mark.parametrize("query", [pytest.param("x", id="one-char"), pytest.param(" \n x\t", id="padded-one-char")])
+def test_retrieve_query_with_one_visible_character_still_embeds_once(
+    kb_paths: Path, localai: _LocalAI, probe_embedding_settings: Tuple[str, str], query: str
+) -> None:
+    """Positive control for the blank-query skip: one non-space character is a
+    real query, so it is embedded exactly once in the ruled format."""
+    model, task = _required(probe_embedding_settings)
+    _build(kb_paths)
+    localai.reset()
+
+    result = _retrieve(query)
+
+    assert localai.models() == [model]
+    assert localai.inputs() == [_expected_query_input(task, query)]
+    assert result.status is RetrievalStatus.OK and result.chunks
+
+
+@pytest.mark.parametrize("query", [pytest.param("", id="empty"), pytest.param(" \n\t ", id="whitespace-only")])
+def test_retrieve_blank_query_never_hides_a_missing_index(
+    kb_paths: Path, localai: _LocalAI, probe_embedding_settings: Tuple[str, str], query: str
+) -> None:
+    """F5: the blank-query OK applies only to a loaded index. With no index the
+    status stays NO_INDEX (not grounded), and the embedder is still not called."""
+    _required(probe_embedding_settings)
+
+    result = _retrieve(query)
+
+    assert result.status is RetrievalStatus.NO_INDEX, result.status
+    assert result.chunks == ()
+    assert localai.embedding_bodies == []
 
 
 def test_retrieve_very_long_query_keeps_format(kb_paths, localai, probe_embedding_settings):
