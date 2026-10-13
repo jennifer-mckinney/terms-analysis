@@ -754,17 +754,20 @@ def get_analysis(analysis_id: str, db: Session = Depends(get_db)):
 def _stored_payload(result_json: str | None) -> dict[str, typing.Any]:
     """A stored ``result_json`` as a dict, or ``{}`` when it is not one.
 
-    Issue #368: the CSV export and /reviews read old and damaged rows too. Not
-    JSON, empty, or valid JSON that is not an object (array, string, null,
-    number) all read as an empty payload, so each field falls back to its
-    fail-closed default (no findings, ``llm_status`` unknown) instead of a 500.
-    Only a JSON decode error is caught; nothing else is swallowed.
+    Issue #368: the CSV export, the PDF export and /reviews read old and
+    damaged rows too. Not JSON, empty, or valid JSON that is not an object
+    (array, string, null, number) all read as an empty payload, so each field
+    falls back to its fail-closed default (no findings, ``llm_status`` unknown)
+    instead of a 500. JSON nested deeper than the decoder can follow raises
+    ``RecursionError`` rather than ``JSONDecodeError``; it is caught here, once,
+    so a deep array and a deep object read the same on every surface. Only
+    those two are caught; nothing else is swallowed.
     """
     if not result_json:
         return {}
     try:
         data = json.loads(result_json)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -883,7 +886,9 @@ def export_analysis_pdf(analysis_id: str, db: Session = Depends(get_db)):
     if not record:
         raise HTTPException(status_code=404, detail="Analysis not found")
 
-    data = json.loads(record.result_json)
+    # Issue #368: the same reader as the CSV export and /reviews, so a row that
+    # is not a JSON object renders as an empty payload with llm_status unknown.
+    data = _stored_payload(record.result_json)
     findings = data.get("findings", [])
 
     # ── Styles ────────────────────────────────────────────────────────────
