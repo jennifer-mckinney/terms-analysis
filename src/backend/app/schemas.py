@@ -5,7 +5,7 @@ import logging
 import re
 import unicodedata
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional, Set, Tuple, get_args
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple, cast, get_args
 
 from pydantic import BaseModel, Field, StrictFloat, field_validator, model_validator
 
@@ -187,6 +187,26 @@ LLMStatus = Literal[
     "disabled",
     "unknown",
 ]
+# The fail-closed default for a payload or row that carries no usable status
+# (#195, #368). One constant, shared by every model field that holds one.
+LLM_STATUS_UNKNOWN: LLMStatus = "unknown"
+
+
+def stored_llm_status(stored: Dict[str, Any]) -> LLMStatus:
+    """The ``llm_status`` of a stored analysis payload, or ``LLM_STATUS_UNKNOWN``.
+
+    Issue #368: /reviews and the CSV and PDF exports read the value straight
+    from ``analyses.result_json``, which may predate #195 (no key) or hold
+    anything. Only an exact ``LLMStatus`` member passes (allowlist by equality
+    with the Literal's members, no normalisation); a missing key, a look-alike
+    or a non-string (never equal to a member) reads as unknown, so a raw stored value never reaches a
+    response or an export. Callers pass a dict (main._stored_payload maps
+    unreadable or non-object JSON to ``{}``).
+    """
+    value = stored.get("llm_status")
+    if value in get_args(LLMStatus):
+        return cast(LLMStatus, value)
+    return LLM_STATUS_UNKNOWN
 
 
 # Re-export from canonical home for backwards-compatibility
@@ -841,7 +861,7 @@ class AnalysisPayload(BaseModel):
     # Issue #195: additive, with a default so rows stored before the field
     # existed still load (as "unknown", never as "ok").
     llm_status: LLMStatus = Field(
-        default="unknown",
+        default=LLM_STATUS_UNKNOWN,
         description=(
             "Outcome of the LLM step: 'ok' (a validated answer was used), "
             "'fallback_llm_unreachable' (LocalAI gave no HTTP response), "
@@ -877,6 +897,16 @@ class ReviewItemPayload(BaseModel):
     notes: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    # Issue #368 (owner-approved API change): the llm_status of the analysis
+    # under review, read with stored_llm_status, so a reviewer can see why a
+    # result is rules-only (HR5). Same Literal and default as AnalysisPayload.
+    llm_status: LLMStatus = Field(
+        default=LLM_STATUS_UNKNOWN,
+        description=(
+            "llm_status of the analysis under review (see AnalysisPayload."
+            "llm_status). 'unknown' when the stored analysis has no valid value."
+        ),
+    )
 
 
 class ReviewUpdate(InboundModel):

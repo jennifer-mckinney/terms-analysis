@@ -23,6 +23,7 @@ from . import security
 from .config import settings
 from .database import db_session, get_db, init_db
 from .exceptions import CorpusMismatchError, InvalidTextError
+from .llm_status_copy import llm_status_label
 from .models import Analysis, PolicySnapshot, ReviewItem, WatchlistItem
 from .schemas import (
     AnalysisPayload,
@@ -48,6 +49,7 @@ from .schemas import (
     WatchlistItemPayload,
     export_content_disposition,
     render_analysis_export,
+    stored_llm_status,
 )
 from .services.analyzer import (
     analyze_batch_documents,
@@ -749,6 +751,27 @@ def get_analysis(analysis_id: str, db: Session = Depends(get_db)):
     return AnalysisPayload(**data)
 
 
+def _stored_payload(result_json: str | None) -> dict[str, typing.Any]:
+    """A stored ``result_json`` as a dict, or ``{}`` when it is not one.
+
+    Issue #368: the CSV export, the PDF export and /reviews read old and
+    damaged rows too. Not JSON, empty, or valid JSON that is not an object
+    (array, string, null, number) all read as an empty payload, so each field
+    falls back to its fail-closed default (no findings, ``llm_status`` unknown)
+    instead of a 500. JSON nested deeper than the decoder can follow raises
+    ``RecursionError`` rather than ``JSONDecodeError``; it is caught here, once,
+    so a deep array and a deep object read the same on every surface. Only
+    those two are caught; nothing else is swallowed.
+    """
+    if not result_json:
+        return {}
+    try:
+        data = json.loads(result_json)
+    except (json.JSONDecodeError, RecursionError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 @app.get("/exports/analyses.csv")
 def export_analyses_csv(
     ids: str | None = Query(default=None, description="Comma-separated analysis IDs"),
@@ -786,12 +809,12 @@ def export_analyses_csv(
             "excerpt",
             "line_start",
             "line_end",
+            # #368: the canonical token, never the raw stored value.
+            "llm_status",
         ])
         for record in records:
-            try:
-                data = json.loads(record.result_json) if record.result_json else {}
-            except json.JSONDecodeError:
-                data = {}
+            data = _stored_payload(record.result_json)
+            llm_status = stored_llm_status(data)
             findings = data.get("findings") or []
             for idx, finding in enumerate(findings):
                 evidence = finding.get("evidence") or {}
@@ -805,6 +828,7 @@ def export_analyses_csv(
                     (finding.get("excerpt") or "").replace("\n", " "),
                     evidence.get("line_start", ""),
                     evidence.get("line_end", ""),
+                    llm_status,
                 ])
         return Response(content=output.getvalue(), media_type="text/csv")
 
@@ -818,6 +842,8 @@ def export_analyses_csv(
         "risk_score",
         "grade",
         "created_at",
+        # #368: the canonical token, never the raw stored value.
+        "llm_status",
     ])
     for record in records:
         writer.writerow(
@@ -831,6 +857,7 @@ def export_analyses_csv(
                 f"{record.risk_score:.2f}",
                 record.grade,
                 record.created_at.isoformat(),
+                stored_llm_status(_stored_payload(record.result_json)),
             ]
         )
     return Response(content=output.getvalue(), media_type="text/csv")
@@ -859,7 +886,9 @@ def export_analysis_pdf(analysis_id: str, db: Session = Depends(get_db)):
     if not record:
         raise HTTPException(status_code=404, detail="Analysis not found")
 
-    data = json.loads(record.result_json)
+    # Issue #368: the same reader as the CSV export and /reviews, so a row that
+    # is not a JSON object renders as an empty payload with llm_status unknown.
+    data = _stored_payload(record.result_json)
     findings = data.get("findings", [])
 
     # ── Styles ────────────────────────────────────────────────────────────
@@ -956,6 +985,10 @@ def export_analysis_pdf(analysis_id: str, db: Session = Depends(get_db)):
         ["Type", data.get("doc_type") or "—"],
         ["Industry", data.get("industry") or "—"],
         ["Analyzed", data.get("created_at", "")[:19].replace("T", " ")],
+        # #368: the shared label for the validated token (HR5 rules-only
+        # fallbacks say so); a missing or forged value shows the unknown
+        # label. Escaped for reportlab markup even though labels are fixed text.
+        ["AI review", Paragraph(_xml_escape(llm_status_label(stored_llm_status(data))), body_style)],
     ]
     meta_table = Table(meta_rows, colWidths=[1.5 * inch, 5 * inch])
     meta_table.setStyle(TableStyle([
@@ -1134,20 +1167,33 @@ def export_analysis_json(analysis_id: str, db: Session = Depends(get_db)) -> Res
     )
 
 
+def _review_item_payload(item: ReviewItem, result_json: str | None) -> ReviewItemPayload:
+    """One review item plus the llm_status of its analysis (#368).
+
+    ``result_json`` is None when the analysis row is gone (outer join): that
+    reads as unknown, like any other unusable stored payload.
+    """
+    return ReviewItemPayload(
+        id=item.id,
+        analysis_id=item.analysis_id,
+        status=item.status,
+        notes=item.notes,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+        llm_status=stored_llm_status(_stored_payload(result_json)),
+    )
+
+
 @app.get("/reviews", response_model=list[ReviewItemPayload])
 def list_reviews(db: Session = Depends(get_db)):
-    items = db.query(ReviewItem).filter(ReviewItem.status == "pending").all()
-    return [
-        ReviewItemPayload(
-            id=item.id,
-            analysis_id=item.analysis_id,
-            status=item.status,
-            notes=item.notes,
-            created_at=item.created_at,
-            updated_at=item.updated_at,
-        )
-        for item in items
-    ]
+    # One query: each pending item joined to its own analysis by foreign key.
+    rows = (
+        db.query(ReviewItem, Analysis.result_json)
+        .outerjoin(Analysis, Analysis.id == ReviewItem.analysis_id)
+        .filter(ReviewItem.status == "pending")
+        .all()
+    )
+    return [_review_item_payload(item, result_json) for item, result_json in rows]
 
 
 @app.post("/reviews/{review_id}", response_model=ReviewItemPayload)
@@ -1159,14 +1205,9 @@ def update_review(review_id: str, update: ReviewUpdate, db: Session = Depends(ge
     item.notes = update.notes
     db.commit()
     db.refresh(item)
-    return ReviewItemPayload(
-        id=item.id,
-        analysis_id=item.analysis_id,
-        status=item.status,
-        notes=item.notes,
-        created_at=item.created_at,
-        updated_at=item.updated_at,
-    )
+    # scalar() is None when no row matches; _review_item_payload reads that as unknown.
+    result_json = db.query(Analysis.result_json).filter(Analysis.id == item.analysis_id).scalar()
+    return _review_item_payload(item, result_json)
 
 
 def _watchlist_item_to_payload(item: WatchlistItem) -> WatchlistItemPayload:

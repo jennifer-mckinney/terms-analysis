@@ -27,8 +27,10 @@ Naming: test_<module>_<function>_<scenario>
 """
 from __future__ import annotations
 
+import csv
 import dataclasses
 import http
+import io
 import json
 import re
 import typing
@@ -52,6 +54,7 @@ from app.services.analyzer import AnalysisResult
 
 if TYPE_CHECKING:
     from fastapi.testclient import TestClient
+    from sqlalchemy.orm import Session
 
     from app.config import Settings
 
@@ -638,7 +641,8 @@ class TestListReviews:
         response = app_client.get("/reviews")
         assert response.status_code == 200
         item = response.json()[0]
-        assert set(item.keys()) >= {"id", "analysis_id", "status", "notes", "created_at", "updated_at"}
+        # #368: every review item also carries the analysis llm_status.
+        assert set(item.keys()) >= {"id", "analysis_id", "status", "notes", "created_at", "updated_at", "llm_status"}
 
 
 # ===========================================================================
@@ -1783,7 +1787,10 @@ def test_main_analyze_localai_http_error_status_reaches_api_storage_and_export(
     assert json.loads(exported.content)["llm_status"] == expected
     reviews = app_client.get("/reviews")
     assert reviews.status_code == 200
-    assert [r["analysis_id"] for r in reviews.json()].count(body["id"]) == 1
+    queued = [r for r in reviews.json() if r["analysis_id"] == body["id"]]
+    assert len(queued) == 1
+    # #368: the review queue shows why the result is rules-only.
+    assert queued[0]["llm_status"] == expected
 
 
 @pytest.mark.parametrize(
@@ -1825,12 +1832,15 @@ def test_main_analyze_batch_localai_http_error_status_reaches_every_item_and_sto
     assert [i["llm_status"] for i in items] == [expected] * len(urls)
     assert all(i["summary"] is None and i["review_required"] is True for i in items)
     assert "victim" not in resp.text and "FORGED" not in resp.text
-    review_ids = [r["analysis_id"] for r in app_client.get("/reviews").json()]
+    reviews = app_client.get("/reviews").json()
+    review_ids = [r["analysis_id"] for r in reviews]
     for item in items:
         assert app_client.get(f"/analyses/{item['id']}").json()["llm_status"] == expected
         exported = app_client.get(f"/exports/analysis/{item['id']}.json")
         assert json.loads(exported.content)["llm_status"] == expected
         assert review_ids.count(item["id"]) == 1
+    # #368: every queued batch item carries its llm_status.
+    assert [r["llm_status"] for r in reviews if r["analysis_id"] in {i["id"] for i in items}] == [expected] * len(urls)
 
 
 def test_main_analyze_ok_answer_reports_ok(app_client, llm_transport):
@@ -1860,6 +1870,375 @@ def test_main_get_analysis_legacy_row_without_llm_status_loads(app_client, db_se
     default = AnalysisPayload.model_fields["llm_status"].default
     assert resp.json()["llm_status"] == default
     assert default != "ok"
+
+
+# ---------------------------------------------------------------------------
+# Issue #368: llm_status reaches /reviews, the CSV export and the PDF export
+# ---------------------------------------------------------------------------
+#
+# The value is already stored in analyses.result_json (#195), and every review
+# item points at its analysis by foreign key, so /reviews can return it with no
+# schema change. Old rows (no key), corrupt rows and forged values read as
+# "unknown" and never 500. The CSV carries the canonical token (machine
+# readable); the PDF carries the shared label (app.llm_status_copy).
+
+from tests.test_llm_status_copy import (  # noqa: E402
+    OK,
+    RAW_MARKER,
+    UNKNOWN,
+    forged_member_variants,
+    json_hostile_values,
+    visible_text_variants,
+)
+from tests.test_llm_status_copy import label as _llm_label  # noqa: E402
+from tests.test_llm_status_copy import members as _llm_members  # noqa: E402
+
+_ABSENT = object()
+_STORED_CASES = [*json_hostile_values(), ("absent-pre-195-row", _ABSENT)]
+_STORED_IDS = [i for i, _ in _STORED_CASES]
+# A result_json no reader can trust. Old or damaged rows must not 500.
+_CORRUPT_RESULT_JSON = {
+    "not-json": "not json",
+    "truncated": '{"llm_status": "ok"',
+    "empty": "",
+    "json-array": '["ok"]',
+    "json-string": '"ok"',
+    "json-null": "null",
+    "json-number": "1",
+    # Round 2: lax readers that would recover a success from a non-object.
+    "json-true": "true",
+    "json-string-marker": json.dumps(RAW_MARKER),
+    "double-encoded-object": json.dumps(json.dumps({"llm_status": OK})),
+    "array-of-ok-object": json.dumps([{"llm_status": OK}]),
+    "bom-prefixed-object": "﻿" + json.dumps({"llm_status": OK}),
+    "whitespace-only": " \r\n\t ",
+    "nul-byte": "\x00",
+    # A valid JSON array nested deeper than json.loads can follow: CPython
+    # raises RecursionError (not JSONDecodeError) at a stack-dependent depth.
+    # Either way it is not an object, so it reads unknown (LIB-API #368).
+    "deep-array": "[" * 2_000_000 + "]" * 2_000_000,
+    # The same depth as an OBJECT that names a success first: a reader that
+    # recovers the leading key, or treats "it is an object" as readable, would
+    # show ok. The row can't be parsed, so it reads unknown.
+    "deep-object": '{"llm_status": "ok", "x": ' + '{"x": ' * 2_000_000 + "1" + "}" * 2_000_001,
+}
+_CSV_FINDING = {
+    "category": "Data Sharing",
+    "severity": "High",
+    "confidence": 0.9,
+    "excerpt": "We share data.",
+    "evidence": {"line_start": 1, "line_end": 1},
+}
+
+
+def _store_llm_status(
+    db_session: Session, row: AnalysisModel, value: object, *, findings: list[dict[str, Any]] | None = None
+) -> AnalysisModel:
+    """Rewrite the stored payload's llm_status (or drop it), bypassing validation."""
+    data = json.loads(row.result_json)
+    if value is _ABSENT:
+        data.pop("llm_status", None)
+    else:
+        data["llm_status"] = value
+    if findings is not None:
+        data["findings"] = findings
+    row.result_json = json.dumps(data)
+    db_session.commit()
+    return row
+
+
+def _set_result_json(db_session: Session, row: AnalysisModel, raw: str) -> AnalysisModel:
+    row.result_json = raw
+    db_session.commit()
+    return row
+
+
+def _pending_review_for(db_session: Session, value: object = _ABSENT) -> tuple[AnalysisModel, ReviewItem]:
+    row = _store_llm_status(db_session, _insert_analysis(db_session, review_required=True), value)
+    return row, _insert_review_item(db_session, row.id)
+
+
+def _reviews_by_analysis(app_client: TestClient) -> dict[str, dict[str, Any]]:
+    resp = app_client.get("/reviews")
+    assert resp.status_code == 200, resp.text[:500]
+    return {r["analysis_id"]: r for r in resp.json()}
+
+
+class TestReviewsLLMStatus:
+    @pytest.mark.parametrize("status", _llm_members())
+    def test_main_list_reviews_carries_each_stored_status(
+        self, app_client: TestClient, db_session: Session, status: str
+    ) -> None:
+        row, _ = _pending_review_for(db_session, status)
+        assert _reviews_by_analysis(app_client)[row.id]["llm_status"] == status
+
+    @pytest.mark.parametrize("status", _llm_members())
+    def test_main_update_review_carries_each_stored_status(
+        self, app_client: TestClient, db_session: Session, status: str
+    ) -> None:
+        _, review = _pending_review_for(db_session, status)
+        resp = app_client.post(f"/reviews/{review.id}", json={"status": "approved"})
+        assert resp.status_code == 200
+        assert resp.json()["llm_status"] == status
+
+    @pytest.mark.parametrize("value", [v for _, v in _STORED_CASES], ids=_STORED_IDS)
+    def test_main_reviews_untrusted_stored_value_reads_unknown(
+        self, app_client: TestClient, db_session: Session, value: object
+    ) -> None:
+        row, review = _pending_review_for(db_session, value)
+        good, _ = _pending_review_for(db_session, OK)
+        listed = app_client.get("/reviews")
+        assert listed.status_code == 200
+        items = {r["analysis_id"]: r for r in listed.json()}
+        assert items[row.id]["llm_status"] == UNKNOWN
+        # One bad row never hides or degrades the rest of the queue.
+        assert items[good.id]["llm_status"] == OK
+        assert RAW_MARKER not in listed.text
+        updated = app_client.post(f"/reviews/{review.id}", json={"status": "rejected"})
+        assert updated.status_code == 200
+        assert updated.json()["llm_status"] == UNKNOWN
+        assert RAW_MARKER not in updated.text
+
+    @pytest.mark.parametrize("raw", list(_CORRUPT_RESULT_JSON.values()), ids=list(_CORRUPT_RESULT_JSON))
+    def test_main_reviews_corrupt_result_json_reads_unknown(
+        self, app_client: TestClient, db_session: Session, raw: str
+    ) -> None:
+        row, review = _pending_review_for(db_session)
+        _set_result_json(db_session, row, raw)
+        good, _ = _pending_review_for(db_session, OK)
+        items = _reviews_by_analysis(app_client)
+        assert items[row.id]["llm_status"] == UNKNOWN
+        assert items[good.id]["llm_status"] == OK
+        updated = app_client.post(f"/reviews/{review.id}", json={"status": "approved"})
+        assert updated.status_code == 200
+        assert updated.json()["llm_status"] == UNKNOWN
+
+    def test_main_update_review_reads_the_reviewed_analysis_row(
+        self, app_client: TestClient, db_session: Session
+    ) -> None:
+        # F7: the status comes from the reviewed item's own analysis, not the
+        # first, oldest or newest row. Every row has a distinct status, and the
+        # reviews are updated in an order that starts mid-table, so any
+        # wrong-row read returns another row's status.
+        statuses = _llm_members()
+        pairs = [_pending_review_for(db_session, status) for status in statuses]
+        assert len(pairs) >= 3, "needs a row that is neither first nor last"
+        want = {row.id: status for (row, _), status in zip(pairs, statuses)}
+        start = len(pairs) // 2
+        got: dict[str, Any] = {}
+        for row, review in pairs[start:] + pairs[:start]:
+            resp = app_client.post(f"/reviews/{review.id}", json={"status": "approved"})
+            assert resp.status_code == 200, resp.text[:500]
+            assert resp.json()["analysis_id"] == row.id
+            got[row.id] = resp.json()["llm_status"]
+        assert got == want
+
+    def test_main_list_reviews_many_rows_with_forged_values(
+        self, app_client: TestClient, db_session: Session
+    ) -> None:
+        # Many: every member plus every generated look-alike, one GET.
+        expected: dict[str, str] = {}
+        for status in _llm_members():
+            row, _ = _pending_review_for(db_session, status)
+            expected[row.id] = status
+        variants = forged_member_variants()
+        for variant in variants:
+            row, _ = _pending_review_for(db_session, variant)
+            expected[row.id] = UNKNOWN
+        items = _reviews_by_analysis(app_client)
+        wrong = {rid: items.get(rid, {}).get("llm_status") for rid, want in expected.items()
+                 if items.get(rid, {}).get("llm_status") != want}
+        assert wrong == {}
+        assert len(items) == len(variants) + len(_llm_members())
+
+
+def _csv_rows(app_client: TestClient, analysis_id: str, *, detailed: bool) -> tuple[str, list[dict[str, str]]]:
+    resp = app_client.get("/exports/analyses.csv", params={"ids": analysis_id, "detailed": str(detailed).lower()})
+    assert resp.status_code == 200, resp.text[:500]
+    reader = csv.DictReader(io.StringIO(resp.text))
+    assert (reader.fieldnames or []).count("llm_status") == 1, reader.fieldnames
+    return resp.text, list(reader)
+
+
+class TestCsvExportLLMStatus:
+    @pytest.mark.parametrize("detailed", [False, True], ids=["summary", "detailed"])
+    @pytest.mark.parametrize("status", _llm_members())
+    def test_main_export_csv_carries_each_stored_status(
+        self, app_client: TestClient, db_session: Session, status: str, detailed: bool
+    ) -> None:
+        row = _store_llm_status(db_session, _insert_analysis(db_session), status, findings=[_CSV_FINDING])
+        _, rows = _csv_rows(app_client, row.id, detailed=detailed)
+        assert rows, "no row exported"
+        assert [r["llm_status"] for r in rows] == [status] * len(rows)
+
+    @pytest.mark.parametrize("detailed", [False, True], ids=["summary", "detailed"])
+    @pytest.mark.parametrize("value", [v for _, v in _STORED_CASES], ids=_STORED_IDS)
+    def test_main_export_csv_untrusted_stored_value_reads_unknown(
+        self, app_client: TestClient, db_session: Session, value: object, detailed: bool
+    ) -> None:
+        row = _store_llm_status(db_session, _insert_analysis(db_session), value, findings=[_CSV_FINDING])
+        text, rows = _csv_rows(app_client, row.id, detailed=detailed)
+        assert rows, "no row exported"
+        assert [r["llm_status"] for r in rows] == [UNKNOWN] * len(rows)
+        # No raw value reaches the sheet (formula, delimiter or line-break injection).
+        assert RAW_MARKER not in text
+
+    @pytest.mark.parametrize("detailed", [False, True], ids=["summary", "detailed"])
+    def test_main_export_csv_forged_look_alikes_read_unknown(
+        self, app_client: TestClient, db_session: Session, detailed: bool
+    ) -> None:
+        ids = [
+            _store_llm_status(db_session, _insert_analysis(db_session), v, findings=[_CSV_FINDING]).id
+            for v in forged_member_variants()
+        ]
+        resp = app_client.get("/exports/analyses.csv", params={"ids": ",".join(ids), "detailed": str(detailed).lower()})
+        assert resp.status_code == 200
+        rows = list(csv.DictReader(io.StringIO(resp.text)))
+        assert len(rows) == len(ids)
+        assert {r["llm_status"] for r in rows} == {UNKNOWN}
+
+    @pytest.mark.parametrize("detailed", [False, True], ids=["summary", "detailed"])
+    @pytest.mark.parametrize("raw", list(_CORRUPT_RESULT_JSON.values()), ids=list(_CORRUPT_RESULT_JSON))
+    def test_main_export_csv_corrupt_result_json_reads_unknown(
+        self, app_client: TestClient, db_session: Session, raw: str, detailed: bool
+    ) -> None:
+        row = _set_result_json(db_session, _insert_analysis(db_session), raw)
+        good = _store_llm_status(db_session, _insert_analysis(db_session), OK, findings=[_CSV_FINDING])
+        resp = app_client.get(
+            "/exports/analyses.csv", params={"ids": f"{row.id},{good.id}", "detailed": str(detailed).lower()}
+        )
+        assert resp.status_code == 200
+        rows = list(csv.DictReader(io.StringIO(resp.text)))
+        by_id: dict[str | None, list[str]] = {}
+        for r in rows:
+            by_id.setdefault(r.get("id") or r.get("analysis_id"), []).append(r["llm_status"])
+        assert by_id[good.id] == [OK]
+        # A corrupt row has no readable findings in detailed mode; any row it
+        # does produce reads unknown.
+        assert set(by_id.get(row.id, [UNKNOWN])) == {UNKNOWN}
+        if not detailed:
+            assert by_id[row.id] == [UNKNOWN]
+
+
+def _shows(text: str, wanted: str) -> bool:
+    return any(" ".join(v.split()) in text for v in visible_text_variants(wanted))
+
+
+# The metadata row header the PDF export prints before the label.
+_PDF_AI_REVIEW_ROW = "AI review"
+
+
+def _in_ai_review_row(text: str, wanted: str) -> bool:
+    return _shows(text, wanted) and any(
+        f"{_PDF_AI_REVIEW_ROW} {' '.join(v.split())}" in text for v in visible_text_variants(wanted)
+    )
+
+
+def _pdf_http_text(app_client: TestClient, analysis_id: str) -> str:
+    # Through the real route and middleware (the .pdf route is registered
+    # before the JSON alias). TestClient re-raises a server exception, so a
+    # handler that raises fails here with that exception, not a bare 500.
+    from pypdf import PdfReader
+
+    resp = app_client.get(f"/exports/analysis/{analysis_id}.pdf")
+    assert resp.status_code == 200, resp.text[:500]
+    assert resp.headers["content-type"] == "application/pdf"
+    assert resp.content[:4] == b"%PDF"
+    pages = PdfReader(io.BytesIO(resp.content)).pages
+    return " ".join(" ".join((p.extract_text() or "") for p in pages).split())
+
+
+class _InjectedPdfError(Exception):
+    """Raised by a test fake; derives from Exception only, so a narrow
+    handler (JSONDecodeError, ValueError, RecursionError) never catches it."""
+
+
+class TestPdfExportLLMStatus:
+    @pytest.mark.parametrize("status", _llm_members())
+    def test_main_export_pdf_shows_each_status_label(
+        self, app_client: TestClient, db_session: Session, status: str
+    ) -> None:
+        row = _store_llm_status(db_session, _insert_analysis(db_session), status)
+        text = _pdf_http_text(app_client, row.id)
+        shown = _llm_label(status)
+        assert _in_ai_review_row(text, shown), shown
+        # Exactly this status: no other label (unless it is part of this one).
+        others = [m for m in _llm_members() if m != status and _llm_label(m) not in shown and _shows(text, _llm_label(m))]
+        assert others == []
+
+    @pytest.mark.parametrize("value", [v for _, v in _STORED_CASES], ids=_STORED_IDS)
+    def test_main_export_pdf_untrusted_stored_value_shows_unknown(
+        self, app_client: TestClient, db_session: Session, value: object
+    ) -> None:
+        row = _store_llm_status(db_session, _insert_analysis(db_session), value)
+        text = _pdf_http_text(app_client, row.id)
+        assert _shows(text, _llm_label(UNKNOWN))
+        assert not _shows(text, _llm_label(OK))
+        assert RAW_MARKER not in text
+
+    def test_main_export_pdf_forged_look_alikes_show_unknown(self, app_client: TestClient, db_session: Session) -> None:
+        unknown, ok = _llm_label(UNKNOWN), _llm_label(OK)
+        wrong = []
+        for variant in forged_member_variants():
+            row = _store_llm_status(db_session, _insert_analysis(db_session), variant)
+            text = _pdf_http_text(app_client, row.id)
+            if not _shows(text, unknown) or _shows(text, ok):
+                wrong.append(variant.encode("unicode_escape").decode("ascii"))
+        assert wrong == []
+
+    @pytest.mark.parametrize("raw", list(_CORRUPT_RESULT_JSON.values()), ids=list(_CORRUPT_RESULT_JSON))
+    def test_main_export_pdf_corrupt_result_json_shows_unknown(
+        self, app_client: TestClient, db_session: Session, raw: str
+    ) -> None:
+        # LIB-API API7 (#368): result_json that is not a JSON object, or not
+        # JSON at all, reads as unknown on the PDF too, the same as the CSV
+        # and /reviews. 200 with a PDF, never a 500.
+        row = _set_result_json(db_session, _insert_analysis(db_session), raw)
+        good = _store_llm_status(db_session, _insert_analysis(db_session), OK)
+        text = _pdf_http_text(app_client, row.id)
+        assert _in_ai_review_row(text, _llm_label(UNKNOWN))
+        assert not _shows(text, _llm_label(OK))
+        assert RAW_MARKER not in text
+        # A damaged row never degrades a good one.
+        assert _in_ai_review_row(_pdf_http_text(app_client, good.id), _llm_label(OK))
+
+    @pytest.mark.parametrize("raw_id", ["valid-row", "json-array", "not-json"])
+    @pytest.mark.parametrize("step", ["parse", "build"])
+    def test_main_export_pdf_unrelated_errors_propagate(
+        self,
+        app_client: TestClient,
+        db_session: Session,
+        monkeypatch: pytest.MonkeyPatch,
+        step: str,
+        raw_id: str,
+    ) -> None:
+        # F4: the corrupt-row handling catches what it means to and nothing
+        # else. An error injected into reading the stored payload ("parse")
+        # or into rendering the PDF ("build") reaches the caller unchanged;
+        # no broad except turns it into an unknown-status PDF.
+        row = _insert_analysis(db_session)
+        if raw_id != "valid-row":
+            row = _set_result_json(db_session, row, _CORRUPT_RESULT_JSON[raw_id])
+        stored = row.result_json
+
+        def boom(*_args: object, **_kwargs: object) -> typing.NoReturn:
+            raise _InjectedPdfError(step)
+
+        if step == "parse":
+            real_loads = json.loads
+
+            def loads(s: str | bytes | bytearray, *args: object, **kwargs: object) -> object:
+                if s == stored:
+                    boom()
+                return real_loads(s, *args, **kwargs)
+
+            monkeypatch.setattr(json, "loads", loads)
+        else:
+            from reportlab.platypus import SimpleDocTemplate
+
+            monkeypatch.setattr(SimpleDocTemplate, "build", boom)
+        with pytest.raises(_InjectedPdfError):
+            app_client.get(f"/exports/analysis/{row.id}.pdf")
 
 
 # ---------------------------------------------------------------------------
