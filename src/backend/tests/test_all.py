@@ -218,12 +218,14 @@ def test_export_analyses_csv_quotes_commas_and_newlines(app_client, db_session):
         "risk_score",
         "grade",
         "created_at",
+        # #368: every exported row says whether the AI review ran.
+        "llm_status",
     ]
     assert any(row[1] == "Evil, Inc." for row in parsed[1:])
     assert any(row[1] == "Bad\nActor LLC" for row in parsed[1:])
     assert '"Evil, Inc."' in response.text
     assert '"Bad\nActor LLC"' in response.text
-    assert all(len(row) == 9 for row in parsed)
+    assert all(len(row) == len(parsed[0]) for row in parsed)
 
 
 def test_export_pdf_route_is_not_shadowed_by_json_export_route(app_client, db_session):
