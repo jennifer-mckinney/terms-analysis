@@ -1088,7 +1088,7 @@ class TestLLMStatusSchemaContract:
         print(f"llm_status forged variants generated: {len(variants)}")
         assert accepted == []
 
-    def test_review_item_payload_carries_llm_status(self):
+    def test_review_item_payload_carries_llm_status(self) -> None:
         # #368 (owner-approved API change): /reviews items carry the analysis
         # llm_status with the same Literal and the same fail-closed default.
         from app.schemas import ReviewItemPayload
@@ -1098,7 +1098,7 @@ class TestLLMStatusSchemaContract:
         assert field.annotation == _llm_status_literal()
         assert field.default == AnalysisPayload.model_fields["llm_status"].default
 
-    def test_api7_documents_the_review_item_field(self):
+    def test_api7_documents_the_review_item_field(self) -> None:
         # #368 acceptance: "Document it in LIB-API". Static by necessity.
         doc, start, next_prefix = _LLM_STATUS_DOC_SECTIONS[0]
         assert _names_value(_doc_section(doc, start, next_prefix), "ReviewItemPayload")
