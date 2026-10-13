@@ -74,7 +74,7 @@ def copy_module() -> ModuleType:
     return importlib.import_module(MODULE_NAME)
 
 
-def label(value: Any) -> str:
+def label(value: object) -> str:
     return copy_module().llm_status_label(value)
 
 
@@ -154,7 +154,7 @@ def visible_text_variants(text: str) -> tuple[str, ...]:
 
 class TestLabelContract:
     @pytest.mark.parametrize("status", members())
-    def test_every_member_has_a_non_empty_single_line_label(self, status):
+    def test_every_member_has_a_non_empty_single_line_label(self, status: str) -> None:
         text = label(status)
         assert isinstance(text, str)
         assert text.strip() == text and text
@@ -164,29 +164,29 @@ class TestLabelContract:
         bad = [hex(ord(c)) for c in text if unicodedata.category(c) in {"Cc", "Cf", "Zl", "Zp"}]
         assert bad == []
 
-    def test_labels_are_pairwise_distinct(self):
+    def test_labels_are_pairwise_distinct(self) -> None:
         labels = {m: label(m) for m in members()}
         assert len(set(labels.values())) == len(labels), labels
 
-    def test_every_member_except_unknown_is_known(self):
+    def test_every_member_except_unknown_is_known(self) -> None:
         # Drift guard: a value added to schemas.LLMStatus without copy would
         # silently read as unknown.
         unknown = label(UNKNOWN)
         assert [m for m in members() if m != UNKNOWN and label(m) == unknown] == []
 
     @pytest.mark.parametrize("status", rules_only_members())
-    def test_rules_only_labels_carry_the_marker(self, status):
+    def test_rules_only_labels_carry_the_marker(self, status: str) -> None:
         marker = copy_module().RULES_ONLY_MARKER
         assert isinstance(marker, str) and marker.strip()
         assert marker in label(status)
 
-    def test_rules_only_labels_name_distinct_reasons(self):
+    def test_rules_only_labels_name_distinct_reasons(self) -> None:
         marker = copy_module().RULES_ONLY_MARKER
         reasons = {m: label(m).replace(marker, "").strip(" .,:;()-") for m in rules_only_members()}
         assert all(reasons.values()), reasons
         assert len(set(reasons.values())) == len(reasons), reasons
 
-    def test_success_label_is_distinct_and_carries_no_rules_only_marker(self):
+    def test_success_label_is_distinct_and_carries_no_rules_only_marker(self) -> None:
         marker = copy_module().RULES_ONLY_MARKER
         ok = label(OK)
         assert marker not in ok
@@ -194,7 +194,7 @@ class TestLabelContract:
         # fallback or unknown label can never also read as the success label.
         assert [m for m in members() if m != OK and ok in label(m)] == []
 
-    def test_unknown_is_not_success_and_not_rules_only(self):
+    def test_unknown_is_not_success_and_not_rules_only(self) -> None:
         marker = copy_module().RULES_ONLY_MARKER
         unknown = label(UNKNOWN)
         assert unknown != label(OK)
@@ -202,12 +202,12 @@ class TestLabelContract:
         assert marker not in unknown
 
     @pytest.mark.parametrize("status", members())
-    def test_labels_follow_lib_voice(self, status):
+    def test_labels_follow_lib_voice(self, status: str) -> None:
         text = label(status)
         assert _EM_DASH not in text  # V6
         assert _V2_FORBIDDEN.findall(text) == []  # V2
 
-    def test_marker_follows_lib_voice(self):
+    def test_marker_follows_lib_voice(self) -> None:
         marker = copy_module().RULES_ONLY_MARKER
         assert _EM_DASH not in marker
         assert _V2_FORBIDDEN.findall(marker) == []
@@ -215,17 +215,17 @@ class TestLabelContract:
 
 class TestFailClosed:
     @pytest.mark.parametrize("value", [v for _, v in HOSTILE_VALUES], ids=[i for i, _ in HOSTILE_VALUES])
-    def test_non_member_reads_as_unknown(self, value):
+    def test_non_member_reads_as_unknown(self, value: object) -> None:
         assert label(value) == label(UNKNOWN)
 
-    def test_forged_look_alikes_of_every_member_read_as_unknown(self):
+    def test_forged_look_alikes_of_every_member_read_as_unknown(self) -> None:
         unknown = label(UNKNOWN)
         variants = forged_member_variants()
         leaked = [v.encode("unicode_escape").decode("ascii") for v in variants if label(v) != unknown]
         print(f"llm_status forged variants fed to llm_status_label: {len(variants)}")
         assert leaked == []
 
-    def test_hostile_table_has_both_polarities(self):
+    def test_hostile_table_has_both_polarities(self) -> None:
         # Contract test for the table: every hostile entry is a non-member
         # (negative), and every member maps away from unknown (positive) in
         # test_every_member_except_unknown_is_known.
@@ -238,7 +238,7 @@ class TestFailClosed:
 # ---------------------------------------------------------------------------
 
 
-def test_module_loads_with_the_standard_library_only():
+def test_module_loads_with_the_standard_library_only() -> None:
     # Kept while the UI is out of scope: the webapp ships with streamlit and
     # requests only and imports nothing from the backend package, so a stdlib
     # module leaves the follow-up UI card free to load this same file.
@@ -271,7 +271,7 @@ def _string_constants(path: Path) -> set[str]:
     return {n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
 
 
-def test_no_consumer_restates_a_label():
+def test_no_consumer_restates_a_label() -> None:
     # Static by necessity: duplication can't be observed by running the code
     # (a copy with identical text renders identically). Every UI and export
     # must call llm_status_label; a restated label is a second source of truth.
