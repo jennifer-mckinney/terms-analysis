@@ -960,66 +960,6 @@ class TestRrfFuse:
         assert len(result) == 2
 
 
-class TestSelectRelevantChunks:
-    def test_embedding_select_relevant_chunks_short_text_returned_as_is(self):
-        from app.services.embedding import select_relevant_chunks
-        from app.services.localai import LocalAIClient
-        client = AsyncMock(spec=LocalAIClient)
-        short_text = "short text"
-        result = asyncio.run(
-            select_relevant_chunks(short_text, "query", max_chars=1000, client=client)
-        )
-        assert result == short_text
-        client.embed.assert_not_called()
-
-    def test_embedding_select_relevant_chunks_embed_failure_falls_back(self):
-        from app.services.embedding import select_relevant_chunks
-        client = AsyncMock()
-        client.embed.return_value = None  # Apertus unavailable
-
-        long_text = "data " * 500
-        result = asyncio.run(
-            select_relevant_chunks(long_text, "query", max_chars=100, client=client)
-        )
-        assert result == long_text[:100]
-
-    def test_embedding_select_relevant_chunks_full_path(self):
-        from app.services.embedding import select_relevant_chunks
-        client = AsyncMock()
-        # Return a fake embedding vector
-        fake_emb = [0.1, 0.2, 0.3]
-        client.embed.return_value = fake_emb
-
-        long_text = ("privacy data sharing policy content line\n" * 50)
-        result = asyncio.run(
-            select_relevant_chunks(long_text, "privacy data", max_chars=200, client=client)
-        )
-        assert isinstance(result, str)
-        assert len(result) <= 300  # budget + join overhead
-
-    def test_embedding_select_relevant_chunks_eu_embed_returns_none(self):
-        from app.services.embedding import select_relevant_chunks
-        client = AsyncMock()
-        fake_emb = [0.1, 0.2, 0.3]
-
-        call_count = 0
-        async def mock_embed(text, model=None):
-            nonlocal call_count
-            call_count += 1
-            from app.config import settings
-            if model == settings.model_eu:
-                return None  # EuroLLM unavailable
-            return fake_emb
-
-        client.embed.side_effect = mock_embed
-
-        long_text = "detailed legal text about data protection " * 30
-        result = asyncio.run(
-            select_relevant_chunks(long_text, "data protection", max_chars=200, client=client)
-        )
-        assert isinstance(result, str)
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # localai.py
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1349,23 +1289,6 @@ class TestValidateUrlUnparseableAddr:
                 asyncio.run(ingest.fetch_url_text("http://example.com/policy"))
         assert isinstance(info.value, getattr(ingest, "UrlFetchError", ())), info.value
         assert info.value.reason == "dns"
-
-
-class TestSelectChunksBudgetFits:
-    """embedding.py lines 210-211: chunk fits in budget → append and increment."""
-
-    def test_embedding_select_chunks_large_budget_exercises_selection(self):
-        from app.services.embedding import select_relevant_chunks
-        client = AsyncMock()
-        client.embed.return_value = [0.1, 0.2, 0.3, 0.4]
-
-        # Text large enough to exceed max_chars; max_chars large enough for chunks (~800 chars)
-        long_text = ("privacy data collection sharing retention rights policy content\n" * 200)
-        result = asyncio.run(
-            select_relevant_chunks(long_text, "privacy data", max_chars=5000, client=client)
-        )
-        assert isinstance(result, str)
-        assert len(result) > 0
 
 
 class TestDetectLanguageMocked:

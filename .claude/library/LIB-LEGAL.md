@@ -87,7 +87,7 @@ status: implemented (`services/legal_kb.py`, wired into `analyzer.py::analyze_te
 Legal Corpus (data/legal_corpus/<jurisdiction>/<law>.txt)
       |
       v
-  Chunk + Embed (LocalAIClient.embed(), Apertus-8B model)
+  Chunk + Embed (LocalAIClient.embed(), EMBEDDING_MODEL = multilingual-e5-large-instruct; passages raw, queries as "Instruct: <task>\nQuery: <text>")
       |
       v
   numpy exhaustive vector matrix (local, .npy — no FAISS)
@@ -132,7 +132,7 @@ rule: Pile of Law is CC-BY-NC-SA-4.0 (non-commercial); do NOT use for commercial
 
 | Service | File | Purpose |
 |---------|------|---------|
-| `embedding.py` | `src/backend/app/services/` | Chunking, BM25 and RRF primitives imported by `legal_kb.py`; its doc-chunk ensemble `select_relevant_chunks` has no caller in `app/` yet |
+| `embedding.py` | `src/backend/app/services/` | Chunking, BM25, RRF and `format_e5_query` primitives imported by `legal_kb.py`; the uncalled doc-chunk ensemble `select_relevant_chunks` was removed in #98-A |
 | `legal_kb.py` | `src/backend/app/services/` | Legal KB: corpus parser, numpy exhaustive index builder, BM25/RRF retrieval — wired into `analyzer.py::analyze_text()` |
 | `localai.py` | `src/backend/app/services/` | LLM client targeting LocalAI (Apertus-8B/EuroLLM-22B); never named `lm_studio.py` in actual codebase |
 
@@ -145,4 +145,4 @@ rule: Pile of Law is CC-BY-NC-SA-4.0 (non-commercial); do NOT use for commercial
 
 ### L7: no-new-embedding-frameworks-added
 rule: no `sentence-transformers`, `torch`, or `faiss-cpu` were added
-because: dense embeddings reuse existing `LocalAIClient.embed()` HTTP call (Apertus-8B); vector index is plain numpy matrix
+because: dense embeddings reuse existing `LocalAIClient.embed()` HTTP call (`EMBEDDING_MODEL`, multilingual-e5-large-instruct served by LocalAI, #98-A); vector index is plain numpy matrix

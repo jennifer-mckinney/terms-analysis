@@ -101,7 +101,7 @@ Verified against `src/backend/app/` and `src/webapp/` inventory. Cross-reference
 | API server | `src/backend/app/main.py` | FastAPI + Uvicorn, async, 24 business routes + `/health` + `/infer` = 26 total [LIB-API §Endpoint Map, verified against `src/backend/app/main.py`] |
 | Rule engine | `src/backend/app/services/rules.py` (1,092 lines) | 64 `RulePattern` entries, ~50 category strings, 30 jurisdiction codes [LIB-RULES §Risk Categories; verified `grep -c "RulePattern("` = 64] |
 | LLM client | `src/backend/app/services/localai.py` | httpx async client for LocalAI, language-routed Apertus/EuroLLM [`src/backend/app/services/localai.py:77`] |
-| Document embeddings | `src/backend/app/services/embedding.py` | BM25 + Apertus + EuroLLM RRF ensemble for chunk selection. Not currently wired into `analyzer.py` [LIB-ARCH §System Components, marked "dead code"] |
+| Document embeddings | `src/backend/app/services/embedding.py` | Chunking, BM25, RRF and the e5-instruct query format (`format_e5_query`), imported by `legal_kb.py` [LIB-ARCH §System Components C5] |
 | Legal knowledge base | `src/backend/app/services/legal_kb.py` | Numpy exhaustive + BM25/RRF retrieval over `data/legal_corpus/`, wired into `analyzer.py::analyze_text` [`src/backend/app/services/analyzer.py:477`] |
 | Analyzer orchestration | `src/backend/app/services/analyzer.py` (813 lines) | Rules → legal-KB → LLM → validation → merge → IRP → domain group → verdict [§7] |
 | Validator | `src/backend/app/services/validation.py` | Hallucination guard, citation checker, coverage ratio [§7.7] |
@@ -1170,7 +1170,7 @@ Rationale for retirement over parity work:
 Per [LIB-LEGAL §RAG Architecture] and `legal_kb.py`:
 
 1. **Sparse (BM25)** — `rank_bm25.BM25Okapi` [`embedding.py:_BM25`], keyword and defined-term match.
-2. **Dense (Apertus embeddings)** — `LocalAIClient.embed()` against `MODEL_WORLD`, L2-normalized, exhaustive cosine similarity via `numpy` dot product.
+2. **Dense (e5-instruct embeddings, #98-A)** — `LocalAIClient.embed()` against `EMBEDDING_MODEL` (multilingual-e5-large-instruct; passages raw, queries as `Instruct: <EMBEDDING_QUERY_TASK>\nQuery: <text>`), L2-normalized, exhaustive cosine similarity via `numpy` dot product.
 3. **Fusion (RRF)** — Reciprocal Rank Fusion [`embedding.py:rrf_fuse`], `RRF_K=60` [`config.py:50`].
 
 Note: [LIB-STACK §Python Dependencies] confirms `sentence-transformers`, `torch`, `faiss-cpu` are **not** added. Embeddings reuse the existing `LocalAIClient.embed()` HTTP call; the vector index is a plain numpy matrix.
