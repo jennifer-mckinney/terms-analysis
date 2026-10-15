@@ -330,6 +330,48 @@ def test_t4_conf_pinning_a_ta_commit_refuses_on_root(world: World) -> None:
     _assert_refused(world, wt, _commit(wt), before, "import")
 
 
+def _roots(repo: Path) -> list[str]:
+    return _git(repo, "rev-list", "--max-parents=0", "HEAD").stdout.decode().split()
+
+
+def _root_only_case(w: World, roots: str) -> tuple[str, str]:
+    """(tip, ingester_root_commit) for the conf; only the root proof is false.
+
+    ta-rooted: a TA-rooted commit carrying the ingester tip's exact tree.
+    two-roots: the same tree with both the ingester tip and TA HEAD as parents.
+    root-mispinned: the real tip, but the conf names another ingester commit.
+    """
+    ta_head = _rev(w.ta, "HEAD")
+    if roots == "root-mispinned":
+        return w.tip, _rev(w.ing, "HEAD~1")
+    parents = ["-p", ta_head] if roots == "ta-rooted" else ["-p", w.tip, "-p", ta_head]
+    made = _git(w.ta, "commit-tree", w.tip_tree, *parents, "-m", f"foreign tip ({roots})")
+    return made.stdout.decode().strip(), w.root
+
+
+@pytest.mark.parametrize("roots", ["ta-rooted", "two-roots", "root-mispinned"])
+def test_t4b_root_proof_alone_refuses(world: World, roots: str) -> None:
+    """T4b (kills deleting the root proof): HEAD == conf tip and the staged tree
+    is exactly the tip tree under the prefix, but HEAD's roots are not the one
+    pinned ingester_root_commit. The refusal must come from the root proof."""
+    tip, root = _root_only_case(world, roots)
+    _write(world.ta, CONF_REL, _with(world.conf, ingester_tip=tip, ingester_root_commit=root))
+    r = _reloc(world, at=tip, name=f"reloc-{roots}")
+    # Fixture: every proof except the root proof holds.
+    assert _rev(r, "HEAD") == tip and _rev(r, "HEAD^{tree}") == world.tip_tree
+    staged = _git(r, "write-tree").stdout.decode().strip()
+    assert _rev(r, f"{staged}:{world.prefix}") == world.tip_tree, "fixture: prefix tree differs"
+    names = [p for p in _git(r, "ls-tree", "-r", "-z", "--name-only", staged).stdout.split(b"\0") if p]
+    assert names and all(os.fsdecode(p).startswith(world.prefix + "/") for p in names), (
+        "fixture: the staged tree has entries outside the prefix"
+    )
+    found = _roots(r)
+    assert found != [root], "fixture: the root proof would hold"
+    assert len(found) == (2 if roots == "two-roots" else 1), found
+    text = _assert_refused(world, r, _commit(r), tip, "import")
+    assert "ingester_root_commit" in text, f"refusal does not name the root proof: {text[-600:]!r}"
+
+
 def _merged_ta(w: World) -> Path:
     """A TA branch after #125's unrelated-histories merge (two roots)."""
     r = _reloc(w)
@@ -509,16 +551,24 @@ CONF_ROWS: list[tuple[str, str, ConfMaker]] = [
 ]
 
 
+# Negative rows whose conf is well formed but pins another tip: they load, so
+# an ordinary commit still passes. Every other negative row is malformed.
+WELL_FORMED_NEGATIVE_ROWS = frozenset({"tip-last-digit-changed"})
+
+
 def test_conf_rows_contract() -> None:
     kinds = {k for k, _, _ in CONF_ROWS}
     assert kinds == {"positive", "negative"}, kinds
     ids = [i for _, i, _ in CONF_ROWS]
     assert len(ids) == len(set(ids))
+    negatives = {i for k, i, _ in CONF_ROWS if k == "negative"}
+    assert WELL_FORMED_NEGATIVE_ROWS < negatives, WELL_FORMED_NEGATIVE_ROWS - negatives
 
 
 @pytest.mark.parametrize("kind,row_id,make", CONF_ROWS, ids=[i for _, i, _ in CONF_ROWS])
 def test_t12_conf_loader(world: World, kind: str, row_id: str, make: ConfMaker) -> None:
-    """T12 (kills M6): a malformed conf never yields import mode."""
+    """T12 (kills M6, and "malformed == absent"): a malformed conf never yields
+    import mode, and it refuses an ordinary commit that passes without a conf."""
     _write(world.ta, CONF_REL, make(world.conf, world))
     r = _reloc(world)
     proc = _commit(r)
@@ -528,6 +578,20 @@ def test_t12_conf_loader(world: World, kind: str, row_id: str, make: ConfMaker) 
     text = _assert_refused(world, r, proc, world.tip, "any")
     cap = int(_conf_value(_real_conf(), "max_message_chars"))
     assert "0" * (cap + 1) not in text, "the refusal quotes more than max_message_chars of conf input"
+    # The same ordinary TA commit (check 1 allows it) under this conf, then
+    # with the conf absent: malformed must refuse, absent must pass.
+    _stage(world.ta, "docs/note.md", "hello\n")
+    before = _rev(world.ta, "HEAD")
+    ordinary = _commit(world.ta)
+    if row_id in WELL_FORMED_NEGATIVE_ROWS:
+        _assert_ordinary_pass(world.ta, ordinary, _count(world.ta))
+        return
+    otext = _assert_refused(world, world.ta, ordinary, before, "any")
+    assert SSOT_MISSING not in otext, f"refused by check 1, not by the conf: {otext[-600:]!r}"
+    assert CONF_REL in otext, f"the refusal does not name the malformed conf: {otext[-600:]!r}"
+    assert "0" * (cap + 1) not in otext, "the refusal quotes more than max_message_chars of conf input"
+    (world.ta / CONF_REL).unlink()
+    _assert_ordinary_pass(world.ta, _commit(world.ta), _count(world.ta))
 
 
 # ---------------------------------------------------------------------------
