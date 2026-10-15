@@ -1,0 +1,92 @@
+name: Nightly Health Check
+on:
+  schedule:
+    - cron: '0 3 * * *'   # 3 AM UTC daily
+  workflow_dispatch:
+
+# One state dir for checkpoints, both licence baselines and the bundle record, declared with the
+# same value in refresh.yml and health.yml (terms-analysis#93 ruling K) and persisted between
+# hosted runners by actions/cache (ruling L, ingester #71). It sits outside the checkout, which
+# checkout's clean wipes. Not runner.temp: the runner context is not available in workflow or
+# job env (GitHub contexts reference, context availability; actionlint rejects it), so the dir
+# is the parent of the workspace, the job's own work dir for this repo on a hosted runner.
+env:
+  INGESTER_STATE_DIR: ${{ github.workspace }}/../legal-corpus-ingester-state
+
+# Explicit pipefail: GitHub's default `bash -e` lets `cmd | tail` hide cmd's failure (terms-analysis#90).
+defaults:
+  run:
+    shell: bash -eo pipefail {0}
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false  # no step needs git credentials; keep the token out of .git/config
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version-file: .python-version
+
+      - name: Install
+        run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install -e '.[dev]' 2>&1 | tail -5
+
+      # Restores the newest state refresh.yml saved (ingester #71). Health never saves: it only
+      # reads. A miss (no refresh yet, or the cache evicted) leaves the dir empty, and the health
+      # check then fails every source as never-run: loud, not green.
+      - name: Restore ingester state
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ env.INGESTER_STATE_DIR }}
+          key: ingester-state-${{ runner.os }}-health-${{ github.run_id }}
+          restore-keys: |
+            ingester-state-${{ runner.os }}-
+
+      # Checkpoints are read from the declared INGESTER_STATE_DIR, outside the checkout, which
+      # checkout's clean wipes (terms-analysis#90).
+      #
+      # Order matters: the health check runs BEFORE `ingester status`. On a malformed checkpoint
+      # the health check reports it as exit 4 (invalid checkpoint, #17) and fails the job, so the
+      # job stops before `ingester status` can crash on the same file. With status first, exit 4
+      # could never surface. Neither step has `if:` or continue-on-error.
+      - name: Run health check
+        run: |
+          source .venv/bin/activate
+          rc=0
+          python scripts/health_check.py \
+            --state-dir "$INGESTER_STATE_DIR" || rc=$?
+          # Only exit 3 (cli.EXIT_NOT_WIRED: refresh is not wired, so no source can have run) is
+          # excused, as a warning. Refresh is wired since terms-analysis#93, so health_check.py no
+          # longer exits 3; the row stays for the reserved code. Every other non-zero code fails
+          # the run: 1 = stale, failed or never-run source, 2 = config problem, 4 = invalid checkpoint
+          # (#17), or a crash.
+          case "$rc" in
+            0) ;;
+            3) echo "::warning title=Refresh not wired::health_check exited 3: no source has run because refresh is not wired yet. See the health report." ;;
+            *) exit "$rc" ;;
+          esac
+
+      # Runs only after the health check passed (or warned with exit 3), so every checkpoint it
+      # reads has already been validated by health_check.py with the rule CheckpointStore.load
+      # enforces (pipeline/state.py checkpoint_problem, #17), and so cannot crash here.
+      - name: Run ingester status
+        run: |
+          source .venv/bin/activate
+          # Exits 0 only when sources are configured: per-source stages, or 'No runs recorded.' when
+          # none has run yet. No sources configured, or a sources dir that will not load, exits
+          # non-zero with the codes `ingester status --help` lists (terms-analysis#190). No masking
+          # (terms-analysis#90).
+          ingester status --state-dir "$INGESTER_STATE_DIR"
+
+      - name: Upload health report
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1  # v4.6.1
+        if: always()
+        with:
+          name: health-report-${{ github.run_id }}
+          path: out/health/
