@@ -1073,6 +1073,9 @@ def test_installer_wires_pre_commit_and_no_longer_creates_reviews(tmp_path: Path
         capture_output=True,
         timeout=GIT_TIMEOUT,
     ).stdout.strip()
-    assert hooks_path == ".githooks"
+    # #384 owner ruling 3 (2026-10-15): the value is ABSOLUTE, so a linked
+    # worktree (the #125 reloc worktree has no .githooks) runs these hooks.
+    assert os.path.isabs(hooks_path), f"core.hooksPath is relative: {hooks_path!r}"
+    assert os.path.realpath(hooks_path) == os.path.realpath(repo / ".githooks")
     assert os.access(repo / ".githooks" / "pre-commit", os.X_OK)
     assert not (repo / ".git" / "reviews").exists()
