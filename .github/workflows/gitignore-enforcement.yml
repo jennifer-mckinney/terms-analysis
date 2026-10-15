@@ -20,6 +20,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The tree guard step runs Python; pin it like every other workflow.
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
       - name: Load required patterns from SSoT
         id: load_required
         run: |
