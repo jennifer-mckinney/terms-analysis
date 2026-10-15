@@ -21,21 +21,103 @@
 #      required-gitignore SSoT), no .env look-alike. Success prints the exact
 #      line "CLEAN <n>".
 #
+# Import mode (#384, owner ruling 2026-10-15, design Option A): exactly one
+# commit skips check 1, the #125 relocation commit of the ingester tree.
+# scripts/governance/import_guard.py decides, from the HOOK checkout's own
+# .claude/governance/monorepo-layout.conf (HOOK_ROOT is derived from this
+# file's location, never from the committing worktree). In import mode checks
+# 4 and 5 still run, with the hook checkout's scripts and governance files.
+# A missing conf grants nothing; a failed proof refuses hard.
+#
 # Install with: scripts/install-hooks.sh
 # Governance policy: to change the required list, edit
 # .claude/governance/required-gitignore.txt (both this hook and
 # .github/workflows/gitignore-enforcement.yml read from it).
 
 set -euo pipefail
+# An exported CDPATH makes `cd <relative>` search elsewhere and echo the result.
+unset CDPATH
+
+# The checkout this hook file lives in (core.hooksPath is absolute and points
+# at the main checkout's .githooks, #384 ruling 3). From BASH_SOURCE with
+# `cd -P`, not `git rev-parse`: during a commit GIT_DIR, GIT_WORK_TREE and
+# GIT_INDEX_FILE describe the COMMITTING worktree. Resolved before any cd.
+HOOK_ROOT="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 # F8: every path below is repo-relative, so no message prints an absolute path.
+# Import mode reads assets under HOOK_ROOT; its messages use the relative names.
 cd "${REPO_ROOT}"
 GITIGNORE=".gitignore"
 REQUIRED_LIST_FILE=".claude/governance/required-gitignore.txt"
 # One interpreter setting for every Python check in this hook.
 GUARD_PYTHON="${LEAK_SCAN_PYTHON:-python3}"
 
+fail() {
+    printf 'pre-commit: %s\n' "$1" >&2
+    exit 1
+}
+
+# --- Import mode (#384) -------------------------------------------------------
+# Whenever the hook checkout has the conf, the helper runs for every commit,
+# so a broken helper is noticed on ordinary commits too. Fail closed: only rc 0 with the exact last line "NOT-IMPORT" or
+# "IMPORT <tip> <tree>" is a verdict. It runs in a subshell whose stderr is
+# discarded first, so a helper killed by a signal cannot make bash print the
+# job-status line (which names this hook's absolute path, F8).
+IMPORT_HELPER_REL="scripts/governance/import_guard.py"
+IMPORT_CONF_REL=".claude/governance/monorepo-layout.conf"
+if [[ ! -e "${HOOK_ROOT}/${IMPORT_CONF_REL}" && ! -L "${HOOK_ROOT}/${IMPORT_CONF_REL}" ]]; then
+    # No conf in the hook checkout: no exemption can exist, so the normal path
+    # runs unchanged (the helper would answer NOT-IMPORT for the same reason).
+    import_out="NOT-IMPORT"
+    import_rc=0
+else
+    # A conf exists, so the helper must run: missing helper or interpreter
+    # refuses (fail closed), never skips the proof.
+    [[ -f "${HOOK_ROOT}/${IMPORT_HELPER_REL}" ]] \
+        || fail "import check helper missing in the hook checkout: ${IMPORT_HELPER_REL}"
+    command -v "${GUARD_PYTHON}" >/dev/null 2>&1 \
+        || fail "${GUARD_PYTHON} not found (needed by ${IMPORT_HELPER_REL})"
+    # stderr of the whole substitution goes to /dev/null so a signalled helper
+    # cannot print bash's job-status line (which names the hook's path).
+    set +e
+    import_out="$(exec 2>/dev/null; ("${GUARD_PYTHON}" -I "${HOOK_ROOT}/${IMPORT_HELPER_REL}" "${HOOK_ROOT}/${IMPORT_CONF_REL}"))"
+    import_rc=$?
+    set -e
+fi
+import_last="${import_out##*$'\n'}"
+IMPORT_MODE=0
+if [[ "${import_rc}" -eq 0 ]] && [[ "${import_last}" == "NOT-IMPORT" ]]; then
+    :
+elif [[ "${import_rc}" -eq 0 ]] && [[ "${import_last}" =~ ^IMPORT\ ([0-9a-f]{40})\ ([0-9a-f]{40})$ ]]; then
+    import_tip="${BASH_REMATCH[1]}"
+    import_tree="${BASH_REMATCH[2]}"
+    # Defence in depth: the verdict must name this HEAD and this index's tree.
+    [[ "$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null || true)" == "${import_tip}" ]] \
+        || fail "import check verdict does not match HEAD; commit refused"
+    [[ "$(git write-tree 2>/dev/null || true)" == "${import_tree}" ]] \
+        || fail "import check verdict does not match the tree being committed; commit refused"
+    IMPORT_MODE=1
+    printf 'pre-commit: import mode: HEAD is the pinned ingester tip and the index holds exactly its tree under the pinned prefix; check 1 skipped, checks 4 and 5 run with the hook checkout files\n' >&2
+    printf 'pre-commit: IMPORT %s %s\n' "${import_tip}" "${import_tree}" >&2
+elif [[ "${import_rc}" -eq 1 ]] && [[ "${import_last}" == "IMPORT-REFUSED" ]]; then
+    # The helper's own reason lines: fixed text, no paths, no conf values
+    # beyond max_message_chars. Printable ASCII only, defensively.
+    while IFS= read -r import_line; do
+        [[ "${import_line}" == "IMPORT-REFUSED" ]] && continue
+        printf 'pre-commit: %s\n' "${import_line}" | LC_ALL=C tr -cd '\11\12\40-\176' >&2
+    done <<< "${import_out}"
+    fail "commit refused by the import check (${IMPORT_HELPER_REL}); see the reason above."
+else
+    fail "import check failed (exit ${import_rc}, no verdict); commit refused."
+fi
+
+# Asset paths: repo-relative on the normal path (unchanged), the hook
+# checkout's in import mode. Messages always print the relative names.
+ASSET_ROOT=""
+[[ "${IMPORT_MODE}" -eq 1 ]] && ASSET_ROOT="${HOOK_ROOT}/"
+
+if [[ "${IMPORT_MODE}" -eq 0 ]]; then
 # Load required patterns from SSoT (skip comments + blank lines).
 if [[ ! -f "${REQUIRED_LIST_FILE}" ]]; then
     printf 'pre-commit: required-gitignore SSoT missing: %s\n' "${REQUIRED_LIST_FILE}" >&2
@@ -51,11 +133,6 @@ while IFS= read -r line; do
     REQUIRED_GITIGNORE_PATTERNS+=("${trimmed}")
 done < "${REQUIRED_LIST_FILE}"
 
-fail() {
-    printf 'pre-commit: %s\n' "$1" >&2
-    exit 1
-}
-
 # --- Check 1: required .gitignore entries -----------------------------------
 if [[ ! -f "${GITIGNORE}" ]]; then
     fail ".gitignore is missing from repo root. This file is required."
@@ -69,6 +146,7 @@ for pattern in "${REQUIRED_GITIGNORE_PATTERNS[@]}"; do
         fail ".gitignore is missing required pattern: \`${pattern}\`. This entry is protected -- see .claude/governance/required-gitignore.txt."
     fi
 done
+fi  # end of the normal path's check 1; import mode skips it (#384)
 
 # --- Check 4: no local machine paths in staged evidence files --------------
 # Issue #91 P9 security F1: captured test output committed under
@@ -108,9 +186,9 @@ trap 'rm -f "${EVIDENCE_STAGED_Z}" "${EVIDENCE_BLOB}" "${EVIDENCE_HITS}" "${EVID
 git diff --cached --name-only -z --diff-filter=ACMRT > "${EVIDENCE_STAGED_Z}" \
     || fail "could not list staged files for the evidence path scan"
 if [[ -s "${EVIDENCE_STAGED_Z}" ]]; then
-    [[ -f "${EVIDENCE_REGEX_FILE}" ]] \
+    [[ -f "${ASSET_ROOT}${EVIDENCE_REGEX_FILE}" ]] \
         || fail "evidence leak pattern SSoT missing: ${EVIDENCE_REGEX_FILE}"
-    [[ -f "${EVIDENCE_MATCHER}" ]] \
+    [[ -f "${ASSET_ROOT}${EVIDENCE_MATCHER}" ]] \
         || fail "evidence leak matcher missing: ${EVIDENCE_MATCHER}"
     command -v "${EVIDENCE_PYTHON}" >/dev/null 2>&1 \
         || fail "${EVIDENCE_PYTHON} not found (needed by ${EVIDENCE_MATCHER})"
@@ -125,7 +203,7 @@ if [[ -s "${EVIDENCE_STAGED_Z}" ]]; then
         set +e
         # grep-compatible: "<line>:<pattern>" lines, exit 0 hit / 1 none /
         # 2 error (bad SSoT, unreadable input). -I = isolated interpreter.
-        "${EVIDENCE_PYTHON}" -I "${EVIDENCE_MATCHER}" "${EVIDENCE_REGEX_FILE}" "${EVIDENCE_BLOB}" > "${EVIDENCE_HITS}"
+        "${EVIDENCE_PYTHON}" -I "${ASSET_ROOT}${EVIDENCE_MATCHER}" "${ASSET_ROOT}${EVIDENCE_REGEX_FILE}" "${EVIDENCE_BLOB}" > "${EVIDENCE_HITS}"
         grep_rc=$?
         set -e
         if [[ "${grep_rc}" -eq 0 ]]; then
@@ -145,7 +223,7 @@ if [[ -s "${EVIDENCE_STAGED_Z}" ]]; then
     # content. Same matcher, same fail-closed sentinel rule.
     if [[ -s "${EVIDENCE_NAMES}" ]]; then
         set +e
-        "${EVIDENCE_PYTHON}" -I "${EVIDENCE_MATCHER}" "${EVIDENCE_REGEX_FILE}" "${EVIDENCE_NAMES}" > "${EVIDENCE_HITS}"
+        "${EVIDENCE_PYTHON}" -I "${ASSET_ROOT}${EVIDENCE_MATCHER}" "${ASSET_ROOT}${EVIDENCE_REGEX_FILE}" "${EVIDENCE_NAMES}" > "${EVIDENCE_HITS}"
         grep_rc=$?
         set -e
         if [[ "${grep_rc}" -eq 0 ]]; then
@@ -166,11 +244,11 @@ fi
 # "REFUSED <n>" line; anything else (crash, config error) is a failure too.
 GUARD_SCRIPT="scripts/governance/tree_guard.py"
 GUARD_PATTERNS=".claude/governance/personal-path-patterns.txt"
-[[ -f "${GUARD_SCRIPT}" ]] || fail "tree guard missing: ${GUARD_SCRIPT}"
+[[ -f "${ASSET_ROOT}${GUARD_SCRIPT}" ]] || fail "tree guard missing: ${GUARD_SCRIPT}"
 command -v "${GUARD_PYTHON}" >/dev/null 2>&1 \
     || fail "${GUARD_PYTHON} not found (needed by ${GUARD_SCRIPT})"
 set +e
-"${GUARD_PYTHON}" -I "${GUARD_SCRIPT}" "${GUARD_PATTERNS}" "${REQUIRED_LIST_FILE}" > "${GUARD_OUT}" 2>&1
+"${GUARD_PYTHON}" -I "${ASSET_ROOT}${GUARD_SCRIPT}" "${ASSET_ROOT}${GUARD_PATTERNS}" "${ASSET_ROOT}${REQUIRED_LIST_FILE}" > "${GUARD_OUT}" 2>&1
 guard_rc=$?
 set -e
 guard_last="$(tail -n 1 "${GUARD_OUT}")"
@@ -178,8 +256,13 @@ if [[ "${guard_rc}" -eq 0 ]] && [[ "${guard_last}" =~ ^CLEAN\ [0-9]+$ ]]; then
     printf '%s\n' "${guard_last}" >&2
     exit 0
 fi
-# The guard prints names escaped and never echoes file content (F2/F8).
-sed 's/^/pre-commit: /' "${GUARD_OUT}" >&2
+# The guard prints names escaped and never echoes file content (F2/F8). In
+# import mode its config messages name the absolute hook-checkout asset path;
+# that prefix is replaced so no absolute path is printed (F8).
+while IFS= read -r guard_line || [[ -n "${guard_line}" ]]; do
+    [[ -n "${ASSET_ROOT}" ]] && guard_line="${guard_line//"${ASSET_ROOT}"/<hook checkout>/}"
+    printf 'pre-commit: %s\n' "${guard_line}" >&2
+done < "${GUARD_OUT}"
 if [[ "${guard_rc}" -eq 1 ]] && [[ "${guard_last}" =~ ^REFUSED\ [0-9]+$ ]]; then
     # No file names or reason tags here: each listed line carries its own.
     fail "commit refused by ${GUARD_SCRIPT}; fix the path(s) listed above."
