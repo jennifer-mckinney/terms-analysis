@@ -330,7 +330,9 @@ def _persist_analysis(
 ) -> None:
     """Persist an analysis payload and optional review item to the database."""
     if hasattr(payload, "model_dump_json"):
-        payload_json = payload.model_dump_json()
+        # #372: llm_status_label is derived from llm_status on every read, so
+        # it is never stored; a stored copy could go stale when the copy changes.
+        payload_json = payload.model_dump_json(exclude={"llm_status_label"})
     else:
         payload_json = payload.json()
 

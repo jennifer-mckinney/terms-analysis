@@ -7,9 +7,10 @@ import unicodedata
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple, cast, get_args
 
-from pydantic import BaseModel, Field, StrictFloat, field_validator, model_validator
+from pydantic import BaseModel, Field, StrictFloat, computed_field, field_validator, model_validator
 
 from . import config as app_config
+from .llm_status_copy import llm_status_label as _llm_status_copy
 
 logger = logging.getLogger(__name__)
 
@@ -878,6 +879,25 @@ class AnalysisPayload(BaseModel):
             "existed."
         ),
     )
+
+    # Issue #372 (owner ruling 2026-10-14, option c): the reader-facing text
+    # for llm_status, built here from app.llm_status_copy so the v2 UI holds
+    # no copy of the mapping. Derived on every serialisation, never accepted
+    # as input (a supplied or stored value is ignored), and never persisted:
+    # main._persist_analysis excludes it from result_json.
+    @computed_field(  # type: ignore[prop-decorator]
+        description=(
+            "Reader-facing text for llm_status, built by the backend from "
+            "app.llm_status_copy. Clients display this field and never map "
+            "llm_status to text themselves. An unknown or missing llm_status "
+            "gets the 'status unknown' text; the raw llm_status value is never "
+            "used as the label. Derived on every response, never stored."
+        )
+    )
+    @property
+    def llm_status_label(self) -> str:
+        return _llm_status_copy(self.llm_status)
+
     legal_context: List[LegalCitation] = Field(
         default_factory=list,
         description=(

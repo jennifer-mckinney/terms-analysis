@@ -19,6 +19,7 @@ from __future__ import annotations
 import html
 import os
 import re
+import unicodedata
 from typing import Optional
 
 import requests
@@ -1074,6 +1075,49 @@ def _render_review_required_banner(result: dict) -> None:
     )
 
 
+# Issue #372: the backend sends the reader-facing AI-status text as
+# ``llm_status_label`` (owner ruling 2026-10-14: the UI reads from the backend
+# and holds no copy of the labels). Allowlist of Unicode general-category
+# classes a label may use: letters, marks, numbers, punctuation, symbols and
+# plain spaces. Everything else (controls, bidi/zero-width format characters,
+# line and paragraph separators, surrogates, private-use, unassigned) can
+# forge structure in the HTML sink, so a label carrying one is not trusted.
+_LABEL_CATEGORY_CLASSES = frozenset({"L", "M", "N", "P", "S"})
+_LABEL_SPACE_CATEGORY = "Zs"
+
+
+def _trusted_llm_status_label(value: object) -> Optional[str]:
+    """The backend's label if it is a non-blank string of allowed characters, else None.
+
+    Never derives text from ``llm_status``: a missing or broken label is the
+    caller's error state, not a reason to read or echo the raw token.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    for ch in value:
+        category = unicodedata.category(ch)
+        if category[0] not in _LABEL_CATEGORY_CLASSES and category != _LABEL_SPACE_CATEGORY:
+            return None
+    return value
+
+
+def _render_llm_status(result: dict) -> None:
+    """Show the backend's AI-status label, HTML-escaped, or a visible error state."""
+    label = _trusted_llm_status_label(result.get("llm_status_label"))
+    if label is None:
+        st.error(
+            "The AI review status for this result could not be shown: the "
+            "analysis service sent no valid status message. Treat the findings "
+            "as unconfirmed and run the analysis again."
+        )
+        return
+    st.markdown(
+        '<div style="font-size:0.85rem;color:var(--ink-soft);margin:0 0 1rem 0;">'
+        f"{html.escape(label)}</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def render_results() -> None:
     """Render the verdict-first results screen (mockup view #2)."""
     result = st.session_state.analysis_result
@@ -1177,6 +1221,8 @@ def render_results() -> None:
         f"</div>",
         unsafe_allow_html=True,
     )
+    # Whether the findings include the AI model or are rules-only (HR5).
+    _render_llm_status(result)
 
     # Review-required banner: surfaces the backend's confidence < 0.80 flag so
     # the reader sees when the tool itself is uncertain. Copy stays tentative
