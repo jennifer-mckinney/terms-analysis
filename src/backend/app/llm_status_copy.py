@@ -1,12 +1,15 @@
 """Reader-facing copy for every ``schemas.LLMStatus`` value (issue #368).
 
-This module is the single source of the label text. The PDF export renders
+This module is the single source of the label text. Every ``AnalysisPayload``
+carries ``llm_status_label``, built here (#372), and the PDF export renders
 ``llm_status_label(token)``; the CSV export and ``/reviews`` carry the token
 itself. No other module restates a label (``test_no_consumer_restates_a_label``).
+The v2 UI never loads this module: it renders the ``llm_status_label`` field of
+the API response (owner ruling 2026-10-14, "the front end needs to read from
+the backend").
 
-It imports the standard library only, on purpose: the v2 UI (#372) is a
-separate deployable without the backend package, and must be able to load this
-same file. The keys below therefore mirror ``schemas.LLMStatus`` instead of
+It imports the standard library only, so ``schemas`` can import it without a
+cycle. The keys below therefore mirror ``schemas.LLMStatus`` instead of
 importing it; ``test_every_member_except_unknown_is_known`` fails if a member
 is added there without copy here.
 
