@@ -6,6 +6,8 @@ xref: [[LIB-ARCH]] [[LIB-STACK]] [[LIB-LEGAL]] [[LIB-TEST]] [[LIB-API]] [[LIB-RU
 
 ## resume-here
 - Current state and next actions: the newest `SESSION_HANDOFF_*.md` in the repo root. Read it first.
+- Halt (owner 2026-10-14; P3 frozen since 2026-10-12 to launch the owner's startup): only P0/P1 work, all of it, path to G2 first (G0 → GM → G1 → G1b → G2), then G2b → G3 → G4; in-flight P2 finishes; P3 frozen; LOW/NIT findings are recorded, not worked. Lifted only by the owner.
+- MVP = desktop + mobile web; native app is post-MVP (owner 2026-10-14). No Capacitor or Ionic; app-only cards sit in the `post-MVP` milestone at P3. Plan amendment: `~/.claude/plans/as-my-principal-engineer-tidy-tulip.md#amendment-2026-10-14`.
 - Execution pipeline and owner limits: `~/.claude/library/EXECUTION-PLAYBOOK.md`.
 - Settled plan (D1-D10, R1-R7, gate order G0 → GM → G1 → G1b → G2 → G2b → G3 → G4): `~/.claude/plans/as-my-principal-engineer-tidy-tulip.md`. Don't re-litigate it.
 - Live log for the day: `docs/evidence/<date>-status.md` (untracked).
@@ -18,7 +20,7 @@ xref: [[LIB-ARCH]] [[LIB-STACK]] [[LIB-LEGAL]] [[LIB-TEST]] [[LIB-API]] [[LIB-RU
 | Key | Value |
 |-----|-------|
 | Purpose | Analyse ToS and privacy policies for compliance risk, using rule + LLM + RAG detection |
-| Stack | FastAPI backend; Streamlit UI (v2 primary, v1 legacy rollback; Vue 3 planned under D2/G4); SQLite; LocalAI (Apertus-8B, EuroLLM-22B); numpy exhaustive search for the legal KB (no FAISS, no ANN) |
+| Stack | FastAPI backend; Streamlit UI (v2 primary, v1 legacy rollback; Vue 3 + Vite planned under D2/G4, web only, no Capacitor/Ionic); SQLite; LocalAI (Apertus-8B, EuroLLM-22B); numpy exhaustive search for the legal KB (no FAISS, no ANN) |
 | Python | 3.14, pinned once in `.python-version`; `ci.yml` reads it (#277). Both repos run every workflow on GitHub-hosted `ubuntu-latest` (ingester ADR-016, PR #69; the laptop runner is decommissioned by the owner) |
 | Jurisdictions | 30 codes (full list in `schemas.py`); empty `jurisdictions=[]` means no filter |
 | Risk method | IRP composite per finding. Details: [[LIB-RULES#IRP]] |
