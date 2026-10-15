@@ -4,7 +4,15 @@ P9 security F1: captured pytest output committed under docs/evidence/ leaked the
 local account name and macOS temp-folder layout into a public repo. Check 4 of
 the pre-commit hook now rejects staged evidence files containing local machine
 paths. These tests run the real hook script inside a throwaway git repository
-and also confirm the hook's pre-existing guards (checks 1-3) still fire.
+and also confirm the hook's other guards (check 1 and the check 5 tree guard)
+still fire.
+
+#236 / #145: check 5 (scripts/governance/tree_guard.py) treats every
+directory entry of required-gitignore.txt as a graveyard at any depth, and
+`docs/evidence/` is one of them, so no evidence file can be committed. A file
+that check 4 accepts therefore reaches check 5 and is refused there as
+graveyard ONLY. The "clears check 4" cases below assert exactly that: no
+check 4 refusal, no home-path reason, one graveyard line per staged file.
 """
 from __future__ import annotations
 
@@ -21,6 +29,10 @@ _REQUIRED_LIST = _REPO_ROOT / ".claude" / "governance" / "required-gitignore.txt
 _LEAK_REGEX = _REPO_ROOT / ".claude" / "governance" / "evidence-leak-regex.txt"
 _SCANNER = _REPO_ROOT / "scripts" / "governance" / "scan-evidence-leaks.sh"
 _MATCHER = _REPO_ROOT / "scripts" / "governance" / "leak_scan.py"
+# #236: check 5 runs the shared tree guard with the home-path pattern SSoT.
+_TREE_GUARD = _REPO_ROOT / "scripts" / "governance" / "tree_guard.py"
+_HOME_PATTERNS = _REPO_ROOT / ".claude" / "governance" / "personal-path-patterns.txt"
+_CHECK4_REFUSAL = "Refusing to stage"
 
 # Home-path roots and private folder names are assembled at runtime so this
 # tracked file is not itself a home-path leak (#145
@@ -61,6 +73,9 @@ def repo(tmp_path: Path) -> Path:
     # Round 5: check 4 delegates matching to the shared normalising matcher.
     (root / "scripts" / "governance").mkdir(parents=True)
     shutil.copy2(_MATCHER, root / "scripts" / "governance" / "leak_scan.py")
+    # #236: check 5 (tree guard) and its home-path pattern config.
+    shutil.copy2(_TREE_GUARD, root / "scripts" / "governance" / "tree_guard.py")
+    shutil.copy2(_HOME_PATTERNS, root / ".claude" / "governance" / "personal-path-patterns.txt")
     shutil.copy2(_REPO_ROOT / ".gitignore", root / ".gitignore")
     return root
 
@@ -82,10 +97,25 @@ def _run_hook(repo: Path) -> subprocess.CompletedProcess:
     )
 
 
-def test_precommit_clean_evidence_file_passes(repo: Path) -> None:
+def _assert_clears_check4_refused_as_graveyard(result: subprocess.CompletedProcess, *paths: str) -> None:
+    """Check 4 accepted every staged evidence file; check 5 refused each as graveyard only.
+
+    Check 4 exits on its first hit with its own message, so the absence of
+    that message plus one exact "<path>: graveyard" line per file proves check
+    4 passed them, and the tree guard found no home path in them either.
+    """
+    lines = result.stderr.splitlines()
+    assert result.returncode == 1, result.stderr
+    assert _CHECK4_REFUSAL not in result.stderr, result.stderr
+    assert "home-path" not in result.stderr, result.stderr
+    for path in paths:
+        assert f"pre-commit: {path}: graveyard" in lines, result.stderr
+    assert f"pre-commit: REFUSED {len(paths)}" in lines, result.stderr
+
+
+def test_precommit_clean_evidence_file_clears_check4(repo: Path) -> None:
     _stage(repo, {"docs/evidence/run.txt": b"FAILED <tmp>/test_x.py::test_y\n<repo>/src\n"})
-    result = _run_hook(repo)
-    assert result.returncode == 0, result.stderr
+    _assert_clears_check4_refused_as_graveyard(_run_hook(repo), "docs/evidence/run.txt")
 
 
 @pytest.mark.parametrize(
@@ -110,9 +140,20 @@ def test_precommit_scans_nested_evidence_paths(repo: Path) -> None:
 
 
 def test_precommit_ignores_local_paths_outside_evidence(repo: Path) -> None:
-    # The guard is scoped to docs/evidence/; other paths are out of scope.
-    _stage(repo, {"docs/notes.md": _U_B + b"/x/thing\n", "src/a.py": b"# pytest-of-x\n"})
-    assert _run_hook(repo).returncode == 0
+    # Check 4 is scoped to docs/evidence/: evidence-regex hits elsewhere that
+    # are not home paths (temp root, pytest dir) commit cleanly.
+    _stage(repo, {"docs/notes.md": b"/private/var/folders/aa/T/x\n", "src/a.py": b"# pytest-of-x\n"})
+    result = _run_hook(repo)
+    assert result.returncode == 0, result.stderr
+    assert "CLEAN 2" in result.stderr.splitlines()
+    # #236 / #145: a HOME path outside docs/evidence/ is refused by the check 5
+    # tree guard (home-path), not by check 4, and the path is not echoed (F8).
+    _stage(repo, {"docs/notes.md": _U_B + b"/x/thing\n"})
+    result = _run_hook(repo)
+    assert result.returncode == 1, result.stderr
+    assert _CHECK4_REFUSAL not in result.stderr
+    assert "pre-commit: docs/notes.md: home-path" in result.stderr.splitlines()
+    assert _U + "/x" not in result.stderr
 
 
 def test_precommit_scans_staged_blob_not_working_tree(repo: Path) -> None:
@@ -123,10 +164,10 @@ def test_precommit_scans_staged_blob_not_working_tree(repo: Path) -> None:
     assert _run_hook(repo).returncode == 1
 
 
-def test_precommit_scrubbed_and_restaged_file_passes(repo: Path) -> None:
+def test_precommit_scrubbed_and_restaged_file_clears_check4(repo: Path) -> None:
     _stage(repo, {"docs/evidence/run.txt": b"/private/var/folders/aa/T/x\n"})
     _stage(repo, {"docs/evidence/run.txt": b"<tmp>/x\n"})
-    assert _run_hook(repo).returncode == 0
+    _assert_clears_check4_refused_as_graveyard(_run_hook(repo), "docs/evidence/run.txt")
 
 
 def test_precommit_rejects_path_inside_binary_evidence_blob(repo: Path) -> None:
@@ -202,14 +243,26 @@ def test_precommit_rejects_round2_regex_vectors(repo: Path, leak: str) -> None:
         "~/.claude/CLAUDE.md",
         "~/project/src",
         "~/",
-        "the ~/" + _DOCS + " folder",  # private folder name with no trailing slash
     ],
 )
 def test_precommit_allows_scrubbed_placeholders(repo: Path, scrubbed: str) -> None:
-    # Grumpy #6: already-scrubbed text must not be rejected.
+    # Grumpy #6: already-scrubbed text must not be rejected by check 4.
     _stage(repo, {"docs/evidence/run.txt": f"{scrubbed}\n".encode()})
+    _assert_clears_check4_refused_as_graveyard(_run_hook(repo), "docs/evidence/run.txt")
+
+
+def test_precommit_private_folder_without_slash_clears_check4_but_is_home_path(repo: Path) -> None:
+    # Round 3, R3-F2: check 4 (evidence regex) still allows a private folder
+    # name with no trailing slash. #236 / #145: the check 5 home-path SSoT
+    # (personal-path-patterns.txt row 3: a tilde-rooted standard home folder,
+    # then a non-path char) refuses it, so the tree guard reports home-path
+    # as well as graveyard.
+    _stage(repo, {"docs/evidence/run.txt": f"the ~/{_DOCS} folder\n".encode()})
     result = _run_hook(repo)
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 1, result.stderr
+    assert _CHECK4_REFUSAL not in result.stderr, result.stderr
+    assert "pre-commit: docs/evidence/run.txt: home-path, graveyard" in result.stderr.splitlines()
+    assert "pre-commit: REFUSED 1" in result.stderr.splitlines()
 
 
 @pytest.mark.parametrize(
@@ -230,16 +283,14 @@ def test_precommit_allows_scrubbed_placeholders(repo: Path, scrubbed: str) -> No
 )
 def test_precommit_allows_prose_quoting_the_regex(repo: Path, quoted: str) -> None:
     _stage(repo, {"docs/evidence/review.md": f"{quoted}\n".encode()})
-    result = _run_hook(repo)
-    assert result.returncode == 0, result.stderr
+    _assert_clears_check4_refused_as_graveyard(_run_hook(repo), "docs/evidence/review.md")
 
 
 def test_precommit_allows_the_regex_ssot_line_itself(repo: Path) -> None:
     # A review that pastes the exact SSoT pattern must not trip the guard.
     pattern = _ssot_pattern()
     _stage(repo, {"docs/evidence/review.md": f"Pattern: `{pattern}`\n".encode()})
-    result = _run_hook(repo)
-    assert result.returncode == 0, result.stderr
+    _assert_clears_check4_refused_as_graveyard(_run_hook(repo), "docs/evidence/review.md")
 
 
 def _ssot_pattern() -> str:
@@ -501,17 +552,21 @@ def test_range_scan_covers_merge_commit_resolution(tmp_path: Path) -> None:
 
 
 def test_precommit_existing_env_guard_still_fires(repo: Path) -> None:
+    # #236: the .env check moved from old check 3 into the check 5 tree guard.
     _stage(repo, {"config/.ENV": b"SECRET=1\n"})
     result = _run_hook(repo)
     assert result.returncode == 1
-    assert ".env-style file" in result.stderr
+    assert "pre-commit: config/.ENV: .env" in result.stderr.splitlines()
+    assert "pre-commit: REFUSED 1" in result.stderr.splitlines()
 
 
 def test_precommit_existing_graveyard_guard_still_fires(repo: Path) -> None:
+    # #236: the graveyard check moved from old check 2 into the check 5 tree guard.
     _stage(repo, {".venv/lib.py": b"x = 1\n"})
     result = _run_hook(repo)
     assert result.returncode == 1
-    assert "graveyard" in result.stderr
+    assert "pre-commit: .venv/lib.py: graveyard" in result.stderr.splitlines()
+    assert "pre-commit: REFUSED 1" in result.stderr.splitlines()
 
 
 def test_precommit_existing_gitignore_guard_still_fires(repo: Path) -> None:

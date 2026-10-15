@@ -12,7 +12,9 @@
 # None is matched or enforced by the rows below.
 #
 # Format:
-#   * One POSIX extended regular expression per line (also valid Python re).
+#   * One Python `re` pattern per line. Rows 1 and 5 use lookaheads and a
+#     scoped case flag `(?-i:...)`, so they are Python-only (every reader
+#     of this file compiles it with Python `re`).
 #   * Lines starting with `#` are comments; blank lines are ignored.
 #   * Pattern lines have no leading or trailing whitespace; the file has no
 #     BOM and no CR line endings. A pattern must compile and must not match
@@ -27,6 +29,15 @@
 #     character class. `~/.claude/`, `$HOME/.claude/` and `~/<projects>/`
 #     are allowed.
 #   * An empty or comment-only file is a configuration error (fail closed).
+#   * Runner-home exemption (#384, owner ruling 2026-10-15): the
+#     GitHub-hosted runner account home is not a personal path. Rows 1
+#     and 5 do not start a match at exactly `/home/` + `runner` or
+#     `/Users/` + `runner` (root and account case-sensitive, one slash
+#     each, the account a full segment) unless a `..` segment follows in
+#     the same path. Every near miss still blocks: another account, a
+#     prefix or suffix on the account, other case, a slash run, a deeper
+#     start (`/x/home/` + `runner`), a Windows drive (row 2), a `file:`
+#     URL (row 4), a glued flag (row 6) and any other path on the line.
 #
 # Rows (one per line below, in order):
 #   1. POSIX absolute home: a home root (Users or home) that starts an
@@ -66,9 +77,9 @@
 #      a hyphenated directory name) does not match. Owner over-block policy:
 #      any letters count as a flag.
 
-(^|[^A-Za-z0-9._~/:-])(/+[A-Za-z0-9._-]+)*/+(Users|home)/+[A-Za-z0-9._-]
+(^|[^A-Za-z0-9._~/:-])(?!/(?-i:home|Users)/(?-i:runner)(?![A-Za-z0-9._-])(?!(?:/+[A-Za-z0-9._-]+)*/+\.\.(?![A-Za-z0-9._-])))(/+[A-Za-z0-9._-]+)*/+(Users|home)/+[A-Za-z0-9._-]
 (^|[^A-Za-z0-9])[A-Za-z]:[\\/]+Users[\\/]+[A-Za-z0-9._-]
 (~|\$HOME|\$\{HOME\})/(Documents|Desktop|Downloads)([^A-Za-z0-9._-]|$)
 (^|[^A-Za-z0-9])file:/+([A-Za-z0-9._-]+/+)*(Users|home)/+[A-Za-z0-9._-]
-:(/+|/([A-Za-z0-9._-]+/+)+)(Users|home)/+[A-Za-z0-9._-]
+:(?!/(?-i:home|Users)/(?-i:runner)(?![A-Za-z0-9._-])(?!(?:/+[A-Za-z0-9._-]+)*/+\.\.(?![A-Za-z0-9._-])))(/+|/([A-Za-z0-9._-]+/+)+)(Users|home)/+[A-Za-z0-9._-]
 (^|[^A-Za-z0-9._~/:-])-[A-Za-z]+/+(Users|home)/+[A-Za-z0-9._-]
