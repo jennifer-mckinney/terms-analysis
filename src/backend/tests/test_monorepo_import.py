@@ -16,6 +16,15 @@ Two layers run the same checks (CHECKS):
   positive control); each wrong or hostile import fails the check that guards
   it, with an honest message. This shows each check can pass and can fail.
 
+Waived history (owner ruling 2026-10-15 on plan 4.7(b)): the pre-flight scans
+every commit up to ingester_tip, one by one, and the commits that add a leak
+must equal `waived_history_commits` in the conf exactly. An unwaived leak
+fails, including any commit after the waiver was written and any merge that
+carries a waived leak in again; a stale waiver (not in the ingester history
+at ingester_tip, or adding no leak) fails too. Waivers match full 40-hex
+SHAs only; a missing or empty key waives nothing. `test_sandbox_waiver*`
+covers each case.
+
 No config value is restated (F13): commit ids, the prefix, the follow probes
 and the time and size caps come from .claude/governance/monorepo-layout.conf
 through `parse_config`, which fails closed on any bad value. Sandbox cases
@@ -62,7 +71,7 @@ LEAK_VECTORS_REL = ".claude/governance/leak-vectors.tsv"
 SCANNER_EXIT_CLEAN, SCANNER_EXIT_LEAK = 0, 1
 SCANNER_SCOPE = "docs/evidence/"
 SCANNER_RANGE_OK = re.compile(
-    r"^scan-evidence-leaks: range (?P<range>[0-9a-f]{40}): (?P<commits>\d+) "
+    r"^scan-evidence-leaks: range (?P<range>[0-9a-f]{40}(?:\^!)?): (?P<commits>\d+) "
     r"commit\(s\) touching docs/evidence/, (?P<added>\d+) added line\(s\), "
     r"(?P<names>\d+) path name\(s\), no local machine paths$",
     re.MULTILINE,
@@ -97,9 +106,16 @@ class LayoutConfig:
     git_timeout_seconds: int
     max_git_output_bytes: int
     max_message_chars: int
+    # Owner waiver (plan 4.7 option b, ruling 2026-10-15): ingester commits whose
+    # own diff adds a local machine path under docs/evidence/. Full SHAs only;
+    # a missing or empty key waives nothing.
+    waived_history_commits: tuple[str, ...] = ()
 
 
 CONFIG_KEYS = tuple(f.name for f in fields(LayoutConfig))
+WAIVER_KEY = "waived_history_commits"
+OPTIONAL_KEYS = (WAIVER_KEY,)
+REQUIRED_KEYS = tuple(key for key in CONFIG_KEYS if key not in OPTIONAL_KEYS)
 SHA_KEYS = ("ingester_tip", "ingester_root_commit", "app_anchor")
 INT_KEYS = ("git_timeout_seconds", "max_git_output_bytes", "max_message_chars")
 _SHA = re.compile(r"[0-9a-f]{40}")
@@ -134,10 +150,10 @@ def parse_config(data: bytes) -> LayoutConfig:
             raise ConfigError(f"line {number}: unknown key")
         if key in raw:
             raise ConfigError(f"line {number}: duplicate key {key}")
-        if not value or value != value.strip():
+        if (not value and key not in OPTIONAL_KEYS) or value != value.strip():
             raise ConfigError(f"{key}: empty value or surrounding spaces")
         raw[key] = value
-    missing = [key for key in CONFIG_KEYS if key not in raw]
+    missing = [key for key in REQUIRED_KEYS if key not in raw]
     if missing:
         raise ConfigError(f"missing key(s): {', '.join(missing)}")
     for key in SHA_KEYS:
@@ -158,6 +174,14 @@ def parse_config(data: bytes) -> LayoutConfig:
         _check_path("follow_probe_paths", probe)
     if len(set(probes)) != len(probes):
         raise ConfigError("follow_probe_paths: duplicate path")
+    # Exact full ids only: a short id or a prefix would waive any commit it
+    # happens to abbreviate.
+    waived = tuple(raw["waived_history_commits"].split(" ")) if raw.get("waived_history_commits") else ()
+    for sha in waived:
+        if not _SHA.fullmatch(sha):
+            raise ConfigError("waived_history_commits: not space-separated full 40-hex lowercase commit ids")
+    if len(set(waived)) != len(waived):
+        raise ConfigError("waived_history_commits: duplicate commit id")
     return LayoutConfig(
         ingester_remote_url=raw["ingester_remote_url"],
         ingester_tip=raw["ingester_tip"],
@@ -166,6 +190,7 @@ def parse_config(data: bytes) -> LayoutConfig:
         ingester_prefix=_check_path("ingester_prefix", raw["ingester_prefix"]),
         follow_probe_paths=probes,
         **ints,
+        waived_history_commits=waived,
     )
 
 
@@ -581,35 +606,97 @@ def check_follow_crosses_relocation(repo: Repo) -> None:
             )
 
 
-def check_evidence_preflight(repo: Repo) -> None:
-    """Plan 4.7: TA's leak scanner over every commit of the ingester history."""
-    check_history_present(repo)
-    cfg = repo.cfg
+def _scan(repo: Repo, rev_range: str) -> tuple[RunResult, str]:
+    """TA's leak scanner over rev_range; returns the result and its last stderr line."""
     res = run_bounded(
-        ["bash", str(SCANNER), "--range", cfg.ingester_tip, str(repo.path)],
+        ["bash", str(SCANNER), "--range", rev_range, str(repo.path)],
         cwd=repo.path,
         env=hermetic_env(),
-        cfg=cfg,
+        cfg=repo.cfg,
         label="scan-evidence-leaks --range",
     )
     lines = [line for line in repo.mask(res.stderr).splitlines() if line.strip()]
-    summary = printable(lines[-1] if lines else b"(no output)", cfg.max_message_chars)
-    if res.returncode == SCANNER_EXIT_LEAK:
-        raise CheckFailure(
-            "evidence-scan pre-flight (plan 4.7): the ingester history adds local machine paths "
-            f"under {SCANNER_SCOPE}; the owner decides before PR 1 opens. Scanner: {summary}"
-        )
+    return res, printable(lines[-1] if lines else b"(no output)", repo.cfg.max_message_chars)
+
+
+def _require_clean_scan(res: RunResult, summary: str, rev_range: str) -> re.Match[str]:
+    """Exit 0 counts only with the scanner's success line for this exact range."""
     if res.returncode != SCANNER_EXIT_CLEAN:
         raise CheckFailure(f"evidence-scan pre-flight: scanner error, exit {res.returncode}: {summary}")
     match = SCANNER_RANGE_OK.search(res.stdout.decode("utf-8", "replace"))
-    if match is None or match["range"] != cfg.ingester_tip:
+    if match is None or match["range"] != rev_range:
         raise CheckFailure("evidence-scan pre-flight: scanner exited 0 without its range success line")
-    floor = int(repo.out("rev-list", "--count", "--no-merges", cfg.ingester_tip, "--", SCANNER_SCOPE).strip())
-    if int(match["commits"]) < floor:
+    return match
+
+
+def leaking_commits(repo: Repo) -> list[str]:
+    """Full SHAs of the commits in the scanner's walk of ingester_tip whose own
+    diff (each parent of a merge, as the scanner's -m does) adds a leak."""
+    tip = repo.cfg.ingester_tip
+    walk = list(dict.fromkeys(repo.out("log", "-m", "--no-renames", "--format=%H", tip, "--", SCANNER_SCOPE).split()))
+    floor = set(repo.out("rev-list", "--no-merges", tip, "--", SCANNER_SCOPE).split())
+    if not floor <= set(walk):
         raise CheckFailure(
-            f"evidence-scan pre-flight: scanner reports {match['commits']} commit(s) touching "
-            f"{SCANNER_SCOPE}; the ingester history has at least {floor}"
+            f"evidence-scan pre-flight: the per-commit walk misses {len(floor - set(walk))} commit(s) "
+            f"touching {SCANNER_SCOPE}; failing closed"
         )
+    leaks = []
+    for commit in walk:
+        rev_range = f"{commit}^!"
+        res, summary = _scan(repo, rev_range)
+        if res.returncode == SCANNER_EXIT_LEAK:
+            leaks.append(commit)
+        else:
+            _require_clean_scan(res, summary, rev_range)
+    return leaks
+
+
+def check_evidence_preflight(repo: Repo) -> None:
+    """Plan 4.7: TA's leak scanner over every commit of the ingester history.
+
+    Every commit up to ingester_tip is scanned. The set of commits that add a
+    leak must equal waived_history_commits exactly: an unwaived leak fails, and
+    so does a stale waiver (not in the history at ingester_tip, or adding no
+    leak). Waivers match full SHAs only.
+    """
+    check_history_present(repo)
+    cfg = repo.cfg
+    res, summary = _scan(repo, cfg.ingester_tip)
+    if res.returncode == SCANNER_EXIT_LEAK:
+        leaks = leaking_commits(repo)
+        if not leaks:
+            raise CheckFailure(
+                "evidence-scan pre-flight: the scanner reports a leak in the ingester history that "
+                f"no single commit carries; failing closed. Scanner: {summary}"
+            )
+    else:
+        match = _require_clean_scan(res, summary, cfg.ingester_tip)
+        floor = int(repo.out("rev-list", "--count", "--no-merges", cfg.ingester_tip, "--", SCANNER_SCOPE).strip())
+        if int(match["commits"]) < floor:
+            raise CheckFailure(
+                f"evidence-scan pre-flight: scanner reports {match['commits']} commit(s) touching "
+                f"{SCANNER_SCOPE}; the ingester history has at least {floor}"
+            )
+        leaks = []
+    waived = frozenset(cfg.waived_history_commits)
+    unwaived = [commit for commit in leaks if commit not in waived]
+    if unwaived:
+        raise CheckFailure(
+            f"evidence-scan pre-flight (plan 4.7): {len(unwaived)} ingester commit(s) add local machine "
+            f"paths under {SCANNER_SCOPE} and are not in waived_history_commits ({CONFIG_REL}); "
+            f"the owner decides before PR 1 opens: {printable(' '.join(unwaived), cfg.max_message_chars)}"
+        )
+    for sha in cfg.waived_history_commits:
+        if not has_commit(repo, sha) or not is_ancestor(repo, sha, cfg.ingester_tip):
+            raise CheckFailure(
+                f"stale waiver: waived_history_commits lists {printable(sha, cfg.max_message_chars)}, "
+                f"which is not in the ingester history at ingester_tip; remove it from {CONFIG_REL}"
+            )
+        if sha not in leaks:
+            raise CheckFailure(
+                f"stale waiver: waived_history_commits lists {sha}, which adds no local machine path "
+                f"under {SCANNER_SCOPE}; remove it from {CONFIG_REL}"
+            )
 
 
 CHECKS: dict[str, Callable[[Repo], None]] = {
@@ -749,9 +836,16 @@ class Ingester:
     path: Path
     root: str
     tip: str
+    leaks: tuple[str, ...] = ()  # commits whose own diff adds a leak, known by construction
 
 
-def build_ingester(sb: Sandbox, name: str, *, leak_in_history: bool) -> Ingester:
+def build_ingester(
+    sb: Sandbox, name: str, *, leak_in_history: bool, late_leak: bool = False, merged_leak: bool = False
+) -> Ingester:
+    """leak_in_history: a mainline commit adds a leak that a later commit deletes.
+    late_leak: a further commit on top of the merge tip adds a new leak.
+    merged_leak: a side-branch commit adds a leak and the tip merge carries it
+    in again (its first-parent diff adds the file), like ingester 091f29b."""
     repo = sb.init(name)
     files: dict[str, tuple[str, bytes]] = {
         "README.md": ("100644", b"ingester\n"),
@@ -774,7 +868,12 @@ def build_ingester(sb: Sandbox, name: str, *, leak_in_history: bool) -> Ingester
     second = {probe: ("100644", f"v2 {probe}\n".encode()) for probe in edited}
     if leak_in_history:
         second["docs/evidence/agent-run.log"] = ("100644", leak_sample())
+    if merged_leak:
+        # The mainline touches docs/evidence/ too, so the merge is not
+        # TREESAME to the side branch there and the scanner diffs it.
+        second["docs/evidence/main-note.md"] = ("100644", b"mainline note, clean\n")
     middle = sb.commit(repo, sb.tree(repo, second, base=f"{root}^{{tree}}"), [root], "ingester work")
+    leaks = [middle] if leak_in_history else []
     third = {
         f"before-rename/{renamed}": ("0", b""),
         renamed: ("100644", f"v1 {renamed}\n".encode()),
@@ -785,11 +884,21 @@ def build_ingester(sb: Sandbox, name: str, *, leak_in_history: bool) -> Ingester
     # A side branch and a merge that resolves a probe to new content: plain
     # `git log -- <probe>` lists such a merge, `git log --follow` never does.
     clash = {edited[0]: ("100644", f"side {edited[0]}\n".encode())} if edited else {}
+    if merged_leak:
+        clash["docs/evidence/side-run.log"] = ("100644", leak_sample())
     side = sb.commit(repo, sb.tree(repo, clash, base=f"{root}^{{tree}}"), [root], "ingester side")
     resolved = {edited[0]: ("100644", f"merged {edited[0]}\n".encode())} if edited else {}
+    if merged_leak:
+        resolved["docs/evidence/side-run.log"] = ("100644", leak_sample())
     tip = sb.commit(repo, sb.tree(repo, resolved, base=f"{moved}^{{tree}}"), [moved, side], "ingester merge")
+    if merged_leak:
+        leaks += [side, tip]
+    if late_leak:
+        late = {"docs/evidence/late-run.log": ("100644", leak_sample())}
+        tip = sb.commit(repo, sb.tree(repo, late, base=f"{tip}^{{tree}}"), [tip], "ingester work after the waiver")
+        leaks.append(tip)
     sb.set_head(repo, tip)
-    return Ingester(repo, root, tip)
+    return Ingester(repo, root, tip, tuple(leaks))
 
 
 @dataclass
@@ -830,6 +939,9 @@ class World:
     def head(self, commit: str) -> None:
         self.sb.set_head(self.ta, commit)
 
+    def waive(self, *shas: str) -> None:
+        self.cfg = replace(self.cfg, waived_history_commits=shas)
+
     def repo(self) -> Repo:
         return Repo(self.ta, self.cfg)
 
@@ -840,6 +952,8 @@ def ingesters(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Ingester]:
     return {
         "clean": build_ingester(sb, "clean", leak_in_history=False),
         "leak": build_ingester(sb, "leak", leak_in_history=True),
+        "late-leak": build_ingester(sb, "late-leak", leak_in_history=True, late_leak=True),
+        "merged-leak": build_ingester(sb, "merged-leak", leak_in_history=False, merged_leak=True),
     }
 
 
@@ -856,7 +970,10 @@ def make_world(tmp_path: Path, ing: Ingester) -> World:
     world.branch = world.app_commit(
         world.anchor, {"src/backend/tests/test_monorepo_import.py": ("100644", b"# red tests\n")}, "test: red"
     )
-    world.cfg = replace(real, ingester_tip=ing.tip, ingester_root_commit=ing.root, app_anchor=world.anchor)
+    # The real waiver names real ingester commits; a sandbox starts with none.
+    world.cfg = replace(
+        real, ingester_tip=ing.tip, ingester_root_commit=ing.root, app_anchor=world.anchor, waived_history_commits=()
+    )
     sb.cfg = world.cfg
     world.head(world.branch)
     regex = ta / LEAK_REGEX_REL
@@ -1123,6 +1240,131 @@ def test_sandbox_hostile_names_are_in_the_imported_tree(tmp_path: Path, ingester
 
 
 # --------------------------------------------------------------------------
+# waived history (owner ruling on plan 4.7(b)): the leaking commits must equal
+# waived_history_commits exactly, by full SHA
+# --------------------------------------------------------------------------
+_FULL_SHA_TOKEN = re.compile(r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])")
+
+
+def _sibling(sha: str) -> str:
+    """A well-formed id that shares the first 39 characters with sha."""
+    return sha[:-1] + ("0" if sha[-1] != "0" else "1")
+
+
+@dataclass(frozen=True)
+class WaiverCase:
+    ingester: str
+    waiver: Callable[[World], str | None]  # conf value of the waiver key; None = key absent
+    names: Callable[[World], str] | None = None  # the one SHA the failure must name; None = every check passes
+    fragment: str = ""
+    # False: the value cannot pass parse_config, so it goes straight into the
+    # dataclass, to show the check's own matching is exact as well.
+    parsed: bool = True
+
+
+_UNWAIVED = "the owner decides"
+_NOT_IN_HISTORY = "not in the ingester history at ingester_tip"
+_NO_LEAK = "adds no local machine path"
+WAIVER_CASES: dict[str, WaiverCase] = {
+    "leak-waived": WaiverCase("leak", lambda w: " ".join(w.ing.leaks)),
+    "merged-leak-all-waived": WaiverCase("merged-leak", lambda w: " ".join(w.ing.leaks)),
+    "late-leak-all-waived": WaiverCase("late-leak", lambda w: " ".join(w.ing.leaks)),
+    # Work after the waiver was written is scanned, never covered by it.
+    "late-leak-after-waiver": WaiverCase(
+        "late-leak", lambda w: " ".join(w.ing.leaks[:-1]), lambda w: w.ing.leaks[-1], _UNWAIVED
+    ),
+    # A merge that carries a waived leak in again is its own leaking commit.
+    "merged-leak-origin-only": WaiverCase(
+        "merged-leak", lambda w: w.ing.leaks[0], lambda w: w.ing.leaks[1], _UNWAIVED
+    ),
+    "merged-leak-merge-only": WaiverCase(
+        "merged-leak", lambda w: w.ing.leaks[1], lambda w: w.ing.leaks[0], _UNWAIVED
+    ),
+    "waiver-key-missing": WaiverCase("leak", lambda w: None, lambda w: w.ing.leaks[0], _UNWAIVED),
+    "waiver-key-empty": WaiverCase("leak", lambda w: "", lambda w: w.ing.leaks[0], _UNWAIVED),
+    "waiver-shares-39-chars": WaiverCase(
+        "leak", lambda w: _sibling(w.ing.leaks[0]), lambda w: w.ing.leaks[0], _UNWAIVED
+    ),
+    "waiver-short-sha": WaiverCase(
+        "leak", lambda w: w.ing.leaks[0][:7], lambda w: w.ing.leaks[0], _UNWAIVED, parsed=False
+    ),
+    "waiver-39-char-prefix": WaiverCase(
+        "leak", lambda w: w.ing.leaks[0][:39], lambda w: w.ing.leaks[0], _UNWAIVED, parsed=False
+    ),
+    "waiver-uppercase": WaiverCase(
+        "leak", lambda w: w.ing.leaks[0].upper(), lambda w: w.ing.leaks[0], _UNWAIVED, parsed=False
+    ),
+    "waiver-nul-suffix": WaiverCase(
+        "leak", lambda w: w.ing.leaks[0] + "\x00", lambda w: w.ing.leaks[0], _UNWAIVED, parsed=False
+    ),
+    "waiver-not-in-ingester-history": WaiverCase(
+        "leak", lambda w: f"{w.ing.leaks[0]} {w.anchor}", lambda w: w.anchor, _NOT_IN_HISTORY
+    ),
+    "waiver-unknown-object": WaiverCase(
+        "leak",
+        lambda w: f"{w.ing.leaks[0]} {_sibling(w.ing.leaks[0])}",
+        lambda w: _sibling(w.ing.leaks[0]),
+        _NOT_IN_HISTORY,
+    ),
+    "waiver-in-history-adds-no-leak": WaiverCase(
+        "leak", lambda w: f"{w.ing.leaks[0]} {w.ing.root}", lambda w: w.ing.root, _NO_LEAK
+    ),
+    "waiver-on-clean-history": WaiverCase("clean", lambda w: w.ing.root, lambda w: w.ing.root, _NO_LEAK),
+}
+
+
+def _apply_waiver(world: World, case: WaiverCase) -> None:
+    raw = case.waiver(world)
+    if not case.parsed:
+        assert raw is not None
+        with pytest.raises(ConfigError):  # the conf could never carry it
+            parse_config(_render(_real_values() | {WAIVER_KEY: raw}))
+        world.waive(*raw.split(" "))
+        return
+    values = {key: value for key, value in _real_values().items() if key != WAIVER_KEY}
+    values |= {key: _conf_form(world.cfg, key) for key in SHA_KEYS}
+    if raw is not None:
+        values[WAIVER_KEY] = raw
+    parsed = parse_config(_render(values))
+    assert replace(parsed, waived_history_commits=()) == world.cfg  # only the waiver differs
+    world.cfg = parsed
+
+
+def test_waiver_case_table_contract() -> None:
+    """Each leaking sandbox ingester has a fully waived pass and an unwaived
+    fail; each failure family of the check has a case."""
+    ing_kinds = {"leak", "late-leak", "merged-leak"}
+    passing = {c.ingester for c in WAIVER_CASES.values() if c.names is None}
+    failing = {c.ingester for c in WAIVER_CASES.values() if c.fragment == _UNWAIVED}
+    assert ing_kinds <= passing and ing_kinds <= failing
+    assert {c.fragment for c in WAIVER_CASES.values() if c.names} == {_UNWAIVED, _NOT_IN_HISTORY, _NO_LEAK}
+    assert all((c.names is None) == (c.fragment == "") for c in WAIVER_CASES.values())
+
+
+@pytest.mark.parametrize("name", list(WAIVER_CASES))
+def test_sandbox_waiver(name: str, tmp_path: Path, ingesters: dict[str, Ingester]) -> None:
+    case = WAIVER_CASES[name]
+    world = make_world(tmp_path, ingesters[case.ingester])
+    method_b_import(world)
+    _apply_waiver(world, case)
+    repo = world.repo()
+    # The scanner itself finds exactly the leaks the builder planted.
+    assert set(leaking_commits(repo)) == set(world.ing.leaks)
+    for check in sorted(ALL - {"evidence-scan-preflight-is-clean"}):
+        CHECKS[check](repo)
+    if case.names is None:
+        check_evidence_preflight(repo)
+        return
+    with pytest.raises(CheckFailure) as caught:
+        check_evidence_preflight(repo)
+    message = str(caught.value)
+    assert case.fragment in message, f"dishonest message {message!r}"
+    assert set(_FULL_SHA_TOKEN.findall(message)) == {case.names(world)}, f"names the wrong commit: {message!r}"
+    assert all(" " <= ch <= "~" for ch in message), f"unescaped output {message!r}"
+    assert str(tmp_path) not in message
+
+
+# --------------------------------------------------------------------------
 # indirection: a forged ancestry must not pass (F7)
 # --------------------------------------------------------------------------
 def _forged_world(tmp_path: Path, ingesters: dict[str, Ingester]) -> tuple[World, str, str]:
@@ -1293,6 +1535,23 @@ def _render(values: dict[str, str]) -> bytes:
     return "\n".join(f"{key}={value}" for key, value in values.items()).encode("utf-8", "surrogateescape")
 
 
+def _base_values() -> dict[str, str]:
+    """The real values, plus a well-formed waiver when the conf has none yet,
+    so every vector for the optional key mutates a present value."""
+    values = _real_values()
+    values.setdefault(WAIVER_KEY, values["ingester_tip"])
+    return values
+
+
+def _conf_form(cfg: LayoutConfig, key: str) -> str:
+    value = getattr(cfg, key)
+    return " ".join(value) if isinstance(value, tuple) else str(value)
+
+
+def _without(key: str) -> Callable[[dict[str, str]], bytes]:
+    return lambda values: _render({k: v for k, v in values.items() if k != key})
+
+
 def _set(key: str, value: str) -> Callable[[dict[str, str]], bytes]:
     return lambda values: _render(values | {key: value})
 
@@ -1345,11 +1604,51 @@ for _key in INT_KEYS:
         (f"{_key}-fraction", _key, _set(_key, "1.5"), False),
         (f"{_key}-fullwidth", _key, _set(_key, "１"), False),
     ]
+# The waiver is optional: missing or empty means nothing is waived. Each id
+# must be a full 40-hex lowercase SHA; short ids and look-alikes fail at load.
+CONFIG_VECTORS += [
+    (f"{WAIVER_KEY}-missing", WAIVER_KEY, _without(WAIVER_KEY), True),
+    (f"{WAIVER_KEY}-empty", WAIVER_KEY, _set(WAIVER_KEY, ""), True),
+    (f"{WAIVER_KEY}-one", WAIVER_KEY, lambda v: _render(v | {WAIVER_KEY: v["ingester_root_commit"]}), True),
+    (
+        f"{WAIVER_KEY}-two",
+        WAIVER_KEY,
+        lambda v: _render(v | {WAIVER_KEY: f"{v['ingester_root_commit']} {v['app_anchor']}"}),
+        True,
+    ),
+    (f"{WAIVER_KEY}-short-7", WAIVER_KEY, lambda v: _render(v | {WAIVER_KEY: v[WAIVER_KEY][:7]}), False),
+    (f"{WAIVER_KEY}-39-chars", WAIVER_KEY, lambda v: _render(v | {WAIVER_KEY: v[WAIVER_KEY][:39]}), False),
+    (f"{WAIVER_KEY}-41-chars", WAIVER_KEY, lambda v: _render(v | {WAIVER_KEY: v[WAIVER_KEY] + "0"}), False),
+    (f"{WAIVER_KEY}-uppercase", WAIVER_KEY, lambda v: _render(v | {WAIVER_KEY: v[WAIVER_KEY].upper()}), False),
+    (f"{WAIVER_KEY}-non-hex", WAIVER_KEY, _set(WAIVER_KEY, "g" * 40), False),
+    (f"{WAIVER_KEY}-lookalike", WAIVER_KEY, _set(WAIVER_KEY, "а" * 40), False),
+    (
+        f"{WAIVER_KEY}-double-space",
+        WAIVER_KEY,
+        lambda v: _render(v | {WAIVER_KEY: f"{v['ingester_root_commit']}  {v['app_anchor']}"}),
+        False,
+    ),
+    (
+        f"{WAIVER_KEY}-comma",
+        WAIVER_KEY,
+        lambda v: _render(v | {WAIVER_KEY: f"{v['ingester_root_commit']},{v['app_anchor']}"}),
+        False,
+    ),
+    (
+        f"{WAIVER_KEY}-same-id-twice",
+        WAIVER_KEY,
+        lambda v: _render(v | {WAIVER_KEY: f"{v[WAIVER_KEY]} {v[WAIVER_KEY]}"}),
+        False,
+    ),
+]
+for _key in REQUIRED_KEYS:
+    CONFIG_VECTORS += [
+        (f"{_key}-missing", _key, _without(_key), False),
+        (f"{_key}-empty", _key, _set(_key, ""), False),
+    ]
 for _key in CONFIG_KEYS:
     CONFIG_VECTORS += [
-        (f"{_key}-missing", _key, (lambda k: lambda v: _render({x: y for x, y in v.items() if x != k}))(_key), False),
         (f"{_key}-duplicate", _key, (lambda k: lambda v: _render(v) + f"\n{k}={v[k]}".encode())(_key), False),
-        (f"{_key}-empty", _key, _set(_key, ""), False),
         (f"{_key}-padded", _key, (lambda k: lambda v: _render(v | {k: f" {v[k]}"}))(_key), False),
     ]
     for _index, _char in enumerate(HOSTILE_CHARS):
@@ -1385,10 +1684,11 @@ def test_config_vector_contract() -> None:
 @pytest.mark.parametrize("vector", CONFIG_VECTORS, ids=[v[0] for v in CONFIG_VECTORS])
 def test_config_field_vector(vector: tuple[str, str, Callable[[dict[str, str]], bytes], bool]) -> None:
     _id, key, mutate, accepted = vector
-    data = mutate(_real_values())
+    data = mutate(_base_values())
     if accepted:
         cfg = parse_config(data)
-        assert str(getattr(cfg, key) if key != "follow_probe_paths" else " ".join(cfg.follow_probe_paths)) in data.decode()
+        raw = [line.partition("=")[2] for line in data.decode("ascii").split("\n") if line.partition("=")[0] == key]
+        assert _conf_form(cfg, key) == (raw[0] if raw else ""), f"{key}: parsed value differs from the conf"
     else:
         with pytest.raises(ConfigError) as caught:
             parse_config(data)
@@ -1398,7 +1698,7 @@ def test_config_field_vector(vector: tuple[str, str, Callable[[dict[str, str]], 
 @pytest.mark.parametrize("vector", STRUCTURE_VECTORS, ids=[v[0] for v in STRUCTURE_VECTORS])
 def test_config_structure_vector(vector: tuple[str, Callable[[dict[str, str]], bytes]]) -> None:
     with pytest.raises(ConfigError):
-        parse_config(vector[1](_real_values()))
+        parse_config(vector[1](_base_values()))
 
 
 def test_config_positive_control_round_trips() -> None:
