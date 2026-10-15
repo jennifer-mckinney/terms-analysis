@@ -300,6 +300,27 @@ class LegalKBRetrievalError(LegalKBError):
     """Index loaded but the retrieval step itself could not complete."""
 
 
+class LegalKBBuildEmptyError(LegalKBError):
+    """build() would index nothing, so it refuses and writes no index (#181).
+
+    "Did nothing" is never success (F5): build() used to return 0 here and
+    the CLI printed "Indexed 0" with exit 0. ``reason`` is one of the
+    ``REASON_*`` values below, so callers can branch on the cause without
+    parsing the message. Messages never carry a path or the corpus
+    directory name (F8): the directory comes from config and may hold
+    control or line-break characters that would forge terminal output.
+    """
+
+    REASON_NO_CORPUS_FILES = "no-corpus-files"
+    REASON_ZERO_CHUNKS = "zero-chunks"
+    REASON_EMBEDDER_UNREACHABLE = "embedder-unreachable"
+    REASON_NO_USABLE_EMBEDDINGS = "no-usable-embeddings"
+
+    def __init__(self, reason: str, message: str) -> None:
+        self.reason = reason
+        super().__init__(message)
+
+
 def _parse_corpus_file(path: Path) -> List[Dict[str, Any]]:
     """Parse one data/legal_corpus/<jurisdiction>/<law>.txt file into chunks.
 
@@ -405,8 +426,14 @@ class LegalKnowledgeBase:
     ) -> int:
         """Chunk + embed the corpus, persist the vector matrix + metadata to disk.
 
-        Returns the number of chunks indexed (0 if the corpus directory is
-        empty or the embedding endpoint is unreachable).
+        Returns the number of chunks indexed, always >= 1 (#181: "did
+        nothing" is never success, F5).
+
+        Raises LegalKBBuildEmptyError, with a ``reason``, when nothing would
+        be indexed: no corpus files, 0 chunks after parsing, an unreachable
+        embedding endpoint, or no usable (zero-norm / non-finite)
+        embeddings. Every one of these is detected before the first write,
+        so the existing index is left untouched.
 
         Raises LegalKBIndexCorruptError, naming the corpus file and chunk,
         when a parsed chunk fails ``_validate_chunks`` (round 11, grumpy
@@ -415,8 +442,17 @@ class LegalKnowledgeBase:
         existing one untouched. The CLI turns this into exit status 1.
         """
         directory = corpus_dir or settings.legal_corpus_dir
+        corpus_files = _iter_corpus_files(directory)
+        if not corpus_files:
+            # #181 (a): missing dir, a file, an empty or dangling symlink, or
+            # files outside the <jurisdiction>/<law>.txt layout all land here.
+            raise LegalKBBuildEmptyError(
+                LegalKBBuildEmptyError.REASON_NO_CORPUS_FILES,
+                "no legal corpus files found: expected <jurisdiction>/<law>.txt "
+                "under the configured LEGAL_CORPUS_DIR",
+            )
         chunks: List[Dict[str, Any]] = []
-        for file_path in _iter_corpus_files(directory):
+        for file_path in corpus_files:
             try:
                 parsed = _parse_corpus_file(file_path)
             except UnicodeDecodeError as exc:
@@ -429,27 +465,55 @@ class LegalKnowledgeBase:
             chunks.extend(_validate_chunks(parsed, file_path))
 
         if not chunks:
-            logger.warning("No legal corpus files found under %s", directory)
-            return 0
+            # #181 (c): files exist but hold no indexable text (empty, only
+            # "# Key: Value" metadata, or sections with blank bodies).
+            raise LegalKBBuildEmptyError(
+                LegalKBBuildEmptyError.REASON_ZERO_CHUNKS,
+                f"0 chunks after parsing {len(corpus_files)} legal corpus file(s): "
+                "every file is empty or holds only metadata / blank sections",
+            )
 
         vectors: List[np.ndarray] = []
         kept_chunks: List[Dict[str, Any]] = []
+        failed_calls = 0
+        # Count of each _normalize() defect ("zero-norm", "non-finite").
+        defects: Dict[str, int] = {}
         for chunk in chunks:
             # #98-A: passages go to the embedder raw (no e5 prefix); only
             # queries carry the "Instruct: ...\nQuery: ..." format.
             embedding = await client.embed(chunk["text"], model=settings.embedding_model)
             if embedding is None:
+                failed_calls += 1
                 continue
             # Zero-norm or non-finite embeddings are skipped, never written.
-            normalized, _reason = _normalize(embedding)
+            normalized, reason = _normalize(embedding)
             if normalized is None:
+                defects[reason] = defects.get(reason, 0) + 1
                 continue
             vectors.append(normalized)
             kept_chunks.append(chunk)
 
         if not vectors:
-            logger.warning("Embedding endpoint unreachable — legal KB index not built")
-            return 0
+            # #181 (b): every check above runs before the first write, so a
+            # failed build leaves any existing index byte-for-byte untouched.
+            if not defects:
+                # LocalAIClient.embed() returns None for every transport or
+                # HTTP failure (connect, timeout, 5xx, bad body).
+                raise LegalKBBuildEmptyError(
+                    LegalKBBuildEmptyError.REASON_EMBEDDER_UNREACHABLE,
+                    f"embedding endpoint unreachable: all {len(chunks)} embedding "
+                    "calls failed; check LocalAI is running and serves the "
+                    "configured embedding model",
+                )
+            # The endpoint answered but nothing it returned is usable. Not
+            # "unreachable" (F8): the embedder is up and degenerate.
+            detail = ", ".join(f"{n} {name}" for name, n in sorted(defects.items()))
+            raise LegalKBBuildEmptyError(
+                LegalKBBuildEmptyError.REASON_NO_USABLE_EMBEDDINGS,
+                f"no usable embeddings for {len(chunks)} chunk(s) "
+                f"({detail}, {failed_calls} failed call(s)); "
+                "check the configured embedding model",
+            )
 
         matrix = np.stack(vectors).astype("float32")
 
@@ -835,9 +899,11 @@ async def _main() -> None:
     client = LocalAIClient()
     try:
         count = await kb.build(client)
-    except LegalKBIndexCorruptError as exc:
+    except (LegalKBIndexCorruptError, LegalKBBuildEmptyError) as exc:
         # Round 11: an invalid corpus fails the build loudly (stderr, exit 1)
         # instead of writing an index the server would refuse at load.
+        # #181: so does a build that would index nothing; its message names
+        # the cause and never the corpus path.
         print(f"Legal KB build failed, no index written: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
     print(f"Indexed {count} legal KB chunks from {settings.legal_corpus_dir}")
