@@ -2725,3 +2725,249 @@ def test_main_analyze_url_fetched_rtf_surrogate_pair_accepted_as_one_char(s184, 
     assert len(seen["analyze_text"]) == 1
     assert _S184_EMOJI in seen["analyze_text"][0]
     assert not _s184_has_surrogate(seen["analyze_text"][0])
+
+
+# ---------------------------------------------------------------------------
+# Issue #372: every analysis response carries llm_status_label, built server side
+# ---------------------------------------------------------------------------
+#
+# Owner ruling 2026-10-14 (option c): "the front end needs to read from the
+# backend ... do not duplicate data as it is messy". The reader-facing label for
+# llm_status is built by the backend with app.llm_status_copy.llm_status_label
+# and sent on every AnalysisPayload, so the v2 UI holds no copy of the mapping.
+# The label is derived, never supplied: a caller, the analyzer or a stored row
+# cannot set it, so it always agrees with llm_status. It is not persisted
+# (result_json keeps the token only), so a stored label can never go stale or be
+# forged; every read derives it again.
+
+from tests.test_llm_status_copy import fallback_members as _llm_fallback_members  # noqa: E402
+
+# The API field (LIB-API, #372). A contract name, not config.
+_LABEL_FIELD = "llm_status_label"
+# Supplied labels that must be ignored: a success label on a non-success result,
+# markup, and non-strings. Built at run time from the copy module.
+_FORGED_LABELS = {
+    "success-label": lambda: _llm_label(OK),
+    "markup": lambda: f"<b>{RAW_MARKER}</b>",
+    "none": lambda: None,
+    "int": lambda: 1,
+    "list": lambda: [_llm_label(OK)],
+    "dict": lambda: {"text": _llm_label(OK)},
+    "empty": lambda: "",
+}
+
+
+def _payload_with(status: object = _ABSENT, **extra: Any) -> AnalysisPayload:
+    data = _make_analysis_payload().model_dump()
+    data.pop(_LABEL_FIELD, None)
+    if status is _ABSENT:
+        data.pop("llm_status", None)
+    else:
+        data["llm_status"] = status
+    return AnalysisPayload(**data, **extra)
+
+
+def _labels_on_the_wire(payload: AnalysisPayload) -> list[object]:
+    # Every serialiser a response goes through: FastAPI's response_model (JSON
+    # mode), model_dump_json, and the batch handler's plain model_dump.
+    return [
+        payload.model_dump(mode="json").get(_LABEL_FIELD),
+        json.loads(payload.model_dump_json()).get(_LABEL_FIELD),
+        payload.model_dump().get(_LABEL_FIELD),
+    ]
+
+
+class TestAnalysisPayloadLLMStatusLabel:
+    @pytest.mark.parametrize("status", _llm_members())
+    def test_schemas_payload_label_matches_each_status(self, status: str) -> None:
+        assert _labels_on_the_wire(_payload_with(status)) == [_llm_label(status)] * 3
+
+    def test_schemas_payload_without_status_carries_the_unknown_label(self) -> None:
+        assert _labels_on_the_wire(_payload_with()) == [_llm_label(UNKNOWN)] * 3
+
+    @pytest.mark.parametrize("status", _llm_members())
+    @pytest.mark.parametrize("forged", list(_FORGED_LABELS))
+    def test_schemas_payload_ignores_a_supplied_label(self, status: str, forged: str) -> None:
+        payload = _payload_with(status, **{_LABEL_FIELD: _FORGED_LABELS[forged]()})
+        assert _labels_on_the_wire(payload) == [_llm_label(status)] * 3
+
+    def test_schemas_openapi_documents_the_label_on_every_analysis_response(self) -> None:
+        from app.main import app as fastapi_app
+
+        spec = fastapi_app.openapi()
+        components = spec["components"]["schemas"]
+        routes = [
+            ("/analyze", "post"),
+            ("/analyze/url", "post"),
+            ("/analyze/file", "post"),
+            ("/analyses/{analysis_id}", "get"),
+        ]
+        missing = []
+        for path, method in routes:
+            ref = spec["paths"][path][method]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+            schema = components[ref.rsplit("/", 1)[-1]]
+            prop = schema.get("properties", {}).get(_LABEL_FIELD, {})
+            if prop.get("type") != "string" or _LABEL_FIELD not in schema.get("required", []):
+                missing.append(path)
+        assert missing == []
+
+
+def _post_analyze(client: TestClient) -> list[dict[str, Any]]:
+    resp = client.post("/analyze", json={"text": "Sample policy text.", "jurisdictions": []})
+    assert resp.status_code == 200, resp.text[:500]
+    return [resp.json()]
+
+
+def _post_analyze_url(client: TestClient) -> list[dict[str, Any]]:
+    resp = client.post("/analyze/url", json={"url": "https://example.com/policy"})
+    assert resp.status_code == 200, resp.text[:500]
+    return [resp.json()]
+
+
+def _post_analyze_file(client: TestClient) -> list[dict[str, Any]]:
+    resp = client.post("/analyze/file", files={"file": ("policy.txt", b"Sample policy text.", "text/plain")})
+    assert resp.status_code == 200, resp.text[:500]
+    return [resp.json()]
+
+
+def _post_analyze_batch(client: TestClient) -> list[dict[str, Any]]:
+    resp = client.post(
+        "/analyze/batch",
+        json={"items": [{"url": "https://example.com/a"}, {"url": "https://example.com/b"}], "mode": "full"},
+    )
+    assert resp.status_code == 200, resp.text[:500]
+    return resp.json()["items"]
+
+
+# Every endpoint that returns an analysis (testing.md R2: sibling parity).
+_ANALYSIS_ENDPOINTS = {
+    "/analyze": _post_analyze,
+    "/analyze/url": _post_analyze_url,
+    "/analyze/file": _post_analyze_file,
+    "/analyze/batch": _post_analyze_batch,
+}
+
+
+@pytest.fixture
+def analyzer_returns(monkeypatch):
+    """Make every analyze endpoint return payloads with the given llm_status."""
+
+    async def _fetch(url: str) -> str:
+        return "Sample policy text."
+
+    monkeypatch.setattr("app.main.fetch_url_text", _fetch)
+
+    def _install(status: object = _ABSENT, **extra: Any) -> None:
+        async def _analyze(*args, **kwargs):
+            return AnalysisResult(payload=_payload_with(status, **extra), issues=[])
+
+        async def _batch(documents, *args, **kwargs):
+            return [_payload_with(status, **extra) for _ in documents], []
+
+        monkeypatch.setattr("app.main.analyze_text", _analyze)
+        monkeypatch.setattr("app.main.analyze_batch_documents", _batch)
+
+    return _install
+
+
+class TestAnalyzeEndpointsLLMStatusLabel:
+    @pytest.mark.parametrize("endpoint", list(_ANALYSIS_ENDPOINTS))
+    @pytest.mark.parametrize("status", _llm_members())
+    def test_main_analyze_returns_the_label_for_each_status(
+        self, app_client: TestClient, analyzer_returns, endpoint: str, status: str
+    ) -> None:
+        analyzer_returns(status)
+        bodies = _ANALYSIS_ENDPOINTS[endpoint](app_client)
+        assert [b.get(_LABEL_FIELD) for b in bodies] == [_llm_label(status)] * len(bodies)
+        assert [b["llm_status"] for b in bodies] == [status] * len(bodies)
+
+    @pytest.mark.parametrize("endpoint", list(_ANALYSIS_ENDPOINTS))
+    def test_main_analyze_never_returns_a_label_the_analyzer_supplied(
+        self, app_client: TestClient, analyzer_returns, endpoint: str
+    ) -> None:
+        fallback = _llm_fallback_members()[0]
+        analyzer_returns(fallback, **{_LABEL_FIELD: f"{_llm_label(OK)}<b>{RAW_MARKER}</b>"})
+        bodies = _ANALYSIS_ENDPOINTS[endpoint](app_client)
+        assert [b.get(_LABEL_FIELD) for b in bodies] == [_llm_label(fallback)] * len(bodies)
+        assert RAW_MARKER not in json.dumps(bodies)
+
+    @pytest.mark.parametrize("endpoint", list(_ANALYSIS_ENDPOINTS))
+    def test_main_analyze_persists_the_token_not_the_label(
+        self, app_client: TestClient, db_session: Session, analyzer_returns, endpoint: str
+    ) -> None:
+        # One source of truth: storage keeps llm_status only, so no stored label
+        # can go stale when the copy changes, and none reaches the JSON export.
+        # The response must carry the label (else this would pass vacuously).
+        fallback = _llm_fallback_members()[0]
+        analyzer_returns(fallback)
+        bodies = _ANALYSIS_ENDPOINTS[endpoint](app_client)
+        assert [b.get(_LABEL_FIELD) for b in bodies] == [_llm_label(fallback)] * len(bodies)
+        for body in bodies:
+            row = db_session.get(AnalysisModel, body["id"])
+            stored = json.loads(row.result_json)
+            assert stored["llm_status"] == fallback
+            assert _LABEL_FIELD not in stored
+            exported = app_client.get(f"/exports/analysis/{body['id']}.json")
+            assert exported.status_code == 200
+            assert _LABEL_FIELD not in json.loads(exported.content)
+
+
+# The real analyzer, end to end: LocalAI answers, is down, answers garbage, or
+# is skipped (quick mode).
+_OK_ANSWER = json.dumps({"summary": "fine", "overall_confidence": 0.9, "findings": []})
+_REAL_FLOWS = {
+    "ok": (lambda request: httpx.Response(200, json={"choices": [{"message": {"content": _OK_ANSWER}}]}), "full"),
+    "unreachable": (_raise_connect, "full"),
+    "invalid": (
+        lambda request: httpx.Response(200, json={"choices": [{"message": {"content": '{"findings": null}'}}]}),
+        "full",
+    ),
+    "quick-mode": (_raise_connect, "quick"),
+}
+
+
+@pytest.mark.parametrize("flow", list(_REAL_FLOWS))
+def test_main_analyze_real_flow_label_agrees_with_status(app_client, llm_transport, flow):
+    respond, mode = _REAL_FLOWS[flow]
+    llm_transport(respond)
+    resp = app_client.post("/analyze", json={"text": _LLM_DOC, "jurisdictions": ["GDPR"], "mode": mode})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["llm_status"] in _llm_members()
+    assert body.get(_LABEL_FIELD) == _llm_label(body["llm_status"])
+    # The stored analysis reads back with the same label.
+    stored = app_client.get(f"/analyses/{body['id']}")
+    assert stored.status_code == 200
+    assert stored.json().get(_LABEL_FIELD) == body[_LABEL_FIELD]
+
+
+class TestGetAnalysisLLMStatusLabel:
+    @pytest.mark.parametrize("status", [*_llm_members(), _ABSENT], ids=[*_llm_members(), "absent-pre-195-row"])
+    def test_main_get_analysis_derives_the_label_for_each_stored_status(
+        self, app_client: TestClient, db_session: Session, status: object
+    ) -> None:
+        # Rows stored before #372 carry no label: every read derives it.
+        row = _store_llm_status(db_session, _insert_analysis(db_session), status)
+        stored = json.loads(row.result_json)
+        stored.pop(_LABEL_FIELD, None)
+        _set_result_json(db_session, row, json.dumps(stored))
+        resp = app_client.get(f"/analyses/{row.id}")
+        assert resp.status_code == 200
+        expected = _llm_label(UNKNOWN if status is _ABSENT else status)
+        assert resp.json().get(_LABEL_FIELD) == expected
+
+    @pytest.mark.parametrize("forged", list(_FORGED_LABELS))
+    def test_main_get_analysis_ignores_a_stored_label(
+        self, app_client: TestClient, db_session: Session, forged: str
+    ) -> None:
+        # A stale or forged label in result_json (an old copy, a tampered row)
+        # never reaches the client.
+        fallback = _llm_fallback_members()[0]
+        row = _store_llm_status(db_session, _insert_analysis(db_session), fallback)
+        stored = json.loads(row.result_json)
+        stored[_LABEL_FIELD] = _FORGED_LABELS[forged]()
+        _set_result_json(db_session, row, json.dumps(stored))
+        resp = app_client.get(f"/analyses/{row.id}")
+        assert resp.status_code == 200
+        assert resp.json().get(_LABEL_FIELD) == _llm_label(fallback)
+        assert RAW_MARKER not in resp.text

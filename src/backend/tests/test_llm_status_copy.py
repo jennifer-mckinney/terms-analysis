@@ -7,9 +7,10 @@ Contract (test author's proposal, lead ruling 2026-10-12 "one shared place"):
   only (owner ruling 2026-10-12: "Focus on the backend first and UI second"): the
   PDF export takes its text from it (the CSV export and /reviews carry the
   canonical token), and no other module in ``src/backend/app`` restates a label.
-  There is no legacy UI consumer; the legacy UI is dropped. The v2 UI joins
-  ``CONSUMER_DIRS`` as a consumer in the follow-up UI card, which also decides how
-  the deployed webapp reaches this copy.
+  There is no legacy UI consumer; the legacy UI is dropped. The v2 UI never
+  loads this module: since #372 (owner ruling 2026-10-14, "the front end needs to
+  read from the backend") every AnalysisPayload carries ``llm_status_label`` built
+  here, and the UI renders that field (tests/test_streamlit_llm_status.py).
 * ``llm_status_label(value: object) -> str`` is total. A member returns its label.
   Anything else (missing, ``None``, empty, a typo, a case or look-alike variant, a
   non-string, a huge value, markup) returns exactly ``llm_status_label("unknown")``:
@@ -19,9 +20,8 @@ Contract (test author's proposal, lead ruling 2026-10-12 "one shared place"):
   runs), so each one reads as rules-only. It does not appear in the ``ok`` label,
   and not in the ``unknown`` label (an old row may have had an LLM answer, so
   claiming rules-only there would be dishonest too).
-* The module is standard library only. That keeps the follow-up UI card's options
-  open: the webapp (a separate deployable with only streamlit and requests
-  installed) can load the same file without the backend package.
+* The module is standard library only, so the label mapping has no third-party
+  dependency and stays importable on its own.
 
 Copy is not pinned (lead ruling): the tests check properties, never sentences.
 Copy follows LIB-VOICE V2 (no you/we/us/our/your in results) and V6 (no em-dash).
@@ -48,8 +48,9 @@ from tests.test_regressions_pr34 import _forged_status_variants
 MODULE_NAME = "app.llm_status_copy"
 MODULE_PATH = BACKEND_DIR / "app" / "llm_status_copy.py"
 SRC_DIR = BACKEND_DIR.parent
-# The consumers that must take their copy from the module, never restate it.
-# Backend only for #368; the follow-up UI card adds the v2 UI here.
+# The backend consumers that must take their copy from the module, never restate
+# it. The v2 UI holds no copy at all (#372): test_streamlit_llm_status.py checks
+# src/webapp for label text and for any load of this module.
 CONSUMER_DIRS = (BACKEND_DIR / "app",)
 
 # The API contract names (LIB-API API7), not config: the success value, the
@@ -239,9 +240,8 @@ class TestFailClosed:
 
 
 def test_module_loads_with_the_standard_library_only() -> None:
-    # Kept while the UI is out of scope: the webapp ships with streamlit and
-    # requests only and imports nothing from the backend package, so a stdlib
-    # module leaves the follow-up UI card free to load this same file.
+    # The mapping depends on nothing outside the standard library. The webapp
+    # does not load it (#372: the label arrives on the API response).
     probe = textwrap.dedent(
         """
         import importlib.util, sys
