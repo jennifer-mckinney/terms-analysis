@@ -36,6 +36,7 @@ _VECTORS = _GOV / "leak-vectors.tsv"
 _MATCHER = _REPO_ROOT / "scripts" / "governance" / "leak_scan.py"
 _SCANNER = _REPO_ROOT / "scripts" / "governance" / "scan-evidence-leaks.sh"
 _HOOK = _REPO_ROOT / ".githooks" / "pre-commit"
+_TREE_GUARD = _REPO_ROOT / "scripts" / "governance" / "tree_guard.py"
 
 # Home-path roots and private folder names are assembled at runtime so this
 # tracked file is not itself a home-path leak (#145
@@ -514,8 +515,40 @@ def _hook_repo(tmp_path: Path) -> Path:
     shutil.copy2(_PATTERNS, root / ".claude" / "governance" / "evidence-leak-regex.txt")
     (root / "scripts" / "governance").mkdir(parents=True)
     shutil.copy2(_MATCHER, root / "scripts" / "governance" / "leak_scan.py")
+    # #236 / #145: check 5 runs the shared tree guard with the home-path SSoT.
+    shutil.copy2(_TREE_GUARD, root / "scripts" / "governance" / "tree_guard.py")
+    shutil.copy2(_GOV / "personal-path-patterns.txt", root / ".claude" / "governance" / "personal-path-patterns.txt")
     shutil.copy2(_REPO_ROOT / ".gitignore", root / ".gitignore")
     return root
+
+
+def _guard_lines(result: subprocess.CompletedProcess) -> Dict[str, str]:
+    """Map each `pre-commit: <path>: <reasons>` tree guard line to its reasons."""
+    out: Dict[str, str] = {}
+    for line in result.stderr.splitlines():
+        body = line.removeprefix("pre-commit: ")
+        path, sep, reasons = body.rpartition(": ")
+        if line.startswith("pre-commit: ") and sep and not body.startswith("commit refused"):
+            out[path] = reasons
+    return out
+
+
+def _assert_clears_check4(result: subprocess.CompletedProcess, files: Dict[str, bytes]) -> Dict[str, str]:
+    """Check 4 accepted every staged evidence file; check 5 refused each as graveyard.
+
+    #236: docs/evidence/ is a graveyard directory in required-gitignore.txt, so
+    the tree guard refuses every evidence file. Check 4 exits on its first hit
+    with its own message, so no check 4 message plus a graveyard reason for
+    every staged file proves check 4 read and passed each one. Returns the
+    reasons per path so callers can pin the home-path verdicts.
+    """
+    assert result.returncode == 1, result.stderr
+    assert "Refusing to stage" not in result.stderr, result.stderr
+    reasons = _guard_lines(result)
+    assert set(reasons) == set(files), result.stderr
+    assert all(r.split(", ")[-1] == "graveyard" for r in reasons.values()), result.stderr
+    assert f"pre-commit: REFUSED {len(files)}" in result.stderr.splitlines()
+    return reasons
 
 
 def _stage_and_hook(root: Path, files: Dict[str, bytes], env: Dict[str, str] = None) -> subprocess.CompletedProcess:
@@ -543,8 +576,16 @@ def test_precommit_blocks_every_block_vector(tmp_path: Path, vector: Vector) -> 
 
 def test_precommit_allows_every_allow_vector(tmp_path: Path) -> None:
     files = {f"docs/evidence/a{i:03d}.txt": f"{v.sample}\n".encode() for i, v in enumerate(ALLOW)}
-    result = _stage_and_hook(_hook_repo(tmp_path), files)
-    assert result.returncode == 0, result.stderr
+    reasons = _assert_clears_check4(_stage_and_hook(_hook_repo(tmp_path), files), files)
+    # #236 / #145: one ALLOW vector is allowed by the evidence regex (check 4)
+    # but refused by the check 5 home-path SSoT, personal-path-patterns.txt
+    # row 3 (a tilde-rooted standard home folder, then a non-path char).
+    # Every other ALLOW vector must be graveyard only, so check 5 adds no
+    # false home-path hits.
+    row3 = f"the ~/{_DOCS} folder"
+    expected = {rel: ("home-path, graveyard" if v.sample == row3 else "graveyard") for rel, v in zip(files, ALLOW)}
+    assert row3 in {v.sample for v in ALLOW}, "the row 3 conflict vector left leak-vectors.tsv; update this test"
+    assert reasons == expected
 
 
 # ---------------------------------------------------------------------------
@@ -1298,8 +1339,9 @@ def test_precommit_refuses_container(tmp_path: Path, name: str) -> None:
 
 
 def test_precommit_allows_container_near_misses(tmp_path: Path) -> None:
-    result = _stage_and_hook(_hook_repo(tmp_path), {"docs/evidence/n.txt": b"".join(CONTAINER_NEAR_MISSES)})
-    assert result.returncode == 0, result.stderr
+    files = {"docs/evidence/n.txt": b"".join(CONTAINER_NEAR_MISSES)}
+    reasons = _assert_clears_check4(_stage_and_hook(_hook_repo(tmp_path), files), files)
+    assert reasons == {"docs/evidence/n.txt": "graveyard"}
 
 
 # Path names (security F4): clean content, leaky NAME.
@@ -1531,16 +1573,25 @@ def test_hookspath_commit_refuses_leaking_evidence(tmp_path: Path, where: str) -
 
 @pytest.mark.parametrize("where", ["main-checkout", "linked-worktree"])
 def test_hookspath_commit_accepts_clean_evidence(tmp_path: Path, where: str) -> None:
-    # N1 / N2 positive control: clean evidence commits through the same wiring.
+    # N1 / N2 through the same wiring: clean evidence clears check 4, and
+    # #236 / #145 check 5 then refuses it as graveyard (docs/evidence/ is in
+    # required-gitignore.txt), so HEAD must not move.
     root = _wired_repo(tmp_path)
     checkout = root if where == "main-checkout" else _linked_worktree(root)
     before = _head(checkout)
-    files = {f"docs/evidence/a{i:03d}.txt": f"{v.sample}\n".encode() for i, v in enumerate(ALLOW)}
-    result = _git_commit(checkout, files)
+    files = {f"docs/evidence/a{i:03d}.txt": b"<repo>/clean\n" for i in range(3)}
+    reasons = _assert_clears_check4(_git_commit(checkout, files), files)
+    assert reasons == {rel: "graveyard" for rel in files}
+    assert _head(checkout) == before, "a refused commit must not move HEAD"
+    # Positive control: with the evidence unstaged, a clean file commits
+    # through the same hooksPath wiring, so the refusal above is not a hook
+    # that refuses everything.
+    _git(checkout, "rm", "-r", "--cached", "-q", "--", "docs/evidence")
+    result = _git_commit(checkout, {"notes/clean.txt": b"<repo>/clean\n"})
     assert result.returncode == 0, result.stderr
     assert _head(checkout) != before
-    committed = _git(checkout, "ls-tree", "-r", "--name-only", "HEAD", "--", "docs/evidence").stdout.split()
-    assert sorted(committed) == sorted(files)
+    committed = _git(checkout, "ls-tree", "-r", "--name-only", "HEAD", "--", "notes", "docs/evidence").stdout.split()
+    assert committed == ["notes/clean.txt"]
 
 
 _OPTION_LIKE_NAMES = ["docs/evidence/-n.md", "docs/evidence/--help.md"]
@@ -1548,12 +1599,23 @@ _OPTION_LIKE_NAMES = ["docs/evidence/-n.md", "docs/evidence/--help.md"]
 
 def test_hookspath_commit_accepts_option_like_names(tmp_path: Path) -> None:
     # N3 (attack sketch T7): names that look like options to echo, printf or
-    # a CLI must be read as names, scanned, and committed when clean.
+    # a CLI must be read as names and scanned. #236 / #145: clean evidence
+    # clears check 4 and the check 5 tree guard names each file verbatim as
+    # graveyard, so the names survived both checks unmangled.
     root = _wired_repo(tmp_path)
-    result = _git_commit(root, {rel: b"<repo>/clean\n" for rel in _OPTION_LIKE_NAMES})
+    before = _head(root)
+    files = {rel: b"<repo>/clean\n" for rel in _OPTION_LIKE_NAMES}
+    reasons = _assert_clears_check4(_git_commit(root, files), files)
+    assert reasons == {rel: "graveyard" for rel in _OPTION_LIKE_NAMES}
+    assert _head(root) == before
+    # Positive control: the same option-like names outside the graveyard
+    # commit through the real hook.
+    _git(root, "rm", "-r", "--cached", "-q", "--", "docs/evidence")
+    names = [rel.replace("docs/evidence/", "notes/") for rel in _OPTION_LIKE_NAMES]
+    result = _git_commit(root, {rel: b"<repo>/clean\n" for rel in names})
     assert result.returncode == 0, result.stderr
-    committed = _git(root, "ls-tree", "-r", "--name-only", "HEAD", "--", "docs/evidence").stdout.split()
-    assert sorted(committed) == sorted(_OPTION_LIKE_NAMES)
+    committed = _git(root, "ls-tree", "-r", "--name-only", "HEAD", "--", "notes").stdout.split()
+    assert sorted(committed) == sorted(names)
 
 
 @pytest.mark.parametrize("rel", _OPTION_LIKE_NAMES)

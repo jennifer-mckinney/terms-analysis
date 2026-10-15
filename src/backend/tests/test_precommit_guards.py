@@ -14,10 +14,9 @@ Split per the #145 design gate (owner rulings on #199):
   case-insensitive, after Unicode Cf characters are removed. The tilde /
   $HOME standard-home-folder prefixes are leaks too (O3).
 * Part B (card #236): staged-content guard, nested graveyard, `.env`
-  look-alikes and CI wiring. Those cases are `xfail(strict=True)` with
-  reason "Part B, #236" (lead ruling 2026-10-08: tracked by #236) so they stay red for a stated reason and flip loudly
-  (XPASS fails the run) when Part B lands. Controls that the CURRENT hook or
-  workflow already satisfy stay active, so a Part A change cannot break them.
+  look-alikes and CI wiring, all through `scripts/governance/tree_guard.py`
+  (hook check 5 and the workflow). The Part A `xfail(strict=True)` markers
+  were removed when Part B landed, so every case here is an active gate.
 
 Behaviour over text: every hook case runs the real `.githooks/pre-commit`
 inside a throwaway git repo, and every CI case runs the real `run:` steps of
@@ -614,7 +613,7 @@ def test_rejects_staged_personal_path(sandbox: Path) -> None:
 
 
 def test_allows_policy_placeholder(sandbox: Path) -> None:
-    """Control, green today: the current hook has no content scan at all."""
+    """Positive control: no allow vector is a false home-path hit for the guard."""
     for i, v in enumerate(ALLOW_VECTORS):
         _write(sandbox, f"ok{i}.md", v + "\n")
     _stage(sandbox, *[f"ok{i}.md" for i in range(len(ALLOW_VECTORS))])
@@ -705,11 +704,12 @@ def test_scans_index_not_worktree(sandbox: Path) -> None:
 
 
 def test_home_path_in_staged_name_refused_and_withheld(sandbox: Path) -> None:
-    """#236 (coder-added): the PATH NAME can carry a home path too.
+    """#236: the PATH NAME can carry a home path too, not only the content.
 
     Clean content, but a directory run that spells a home path after a space
-    (pattern row 1: a space right before the root). The refusal must not print the name (F8), so the guard
-    withholds it and still states the reason.
+    (pattern row 1 needs a non-path character right before the root). The
+    refusal must not print the name (F8), so the guard withholds it and still
+    states the reason.
     """
     rel = "a " + home("Users", "alice", "/x.md")
     _write(sandbox, rel, "clean\n")
@@ -718,7 +718,7 @@ def test_home_path_in_staged_name_refused_and_withheld(sandbox: Path) -> None:
 
 
 def test_dirty_worktree_clean_index_allowed(sandbox: Path) -> None:
-    """Control, green today (no content scan yet); Part B must keep it green."""
+    """F7 positive control: only the staged blob is scanned, not the worktree."""
     _write(sandbox, "doc.md", "clean\n")
     _stage(sandbox, "doc.md")
     _write(sandbox, "doc.md", "cd " + LEAK + "\n")
@@ -734,7 +734,11 @@ def test_symlink_to_home_path_refused(sandbox: Path) -> None:
 
 
 def test_huge_single_line_leak_refused(sandbox: Path) -> None:
-    _write(sandbox, "big.txt", b"a" * (2 * 1024 * 1024) + LEAK.encode())
+    # Size attack: the leak sits after 2 MiB on one line, so a guard that
+    # truncates or line-limits the blob misses it. The space before LEAK is
+    # required: pattern row 1 needs a non-path character before the root, and
+    # `aaaa/Users/...` is a relative path, like the allowed `src/home/x`.
+    _write(sandbox, "big.txt", b"a" * (2 * 1024 * 1024) + b" " + LEAK.encode())
     _stage(sandbox, "big.txt")
     _assert_refused(_run_hook(sandbox), name="big.txt", reason=REASON_HOME)
 
@@ -822,7 +826,7 @@ def test_allows_graveyard_lookalike_name(sandbox: Path, d: str) -> None:
 
 
 def test_root_pip_cache_still_refused(sandbox: Path) -> None:
-    """Control: green today (root-prefix graveyard check exists on main)."""
+    """Control: the root-prefix graveyard case stays refused alongside nested ones."""
     _write(sandbox, ".pip-cache/x", "x\n")
     _stage(sandbox, ".pip-cache/x")
     _assert_refused(_run_hook(sandbox), name=".pip-cache/x", reason=REASON_GRAVEYARD)
@@ -832,7 +836,7 @@ def test_root_pip_cache_still_refused(sandbox: Path) -> None:
 # 4. Hook: .env homoglyphs (#78)
 # ==========================================================================
 ENV_BLOCK = [
-    ".env", ".ENV", ".Env.local",  # ASCII controls (green today)
+    ".env", ".ENV", ".Env.local",  # ASCII controls
     ".\u0435nv",  # Cyrillic small ie
     ".\u0415NV",  # Cyrillic capital IE
     ".\uff45nv",  # fullwidth e
@@ -842,11 +846,7 @@ ENV_BLOCK = [
     ".env\u200d",  # trailing Cf
     ".\u0435nv.local",
 ]
-ENV_ASCII_CONTROLS = {".env", ".ENV", ".Env.local"}  # enforced by today's hook
-ENV_BLOCK_PARAMS = [
-    pytest.param(n, id=ascii(n))
-    for n in ENV_BLOCK
-]
+ENV_BLOCK_PARAMS = [pytest.param(n, id=ascii(n)) for n in ENV_BLOCK]
 ENV_ALLOW = [".env.example", ".envrc_notes.md", "env.md", "dotenv.txt"]
 
 
