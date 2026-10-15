@@ -54,6 +54,11 @@ PATH_KEYS = ("ingester_prefix",)
 PATH_LIST_KEYS = ("follow_probe_paths",)
 URL_KEYS = ("ingester_remote_url",)
 REQUIRED_KEYS = frozenset(SHA_KEYS + INT_KEYS + PATH_KEYS + PATH_LIST_KEYS + URL_KEYS)
+# Read by the #125 evidence-scan pre-flight, not by import mode; accepted here
+# so the shared conf loads. Missing or empty is allowed; otherwise
+# space-separated full 40-hex SHAs, no duplicates (same rule as the pre-flight).
+SHA_LIST_KEYS = ("waived_history_commits",)
+KNOWN_KEYS = REQUIRED_KEYS | frozenset(SHA_LIST_KEYS)
 
 _SHA40 = re.compile(r"[0-9a-f]{40}")
 _OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -99,6 +104,11 @@ def _check_value(key: str, value: str) -> bool:
     if key in PATH_LIST_KEYS:
         items = value.split(" ")
         return all(_valid_path(i) for i in items)
+    if key in SHA_LIST_KEYS:
+        if not value:
+            return True
+        shas = value.split(" ")
+        return all(_SHA40.fullmatch(s) for s in shas) and len(set(shas)) == len(shas)
     return _URL.fullmatch(value) is not None
 
 
@@ -120,7 +130,7 @@ def load_conf(path: Path) -> Conf | None:
         key, sep, value = line.partition("=")
         if not sep or not _KEY.fullmatch(key):
             raise Refusal(f"{CONF_LABEL} line {number} is not key=value")
-        if key not in REQUIRED_KEYS:
+        if key not in KNOWN_KEYS:
             raise Refusal(f"{CONF_LABEL} line {number} has an unknown key")
         if key in values:
             raise Refusal(f"{CONF_LABEL} line {number} repeats key {key}")
