@@ -32,9 +32,10 @@ The local ingester main checkout sits at `e184b8a`, 108 commits behind its remot
 
 ### 1.2 Ingester main tip
 
-- `git ls-remote https://github.com/jennifer-mckinney/legal-corpus-ingester main` → **`9ad4d0cccdb3e2a6583a1df82b3215697d89dc91`** ("Merge pull request #80 from jennifer-mckinney/fix/17-health-check-parity", 2026-10-11T04:23:53Z).
+- `git ls-remote https://github.com/jennifer-mckinney/legal-corpus-ingester main` → **`50ca236eb662f11581d67eceaf0e9718cded123a`** ("Merge pull request #117 from jennifer-mckinney/chore/remove-evidence-home-path", 2026-10-15T19:06:52Z).
+- Re-pinned 2026-10-15 (owner decision on §4.7, option b). The plan first pinned `9ad4d0c` (ingester #80) and the red commit pinned `1be65ef` (ingester #116). `50ca236` adds ING #117, which removes `docs/evidence/2026-10-10-runner-toolcache-seed.md` from the tip; the owner waives the older history that still carries it.
 - This tip contains the G0 fixes (#17 checkpoint/health parity, #81 OAuth reviews, #74 worktree hygiene, #69 Python pin, ADR-016 hosted runners).
-- `e184b8a` in the card is stale (pre-G0). Replace it in the card body with `9ad4d0c…`.
+- `e184b8a` in the card is stale (pre-G0). Replace it in the card body with `50ca236…`.
 - 182 commits (counted at `ad96cf5`, the tip before #80), 197 tree entries, 180 text files, about 25.5k text lines.
 - **Freeze:** from the moment PR 1 opens until PR 2 merges, nothing merges to ingester main. If something must land anyway, re-pin the tip and redo the relocation commit (see §2.4).
 
@@ -79,7 +80,7 @@ B gives `--follow` fidelity on both sides (the card's intent: "so `git log --fol
 ### 2.4 Exact sequence for PR 1 (for the committer brief)
 
 1. Cut `chore/125-import-ingester` on GitHub from TA main and fetch it into a fresh worktree `../ta-125` (G2).
-2. **test-author red commit:** `scripts/governance/check-monorepo-layout.sh` plus its config `.claude/governance/monorepo-layout.conf` (pinned values: ingester remote URL, `INGESTER_TIP=9ad4d0cc…`, `APP_ANCHOR=8797180`; no hard-coded values in the script, per F13), plus pytest coverage for the script under the existing governance-test location. Stages: `--stage import|ci|app`. Red log goes to `docs/evidence/` (leak-scanned).
+2. **test-author red commit:** `scripts/governance/check-monorepo-layout.sh` plus its config `.claude/governance/monorepo-layout.conf` (pinned values: ingester remote URL, `INGESTER_TIP=50ca236e…`, `APP_ANCHOR=8797180`; no hard-coded values in the script, per F13), plus pytest coverage for the script under the existing governance-test location. Stages: `--stage import|ci|app`. Red log goes to `docs/evidence/` (leak-scanned).
 3. `git fetch https://github.com/jennifer-mckinney/legal-corpus-ingester main`; assert `FETCH_HEAD` == `INGESTER_TIP`, abort otherwise.
 4. `git worktree add --detach ../ta-125-reloc FETCH_HEAD`. There: create `packages/ingester/`, `git mv` every top-level entry including dotfiles (`.claude .githooks .github .gitignore .python-version .dockerignore .env.example`) into it, commit `chore: relocate ingester tree under packages/ingester (#125)`. Verify that `git diff --name-status <tip> HEAD | grep -cv '^R100'` is `0`. Don't push this commit as its own branch: TA CI's push trigger (`feat/**`, `claude/**`) would run TA's jobs on an ingester-only tree.
 5. Back in `../ta-125`: `git merge --no-ff --allow-unrelated-histories <reloc-sha> -m "Merge legal-corpus-ingester history into packages/ingester (#125)"`.
@@ -104,7 +105,7 @@ Don't fold PR 2 into PR 1. It would mix reviewable edits into the 25k-line impor
 - TA `p9-review.yml` builds `pr.diff` from `git diff origin/main...HEAD` and runs each reviewer with `--max-turns 40` and `timeout-minutes: 20`. PR 1's net diff is the whole ingester tree. Expect one of two outcomes: no verdict (turn or time cap, which `check_verdict.py` fails as "missing verdict"), or findings against pre-existing ingester code.
 - **Don't build a bespoke skip** in `p9-review.yml` (G11: standard CI over custom machinery).
 - Instead:
-  1. PR 1's body states that the diff is byte-identical to ingester `9ad4d0c` and cites the `check-monorepo-layout.sh --stage import` output (tree-hash equality and an R100-only relocation). That deterministic proof is stronger than an LLM read for "is this the same code".
+  1. PR 1's body states that the diff is byte-identical to ingester `50ca236` and cites the `check-monorepo-layout.sh --stage import` output (tree-hash equality and an R100-only relocation). That deterministic proof is stronger than an LLM read for "is this the same code".
   2. Any P9 finding on PR 1 is pre-existing ingester code. Triage it as a card against `packages/ingester` (MEDIUM+ → `priority:P1/P2` card; LOW/NIT → `P3`), **never fixed inside PR 1**.
   3. If a review job is red only because of turn caps or pre-existing findings, the owner **waives P9 at merge time** (LIB-PRINCIPLES P9: "only the owner can waive, and does so at merge time"). `security-review`/`grumpy-review` aren't required checks in TA today, so the button isn't blocked, but G9 "ready" needs the owner's explicit waiver on record.
   4. Optional, owner's choice: one full-package review card for `packages/ingester` after PR 2. Its 40 founding tasks went to main without PRs (plan §Gate M "Accepted consequence").
@@ -178,7 +179,7 @@ Recommendation: **delete it in PR 2 and rely on CI** (G11). Lint, type and test 
 
 TA `ci.yml` job `Evidence leak scan (docs/evidence)` scans **every line added under `docs/evidence/` by each commit in `PR_BASE..PR_HEAD`**. PR 1's range includes all ~182 ingester commits, and in those commits the ingester evidence sits at root `docs/evidence/`. So TA's leak regex will scan the ingester's whole evidence history, and agent logs leaked home paths twice in the past. Ingester history can't be rewritten (no force-push; history must be preserved).
 
-**Pre-flight, read-only, before PR 1 opens:** run TA's `scripts/governance/scan-evidence-leaks.sh --range <ingester-root-commit>..9ad4d0c` against a clone of the ingester. If it hits, the owner decides before PR 1. The history is already public in the ingester repo, so importing it isn't new exposure, and `Evidence leak scan` isn't a required check. The alternative is a waiver at merge. **OPEN:** result of the pre-flight scan.
+**Pre-flight, read-only, before PR 1 opens:** run TA's `scripts/governance/scan-evidence-leaks.sh --range <ingester-root-commit>..50ca236` against a clone of the ingester. If it hits, the owner decides before PR 1. The history is already public in the ingester repo, so importing it isn't new exposure, and `Evidence leak scan` isn't a required check. The alternative is a waiver at merge. **OPEN:** result of the pre-flight scan.
 
 Also pre-flight the `gitignore-enforcement.yml` assertions (graveyard patterns, case-insensitive `.env` variants) against the merged tree. The ingester has `.env.example`, `state/`, `models/`, `Dockerfile`. **OPEN:** result.
 
@@ -244,12 +245,12 @@ Point of no return: issue transfer + archive (§6). Everything before that is re
 Implemented by `scripts/governance/check-monorepo-layout.sh --stage <s>` with pinned values in `.claude/governance/monorepo-layout.conf`. Every check exits 0 on pass. Red is recorded before the implementation commit of each PR.
 
 Stage `import` (PR 1):
-1. `git merge-base --is-ancestor 9ad4d0cccdb3e2a6583a1df82b3215697d89dc91 HEAD` → 0 (ingester history is an ancestor, not squashed).
+1. `git merge-base --is-ancestor 50ca236eb662f11581d67eceaf0e9718cded123a HEAD` → 0 (ingester history is an ancestor, not squashed).
 2. `git merge-base --is-ancestor 8797180 HEAD` → 0. Note: already true on main today, so this check is **non-discriminating**; check 3 is the discriminating one.
 3. `git rev-list --max-parents=0 HEAD` includes the ingester root commit (**OPEN:** pin its SHA in the conf) as well as TA's root(s).
-4. Let `R = git rev-list --ancestry-path --reverse 9ad4d0c..HEAD | head -1` (the relocation commit). Then `git rev-parse R:packages/ingester` == `git rev-parse 9ad4d0c^{tree}`, and `git diff --name-status 9ad4d0c R | grep -cv '^R100'` == 0.
+4. Let `R = git rev-list --ancestry-path --reverse 50ca236..HEAD | head -1` (the relocation commit). Then `git rev-parse R:packages/ingester` == `git rev-parse 50ca236^{tree}`, and `git diff --name-status 9ad4d0c R | grep -cv '^R100'` == 0.
 5. `test -f packages/ingester/pyproject.toml`.
-6. `git log --follow --format=%H -- packages/ingester/pyproject.toml` ⊇ `git log --format=%H 9ad4d0c -- pyproject.toml` (checked with `comm -13` = empty).
+6. `git log --follow --format=%H -- packages/ingester/pyproject.toml` ⊇ `git log --format=%H 50ca236 -- pyproject.toml` (checked with `comm -13` = empty).
 7. On main after merge: the merge commit has 2 parents (squash guard, R1).
 
 Stage `ci` (PR 2):
@@ -272,7 +273,7 @@ Card acceptance (unchanged): red before, green after, grumpy PASS + security PAS
 
 ## 9. Card dependency updates
 
-- **#125 card body:** replace `e184b8a` with `9ad4d0cccdb3e2a6583a1df82b3215697d89dc91`; add "method B, 3 PRs, see `docs/plans/2026-10-12-125-monorepo-merge.md`"; mark the `8797180` ancestor check as non-discriminating and add checks 3, 4 and 7.
+- **#125 card body:** replace `e184b8a` with `50ca236eb662f11581d67eceaf0e9718cded123a`; add "method B, 3 PRs, see `docs/plans/2026-10-12-125-monorepo-merge.md`"; mark the `8797180` ancestor check as non-discriminating and add checks 3, 4 and 7.
 - **#123:** close-out comment and close (§1.1). Its `blocks: #125` link is then satisfied.
 - **#90, #92** (blocked-by on #125): both CLOSED (verified 2026-10-12).
 - **#125 blocks #130 #134 #136 #138 #142 #160.** After PR 3 merges and #125 closes, for each one: remove `#125` from "blocked by"; change `repo:` to `terms-analysis (monorepo)`; rewrite any ingester-relative path to `packages/ingester/...` and any `src/backend/...` path to `packages/app/backend/...`; re-check `parallel-ok` (several will touch the same governance files and can't run in parallel). **OPEN:** the mapping of these six cards to plan §Gate M steps 3-6 (corpus-contract extraction, path-filtered CI, HR namespacing/`.claude` collapse, real e2e round-trip) wasn't read. If one of them owns "path-filtered CI", PR 2's `changes`-job work moves into that card, and #125 PR 2 keeps only the minimum needed to make the ingester suite run at all.
