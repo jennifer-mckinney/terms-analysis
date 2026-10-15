@@ -1,27 +1,27 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-10-12T22:25:19Z",
+  "generated_at": "2026-10-15T01:58:11Z",
   "note": "Baseline captured after governance change. Repo-relative paths only, resolved from the repo root. Per-developer files are hashed in the untracked local manifest (see scripts/governance/README.md).",
   "entries": [
     {
       "path": ".claude/CLAUDE.md",
-      "sha256": "dd423ef94213894dec566cb55103e3b4a492554df1508909dc30c851a918bef1",
-      "size_bytes": 9097,
-      "recorded_at": "2026-10-12T22:25:19Z",
+      "sha256": "e0be87eec5a9216571aaabec29cefd8ea4a2a389b01373971f3f7e2ca7853285",
+      "size_bytes": 9671,
+      "recorded_at": "2026-10-15T01:58:11Z",
       "note": "Project governance charter."
     },
     {
       "path": ".claude/library/LIB-PRINCIPLES.md",
       "sha256": "4a87426c0d96d0d0c246c2f805c7df6f0871df9b66c4b5cc019cb1c81a36cc33",
       "size_bytes": 20043,
-      "recorded_at": "2026-10-12T22:25:19Z",
+      "recorded_at": "2026-10-15T01:58:11Z",
       "note": "LIB-PRINCIPLES P8 v2 baseline; single source of truth for role principles."
     },
     {
       "path": ".claude/governance/required-gitignore.txt",
       "sha256": "2d72fbed8855cfdc9373176a444893a9d818cfcb391954d3743f595d9ded0a9f",
       "size_bytes": 931,
-      "recorded_at": "2026-10-12T22:25:19Z",
+      "recorded_at": "2026-10-15T01:58:11Z",
       "note": "Reviewer P9 F9 SSoT for required .gitignore patterns read by both pre-commit hook and CI workflow."
     }
   ]
