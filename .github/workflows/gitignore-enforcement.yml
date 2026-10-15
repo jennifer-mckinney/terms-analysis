@@ -20,6 +20,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The tree guard step runs Python; pin it like every other workflow.
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
       - name: Load required patterns from SSoT
         id: load_required
         run: |
@@ -67,48 +72,27 @@ jobs:
             fi
           done <<< "${REQUIRED}"
 
-      - name: Assert no graveyard files exist in tree
+      - name: Assert tracked tree passes the tree guard
+        # #145 / #236: the same scanner as .githooks/pre-commit check 5 (F10).
+        # Over every tracked entry: no home path in a blob, symlink target or
+        # path name, no file under a graveyard directory at any depth, no .env
+        # look-alike (case, Cf and homoglyph folded). The guard never prints
+        # file content (F8). Fail closed: pass only on exit 0 with the exact
+        # "CLEAN <n>" last line.
         run: |
           set -euo pipefail
-          OFFENDERS="$(find . \( -path './ignore/*' -o -path './.venv/*' -o -path './venv/*' -o -path './.pip-cache/*' \) -not -path './.git/*' -print)"
-          if [[ -n "${OFFENDERS}" ]]; then
-            echo "::error::Graveyard files present in tree:"
-            echo "${OFFENDERS}"
-            exit 1
+          GUARD="scripts/governance/tree_guard.py"
+          PATTERNS=".claude/governance/personal-path-patterns.txt"
+          SSOT=".claude/governance/required-gitignore.txt"
+          OUT="$(mktemp)"
+          trap 'rm -f "${OUT}"' EXIT
+          rc=0
+          python3 -I "${GUARD}" "${PATTERNS}" "${SSOT}" > "${OUT}" 2>&1 || rc=$?
+          last="$(tail -n 1 "${OUT}")"
+          if [[ "${rc}" -eq 0 ]] && [[ "${last}" =~ ^CLEAN\ [0-9]+$ ]]; then
+            echo "tree guard: ${last}"
+            exit 0
           fi
-
-      - name: Assert no case-insensitive .env variants in PR tree
-        # Reviewer P9 security F6: prior policy only checked literal ".env".
-        # ".ENV", ".Env", ".env.production" (etc.) would slip through both the
-        # local pre-commit hook and this workflow, so a rogue file with the
-        # wrong case could leak secrets on next commit.
-        run: |
-          set -euo pipefail
-          # Whitelist of safe .env-style files (exact basenames).
-          ALLOWLIST=(".env.example" ".env.sample" ".env.template")
-          OFFENDERS=()
-          while IFS= read -r -d '' path; do
-            base="$(basename "${path}")"
-            # Case-insensitive match on .env or .env.<suffix>
-            shopt -s nocasematch
-            if [[ "${base}" =~ ^\.env(\..*)?$ ]]; then
-              shopt -u nocasematch
-              allowed=0
-              for allowed_name in "${ALLOWLIST[@]}"; do
-                if [[ "${base}" == "${allowed_name}" ]]; then
-                  allowed=1
-                  break
-                fi
-              done
-              if [[ "${allowed}" -eq 0 ]]; then
-                OFFENDERS+=("${path}")
-              fi
-            else
-              shopt -u nocasematch
-            fi
-          done < <(find . -type f -not -path './.git/*' -print0)
-          if [[ ${#OFFENDERS[@]} -gt 0 ]]; then
-            echo "::error::PR tree contains .env-style file(s) not on allowlist:"
-            printf '%s\n' "${OFFENDERS[@]}"
-            exit 1
-          fi
+          echo "::error::tree guard refused the tree (exit ${rc}):"
+          cat "${OUT}"
+          exit 1

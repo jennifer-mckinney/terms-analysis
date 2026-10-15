@@ -1,20 +1,25 @@
 #!/usr/bin/env bash
 # Governance-tier pre-commit hook.
 #
-# Enforces four invariants:
+# Enforces these invariants:
 #   1. .gitignore contains every required pattern from
 #      .claude/governance/required-gitignore.txt (single source of truth,
 #      reviewer P9 grumpy F9).
-#   2. No staged file matches a graveyard path (ignore/, .venv/, venv/,
-#      .pip-cache/).
-#   3. No staged file is a case-insensitive .env variant that is not on the
-#      .env.example allowlist (reviewer P9 security F6).
+#   2./3. Replaced by check 5 (#236): graveyard and .env checks now run in the
+#      shared tree guard, at any depth and with .env look-alikes folded.
 #   4. No staged file under docs/evidence/ contains a local machine path
 #      or private directory name (pytest/macOS/Claude temp dirs, home
 #      directories, home-relative private folders, agent worktree IDs; pattern SSoT .claude/governance/evidence-leak-regex.txt,
 #      matcher scripts/governance/leak_scan.py, shared with CI)
 #      (issue #91 P9 security F1, round 2 R2-F3, round 5 normalising matcher;
 #      round 8: staged path names, type changes and opaque containers too).
+#   5. Tree guard (#145 / #236), scripts/governance/tree_guard.py, shared with
+#      .github/workflows/gitignore-enforcement.yml. Over every entry of the
+#      index being committed: no home path in a blob, symlink target or path
+#      name (patterns .claude/governance/personal-path-patterns.txt), no file
+#      under a graveyard directory at any depth (directory entries of the
+#      required-gitignore SSoT), no .env look-alike. Success prints the exact
+#      line "CLEAN <n>".
 #
 # Install with: scripts/install-hooks.sh
 # Governance policy: to change the required list, edit
@@ -24,8 +29,12 @@
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-GITIGNORE="${REPO_ROOT}/.gitignore"
-REQUIRED_LIST_FILE="${REPO_ROOT}/.claude/governance/required-gitignore.txt"
+# F8: every path below is repo-relative, so no message prints an absolute path.
+cd "${REPO_ROOT}"
+GITIGNORE=".gitignore"
+REQUIRED_LIST_FILE=".claude/governance/required-gitignore.txt"
+# One interpreter setting for every Python check in this hook.
+GUARD_PYTHON="${LEAK_SCAN_PYTHON:-python3}"
 
 # Load required patterns from SSoT (skip comments + blank lines).
 if [[ ! -f "${REQUIRED_LIST_FILE}" ]]; then
@@ -41,21 +50,6 @@ while IFS= read -r line; do
     [[ "${trimmed:0:1}" == "#" ]] && continue
     REQUIRED_GITIGNORE_PATTERNS+=("${trimmed}")
 done < "${REQUIRED_LIST_FILE}"
-
-# Path prefixes / globs that must never be staged.
-GRAVEYARD_PATTERNS=(
-    "ignore/"
-    ".venv/"
-    "venv/"
-    ".pip-cache/"
-)
-
-# Allowlist of legitimate .env-style files (case-sensitive, exact basename).
-ENV_ALLOWLIST=(
-    ".env.example"
-    ".env.sample"
-    ".env.template"
-)
 
 fail() {
     printf 'pre-commit: %s\n' "$1" >&2
@@ -75,45 +69,6 @@ for pattern in "${REQUIRED_GITIGNORE_PATTERNS[@]}"; do
         fail ".gitignore is missing required pattern: \`${pattern}\`. This entry is protected -- see .claude/governance/required-gitignore.txt."
     fi
 done
-
-# --- Check 2: no graveyard files in the staged tree -------------------------
-STAGED="$(git diff --cached --name-only --diff-filter=ACMR || true)"
-if [[ -n "${STAGED}" ]]; then
-    while IFS= read -r path; do
-        [[ -z "${path}" ]] && continue
-        for prefix in "${GRAVEYARD_PATTERNS[@]}"; do
-            if [[ "${path}" == "${prefix}"* ]]; then
-                fail "Refusing to stage graveyard file: ${path}. See .gitignore policy."
-            fi
-        done
-    done <<< "${STAGED}"
-fi
-
-# --- Check 3: no case-insensitive .env variants unless whitelisted ----------
-# Matches basenames like .env, .ENV, .Env, .env.local, .ENV.prod, etc.
-# Reviewer P9 security F6: prior policy only listed literal lowercase ".env"
-# so .ENV or .Env would smuggle secrets past both the hook and gitignore.
-if [[ -n "${STAGED}" ]]; then
-    while IFS= read -r path; do
-        [[ -z "${path}" ]] && continue
-        # #192: parameter expansion, not basename(1). A staged name such as
-        # "-n.md" or "--help.md" was parsed as an option and killed the hook.
-        base="${path##*/}"
-        # Case-insensitive regex: .env or .env.<suffix>
-        if [[ "${base}" =~ ^\.[Ee][Nn][Vv](\..*)?$ ]]; then
-            allowed=0
-            for allowed_name in "${ENV_ALLOWLIST[@]}"; do
-                if [[ "${base}" == "${allowed_name}" ]]; then
-                    allowed=1
-                    break
-                fi
-            done
-            if [[ "${allowed}" -eq 0 ]]; then
-                fail "Refusing to stage .env-style file: ${path}. Matches case-insensitive .env pattern and is not on .env.example allowlist."
-            fi
-        fi
-    done <<< "${STAGED}"
-fi
 
 # --- Check 4: no local machine paths in staged evidence files --------------
 # Issue #91 P9 security F1: captured test output committed under
@@ -139,14 +94,15 @@ fi
 # canonical patterns run, so encoded spellings need no extra alternatives.
 # Vectors: .claude/governance/leak-vectors.tsv.
 EVIDENCE_PREFIX="docs/evidence/"
-EVIDENCE_REGEX_FILE="${REPO_ROOT}/.claude/governance/evidence-leak-regex.txt"
-EVIDENCE_MATCHER="${REPO_ROOT}/scripts/governance/leak_scan.py"
-EVIDENCE_PYTHON="${LEAK_SCAN_PYTHON:-python3}"
+EVIDENCE_REGEX_FILE=".claude/governance/evidence-leak-regex.txt"
+EVIDENCE_MATCHER="scripts/governance/leak_scan.py"
+EVIDENCE_PYTHON="${GUARD_PYTHON}"
 EVIDENCE_STAGED_Z="$(mktemp)"
 EVIDENCE_BLOB="$(mktemp)"
 EVIDENCE_HITS="$(mktemp)"
 EVIDENCE_NAMES="$(mktemp)"
-trap 'rm -f "${EVIDENCE_STAGED_Z}" "${EVIDENCE_BLOB}" "${EVIDENCE_HITS}" "${EVIDENCE_NAMES}"' EXIT
+GUARD_OUT="$(mktemp)"
+trap 'rm -f "${EVIDENCE_STAGED_Z}" "${EVIDENCE_BLOB}" "${EVIDENCE_HITS}" "${EVIDENCE_NAMES}" "${GUARD_OUT}"' EXIT
 # #91 r8 (grumpy 5 / security F5): T (type change, e.g. a file replaced by a
 # symlink) is scanned too; git show ":path" yields a symlink's target path.
 git diff --cached --name-only -z --diff-filter=ACMRT > "${EVIDENCE_STAGED_Z}" \
@@ -202,4 +158,30 @@ if [[ -s "${EVIDENCE_STAGED_Z}" ]]; then
     fi
 fi
 
-exit 0
+# --- Check 5: tree guard (home paths, graveyard at any depth, .env) ---------
+# #145 / #236. Runs after check 4 so an evidence leak keeps its own message.
+# Scans the whole index being committed (a temporary index under
+# `git commit <paths>` included), not the working tree (F7). Fail closed: exit
+# 0 counts only with the exact "CLEAN <n>" line and exit 1 only with the
+# "REFUSED <n>" line; anything else (crash, config error) is a failure too.
+GUARD_SCRIPT="scripts/governance/tree_guard.py"
+GUARD_PATTERNS=".claude/governance/personal-path-patterns.txt"
+[[ -f "${GUARD_SCRIPT}" ]] || fail "tree guard missing: ${GUARD_SCRIPT}"
+command -v "${GUARD_PYTHON}" >/dev/null 2>&1 \
+    || fail "${GUARD_PYTHON} not found (needed by ${GUARD_SCRIPT})"
+set +e
+"${GUARD_PYTHON}" -I "${GUARD_SCRIPT}" "${GUARD_PATTERNS}" "${REQUIRED_LIST_FILE}" > "${GUARD_OUT}" 2>&1
+guard_rc=$?
+set -e
+guard_last="$(tail -n 1 "${GUARD_OUT}")"
+if [[ "${guard_rc}" -eq 0 ]] && [[ "${guard_last}" =~ ^CLEAN\ [0-9]+$ ]]; then
+    printf '%s\n' "${guard_last}" >&2
+    exit 0
+fi
+# The guard prints names escaped and never echoes file content (F2/F8).
+sed 's/^/pre-commit: /' "${GUARD_OUT}" >&2
+if [[ "${guard_rc}" -eq 1 ]] && [[ "${guard_last}" =~ ^REFUSED\ [0-9]+$ ]]; then
+    # No file names or reason tags here: each listed line carries its own.
+    fail "commit refused by ${GUARD_SCRIPT}; fix the path(s) listed above."
+fi
+fail "tree guard failed (exit ${guard_rc}, no clean attestation)"
