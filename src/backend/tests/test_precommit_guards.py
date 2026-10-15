@@ -28,6 +28,8 @@ Home-path vectors are assembled at runtime so this file is not a leak itself.
 """
 from __future__ import annotations
 
+import functools
+import importlib.util
 import io
 import json
 import os
@@ -38,6 +40,7 @@ import sys
 import tarfile
 import unicodedata
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -416,9 +419,27 @@ def _safe_fragment(name: str) -> str:
 # ==========================================================================
 # 1. Tracked tree (deterministic, config-driven)
 # ==========================================================================
-def _tracked_entries() -> list[tuple[str, str]]:
+# #125: the tracked-tree check judges with tree_guard.py's OWN loader and
+# matcher (F10: one matcher for the hook, the workflow and this gate), not a
+# copy. So the runner-home exemption in the pattern file (#384 ruling 4) lets
+# the imported ingester's GitHub-hosted runner paths through here exactly as in
+# hook check 5, and the path-name and ANSI-stripped views apply too. Patterns
+# come from PATTERNS_FILE through that loader; nothing is restated (F13).
+TREE_GUARD_FILE = SCRIPTS_DIR / "governance" / "tree_guard.py"
+
+
+@functools.lru_cache(maxsize=1)
+def _tree_guard() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("_tree_guard_under_test", TREE_GUARD_FILE)
+    assert spec is not None and spec.loader is not None, f"cannot load {TREE_GUARD_FILE.name}"
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _tracked_entries(root: Path = REPO_ROOT) -> list[tuple[str, str]]:
     raw = subprocess.run(
-        ["git", "ls-files", "-s", "-z"], cwd=REPO_ROOT, capture_output=True, check=True
+        ["git", "ls-files", "-s", "-z"], cwd=root, capture_output=True, check=True
     ).stdout
     out: list[tuple[str, str]] = []
     for rec in raw.split(b"\0"):
@@ -429,27 +450,123 @@ def _tracked_entries() -> list[tuple[str, str]]:
     return out
 
 
-def test_tracked_tree_has_no_home_paths() -> None:
-    """Part A acceptance: no tracked blob (or symlink target) has a home path.
+def _tracked_home_offenders(root: Path, patterns_file: Path = PATTERNS_FILE) -> list[str]:
+    """Tracked paths under root whose name, blob or symlink target is a home path.
 
-    Green on this branch: the Part A cleanup removed every tracked home path
-    and the tracked .pip-cache/. Any new tracked leak turns it red.
+    Judged by tree_guard.load_home_patterns + tree_guard.has_home_path, so a
+    bad pattern file raises tree_guard.ConfigError (fail closed).
     """
-    patterns = _home_patterns()
+    guard = _tree_guard()
+    patterns = guard.load_home_patterns(str(patterns_file))
     offenders: list[str] = []
-    for mode, rel in _tracked_entries():
-        p = REPO_ROOT / rel
+    for mode, rel in _tracked_entries(root):
+        p = root / rel
+        text: str | None
         if mode == "120000":
             text = os.readlink(p)
         elif mode == "160000":
-            continue  # gitlink: no blob in this repo
+            text = None  # gitlink: no blob in this repo; its name is still judged
         elif p.is_file():
             text = p.read_bytes().decode("utf-8", "replace")
         else:
             raise AssertionError(f"tracked path missing from worktree: {rel!r}")
-        if _leaks(text, patterns):
+        if guard.has_home_path(rel, patterns) or (text is not None and guard.has_home_path(text, patterns)):
             offenders.append(rel)
+    return offenders
+
+
+def test_tracked_tree_has_no_home_paths() -> None:
+    """Part A acceptance: no tracked blob, symlink target or path name has a home path.
+
+    Green on this branch: the Part A cleanup removed every tracked home path
+    and the tracked .pip-cache/. Any new tracked leak turns it red. After the
+    #125 import it stays green only because the runner exemption in the
+    governance pattern file covers the ingester's runner paths.
+    """
+    offenders = _tracked_home_offenders(REPO_ROOT)
     assert offenders == [], f"{len(offenders)} tracked file(s) contain a user-home path: {offenders[:10]}"
+
+
+def _runner_account() -> str:
+    # The #384 ruling's subject, defined once in the #384 acceptance tests.
+    # Imported lazily: that module imports this one at load time.
+    from tests.test_runner_allowlist_and_installer import RUNNER
+
+    return RUNNER
+
+
+# (row id, tracked path, blob content or None for a symlink, symlink target,
+#  refused?). Every row runs the real tree check on a throwaway index. Built
+# at runtime so this file is not a leak itself.
+def _tree_scan_rows() -> dict[str, tuple[str, str | None, str | None, bool]]:
+    r = _runner_account()
+    rows = [
+        ("runner-linux-home-allowed", "adr.md", "workdir " + home("home", r, "/work/x") + "\n", None, False),
+        ("runner-macos-home-allowed", "t.py", 'P = "' + home("Users", r, "/hostedtoolcache") + '"\n', None, False),
+        ("no-path-allowed", "ok.md", "plain text, no paths\n", None, False),
+        ("personal-macos-home-refused", "leak.md", "see " + home() + "\n", None, True),
+        ("personal-linux-home-refused", "leak.md", "see " + home("home", "alice") + "\n", None, True),
+        ("runner-dotdot-escape-refused", "leak.md", home("home", r, "/../alice/x") + "\n", None, True),
+        ("runner-suffixed-account-refused", "leak.md", home("home", r + "x") + "\n", None, True),
+        ("runner-line-plus-personal-refused", "leak.md", home("home", r) + " " + home() + "\n", None, True),
+        ("ansi-glued-home-refused", "leak.md", "\x1b[8m" + home() + "\n", None, True),
+        ("cf-split-home-refused", "leak.md", "/Us\u200bers/alice/x\n", None, True),
+        ("home-in-path-name-refused", "d " + home("Users", "alice", "/n.md"), "plain\n", None, True),
+        ("symlink-to-home-refused", "lnk", None, home(), True),
+    ]
+    return {row[0]: row[1:] for row in rows}
+
+
+# Static ids, so collection never imports the #384 module (it imports this
+# one); test_tracked_tree_scan_rows_have_both_sides pins them to the table.
+TREE_SCAN_IDS = (
+    "runner-linux-home-allowed", "runner-macos-home-allowed", "no-path-allowed",
+    "personal-macos-home-refused", "personal-linux-home-refused", "runner-dotdot-escape-refused",
+    "runner-suffixed-account-refused", "runner-line-plus-personal-refused", "ansi-glued-home-refused",
+    "cf-split-home-refused", "home-in-path-name-refused", "symlink-to-home-refused",
+)
+
+
+@pytest.mark.parametrize("row_id", TREE_SCAN_IDS)
+def test_tracked_tree_scan_vectors(row_id: str, tmp_path: Path) -> None:
+    """#125: the tracked-tree gate lets the runner home through and refuses a
+    personal home path in content, path name or symlink target, including the
+    runner near misses and Cf/ANSI splits. Green today (tree_guard has both
+    the exemption and the views); red if the gate goes back to its own matcher.
+    """
+    rel, content, target, refused = _tree_scan_rows()[row_id]
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if target is not None:
+        os.symlink(target, path)
+    else:
+        assert content is not None
+        path.write_bytes(content.encode("utf-8"))
+    _git(repo, "add", "-f", "--", rel)
+    assert _tracked_home_offenders(repo) == ([rel] if refused else []), row_id
+
+
+def test_tracked_tree_scan_rows_have_both_sides() -> None:
+    """Contract (QUALITY-BAR 9): the table has allow and refuse rows, and the
+    runner rows sit on both sides."""
+    rows = _tree_scan_rows()
+    assert tuple(rows) == TREE_SCAN_IDS
+    assert {row[3] for row in rows.values()} == {True, False}
+    assert {row[3] for k, row in rows.items() if k.startswith("runner-")} == {True, False}
+    # Each id says its side, so a flipped expectation cannot hide behind a name.
+    assert all(k.endswith("-refused") == row[3] for k, row in rows.items())
+
+
+def test_tracked_tree_scan_bad_pattern_config_fails_closed(tmp_path: Path) -> None:
+    """F13: a comment-only pattern file is unusable; the tree gate raises the
+    guard's ConfigError instead of reporting a clean tree."""
+    bad = tmp_path / "patterns.txt"
+    bad.write_bytes(b"# comments only\n")
+    with pytest.raises(_tree_guard().ConfigError):
+        _tracked_home_offenders(REPO_ROOT, bad)
 
 
 def test_no_tracked_file_is_gitignored() -> None:
