@@ -31,8 +31,18 @@
 #   tree:  every file, symlink and directory name under docs/evidence/;
 #   range: every docs/evidence/ path added, changed or renamed in REV-RANGE.
 #
+# --waiver (range mode only; the CI range step passes it, #125 owner ruling
+# 2026-10-15 "Teach CI the waiver"): skip the lines added by the commits in the
+# scanned checkout's .claude/governance/monorepo-layout.conf
+# waived_history_commits, after scripts/governance/import_guard.py
+# --range-waiver binds them (exact full ids, each in the range, each
+# ingester_tip or an ancestor of it, ingester_tip itself in the range). Every
+# skipped commit is printed by full id. A malformed conf or a waived id that
+# fails the binding is exit 2 and named. Path names are never waived. Without
+# --waiver nothing is skipped (the #125 pre-flight needs the raw scan).
+#
 # Usage: scripts/governance/scan-evidence-leaks.sh [repo-root]
-#        scripts/governance/scan-evidence-leaks.sh --range REV-RANGE [repo-root]
+#        scripts/governance/scan-evidence-leaks.sh --range REV-RANGE [--waiver] [repo-root]
 # Exit: 0 = scanned, no leak; 1 = leak found; 2 = setup / scan error.
 # Needs python3 (stdlib only); override with LEAK_SCAN_PYTHON.
 
@@ -42,6 +52,7 @@ set -euo pipefail
 export LC_ALL=C
 
 RANGE=""
+WAIVER=0
 if [[ "${1:-}" == "--range" ]]; then
     if [[ -z "${2:-}" ]]; then
         printf 'scan-evidence-leaks: --range needs a revision range\n' >&2
@@ -49,6 +60,10 @@ if [[ "${1:-}" == "--range" ]]; then
     fi
     RANGE="$2"
     shift 2
+    if [[ "${1:-}" == "--waiver" ]]; then
+        WAIVER=1
+        shift
+    fi
 fi
 
 ROOT="${1:-$(git rev-parse --show-toplevel)}"
@@ -62,6 +77,8 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MATCHER="${SCRIPT_DIR}/leak_scan.py"
 PYTHON="${LEAK_SCAN_PYTHON:-python3}"
+WAIVER_GUARD="${SCRIPT_DIR}/import_guard.py"
+WAIVER_CONF="${ROOT}/.claude/governance/monorepo-layout.conf"
 if [[ ! -f "${MATCHER}" ]]; then
     printf 'scan-evidence-leaks: matcher missing: %s\n' "${MATCHER}" >&2
     exit 2
@@ -97,7 +114,8 @@ STRIPPED="$(mktemp)"
 ADDED="$(mktemp)"
 LISTING="$(mktemp)"
 NAMES="$(mktemp)"
-trap 'rm -f "${STRIPPED}" "${ADDED}" "${LISTING}" "${NAMES}"' EXIT
+WAIVED="$(mktemp)"
+trap 'rm -f "${STRIPPED}" "${ADDED}" "${LISTING}" "${NAMES}" "${WAIVED}"' EXIT
 
 # scan_names LABEL: run the matcher over ${NAMES} (one path per line) and
 # print "LEAK (LABEL): <path>" per hit. Returns the number of leaking names
@@ -120,6 +138,32 @@ scan_names() {
     fi
 }
 
+if [[ -n "${RANGE}" && "${WAIVER}" -eq 1 ]]; then
+    # Bound waiver (#125): the conf loader and the binding live in
+    # import_guard.py, so the hook and CI read the conf one way. Fail closed:
+    # only rc 0 with a "WAIVER-OK <n>" last line and exactly n WAIVED lines
+    # counts; anything else (malformed conf, unbound id, crash) is exit 2.
+    if [[ ! -f "${WAIVER_GUARD}" ]]; then
+        printf 'scan-evidence-leaks: waiver guard missing: %s\n' "${WAIVER_GUARD}" >&2
+        exit 2
+    fi
+    set +e
+    verdict="$(cd "${ROOT}" && "${PYTHON}" -I "${WAIVER_GUARD}" --range-waiver "${WAIVER_CONF}" "${RANGE}")"
+    rc=$?
+    set -e
+    last="$(printf '%s\n' "${verdict}" | tail -n 1)"
+    printf '%s\n' "${verdict}" | sed -n 's/^WAIVED \([0-9a-f]\{40\}\)$/\1/p' > "${WAIVED}"
+    if [[ "${rc}" -ne 0 || ! "${last}" =~ ^WAIVER-OK\ ([0-9]+)$ \
+            || "${BASH_REMATCH[1]}" -ne "$(wc -l < "${WAIVED}" | tr -d ' ')" ]]; then
+        printf '%s\n' "${verdict}" | grep -v '^WAIVED ' >&2 || true
+        printf 'scan-evidence-leaks: waived_history_commits refused (exit %s); the range scan fails closed\n' "${rc}" >&2
+        exit 2
+    fi
+    while IFS= read -r w; do
+        printf 'scan-evidence-leaks: skipping waived commit %s (waived_history_commits, under ingester_tip)\n' "${w}"
+    done < "${WAIVED}"
+fi
+
 if [[ -n "${RANGE}" ]]; then
     # One git call, written to a file so a git failure (bad range, shallow
     # clone) is exit 2, never mistaken for "no added lines".
@@ -132,11 +176,18 @@ if [[ -n "${RANGE}" ]]; then
     #   <sha7> <path>\t<content>
     # Diff headers (between "diff --git" and the first "@@") are skipped, so a
     # "+++ b/..." header is never treated as content. NULs stripped first.
-    if ! tr -d '\000' < "${STRIPPED}" | awk '
-        /^commit [0-9a-f]+$/ { sha = substr($2, 1, 7); hunk = 0; next }
+    # Lines added by a bound waived commit (full id, exact) are dropped here;
+    # ${WAIVED} is empty without --waiver.
+    if ! tr -d '\000' < "${STRIPPED}" | awk -v waived="${WAIVED}" '
+        BEGIN {
+            while ((r = (getline w < waived)) > 0) skip[w] = 1
+            if (r < 0) exit 2
+            close(waived)
+        }
+        /^commit [0-9a-f]+$/ { sha = substr($2, 1, 7); hunk = 0; waive = ($2 in skip); next }
         /^diff --git / { hunk = 0; file = $NF; sub(/^b\//, "", file); next }
         /^@@/ { hunk = 1; next }
-        hunk && /^\+/ { printf "%s %s\t%s\n", sha, file, substr($0, 2) }
+        hunk && !waive && /^\+/ { printf "%s %s\t%s\n", sha, file, substr($0, 2) }
     ' > "${ADDED}"; then
         printf 'scan-evidence-leaks: could not parse git log for %s\n' "${RANGE}" >&2
         exit 2
