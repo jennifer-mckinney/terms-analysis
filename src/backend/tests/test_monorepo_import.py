@@ -203,6 +203,109 @@ def load_config() -> LayoutConfig:
 
 
 # --------------------------------------------------------------------------
+# PR-2 pending exceptions (owner ruling 2026-10-15: "Pin and fix in PR 2")
+# --------------------------------------------------------------------------
+# PR 1 imports the ingester byte for byte, so four tracked files under
+# ingester_prefix fail three TA-wide tree checks. Each row pins ONE full path
+# to ONE test with ONE reason; PR 2 fixes the file and deletes the row. No
+# prefix skip and no glob: a row excuses only its exact path in its own test.
+# A row whose file is gone, or that excuses no live violation, fails (stale
+# pin); a row outside ingester_prefix (read from the conf, F13) is refused.
+# Test data, not config: no product or hook code reads it, and both conf
+# loaders (parse_config here, scripts/governance/import_guard.py) refuse
+# unknown keys, so the table lives here, once (F10).
+PR2_PACKAGING_TEST = "test_license.py::test_tracked_packaging_metadata_declares_apache_2_0"
+PR2_CLAIM_TEST = "test_license.py::test_no_tracked_file_claims_a_conflicting_licence"
+PR2_GITIGNORED_TEST = "test_precommit_guards.py::test_no_tracked_file_is_gitignored"
+PR2_PIN_TESTS = (PR2_PACKAGING_TEST, PR2_CLAIM_TEST, PR2_GITIGNORED_TEST)
+# Reason -> what PR 2 does about it.
+PR2_PENDING_REASONS: dict[str, str] = {
+    "licence-undeclared": "ingester packaging metadata names no licence and the ingester ships none; "
+    "PR 2 declares the project licence in it",
+    "third-party-notice": "test fixture quoting a third-party legal notice verbatim; "
+    "PR 2 gives it a reasoned claim-scan exclusion",
+    "gitignored-handoff": "ingester session handoff matching the TA root .gitignore; PR 2 untracks it",
+}
+PR2_PENDING_EXCEPTIONS: tuple[tuple[str, str, str], ...] = (
+    ("packages/ingester/pyproject.toml", PR2_PACKAGING_TEST, "licence-undeclared"),
+    ("packages/ingester/tests/fixtures/static/eurlex_legal_notice.yaml", PR2_CLAIM_TEST, "third-party-notice"),
+    ("packages/ingester/SESSION_HANDOFF_2026-07-04_PHASE01-COMPLETE.md", PR2_GITIGNORED_TEST, "gitignored-handoff"),
+    ("packages/ingester/SESSION_HANDOFF_2026-07-04_TASKS-30-33.md", PR2_GITIGNORED_TEST, "gitignored-handoff"),
+)
+_PIN_CHARS = re.compile(r"[!-~]+")  # printable ASCII, no space: refuses Cf, breaks, NUL, look-alikes
+
+
+def _pin_row_problems(row: object, prefix: str) -> list[str]:
+    """Shape problems of one pin row; [] when usable. Messages use ascii()."""
+    if not (isinstance(row, tuple) and len(row) == 3 and all(isinstance(x, str) for x in row)):
+        return [f"pin {ascii(row)[:80]}: not a (path, test, reason) row of strings"]
+    path, test_id, reason = row
+    problems = []
+    if test_id not in PR2_PIN_TESTS:
+        problems.append(f"pin {ascii(path)[:80]}: unknown test {ascii(test_id)[:80]}")
+    if reason not in PR2_PENDING_REASONS:
+        problems.append(f"pin {ascii(path)[:80]}: unknown reason {ascii(reason)[:80]}")
+    if not _PIN_CHARS.fullmatch(path):
+        return [*problems, f"pin {ascii(path)[:80]}: not printable ASCII without spaces"]
+    try:
+        _check_path("pin", path)
+    except ConfigError:
+        return [*problems, f"pin {ascii(path)[:80]}: not a full repo-relative file path (no glob, '.', '..', '//')"]
+    parts, pre = tuple(path.split("/")), tuple(prefix.split("/"))
+    if len(parts) <= len(pre) or parts[: len(pre)] != pre:
+        problems.append(f"pin {ascii(path)[:80]}: outside {prefix}/; only imported ingester files may be pinned")
+    return problems
+
+
+def check_pr2_pins(
+    pins: tuple[tuple[str, str, str], ...], *, prefix: str, tracked: frozenset[str]
+) -> list[str]:
+    """Every problem with the pin table: shape, prefix, duplicates, untracked paths."""
+    problems: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for row in pins:
+        row_problems = _pin_row_problems(row, prefix)
+        problems.extend(row_problems)
+        if row_problems:
+            continue
+        path, test_id, _ = row
+        if (path, test_id) in seen:
+            problems.append(f"pin {path}: listed twice for {test_id}")
+        seen.add((path, test_id))
+        if path not in tracked:
+            problems.append(f"stale PR-2 pin: {path} is not a tracked file; delete its row")
+    return problems
+
+
+def apply_pr2_pins(
+    test_id: str,
+    violations: dict[str, list[str]],
+    pins: tuple[tuple[str, str, str], ...] = PR2_PENDING_EXCEPTIONS,
+) -> list[str]:
+    """What `test_id` must still report: each violation whose exact path is not
+    pinned for this test, plus a problem for every unusable or stale pin of it."""
+    prefix = load_config().ingester_prefix
+    excused: dict[str, str] = {}
+    problems: list[str] = []
+    for row in pins:
+        row_problems = _pin_row_problems(row, prefix)
+        if row_problems:
+            problems.extend(row_problems)
+        elif row[1] == test_id:
+            excused[row[0]] = row[2]
+    for path in sorted(violations):
+        if path not in excused:
+            problems.extend(violations[path])
+    for path, reason in sorted(excused.items()):
+        if not violations.get(path):
+            problems.append(
+                f"stale PR-2 pin: {path} ({reason}) excuses nothing in {test_id}; "
+                "delete its row from PR2_PENDING_EXCEPTIONS"
+            )
+    return problems
+
+
+# --------------------------------------------------------------------------
 # bounded, hermetic subprocess runner
 # --------------------------------------------------------------------------
 class CheckFailure(AssertionError):
@@ -732,6 +835,175 @@ def test_real_repo_config_loads() -> None:
     cfg = load_config()
     assert cfg.ingester_prefix.split("/")[-1]
     assert cfg.follow_probe_paths
+
+
+# --------------------------------------------------------------------------
+# PR-2 pending exceptions: the table itself, then its two readers' rules
+# --------------------------------------------------------------------------
+def _tracked_files() -> frozenset[str]:
+    cfg = load_config()
+    out = subprocess.run(["git", "ls-files", "-z"], cwd=REPO_ROOT, env=hermetic_env(),
+                         capture_output=True, check=True, timeout=cfg.git_timeout_seconds).stdout
+    return frozenset(os.fsdecode(p) for p in out.split(b"\0") if p)
+
+
+def test_pr2_pins_name_tracked_files_under_the_prefix() -> None:
+    """Green today: every pin is a tracked regular file under ingester_prefix, a
+    known test and a known reason; a deleted or renamed file is a stale pin."""
+    cfg = load_config()
+    tracked = _tracked_files()
+    assert check_pr2_pins(PR2_PENDING_EXCEPTIONS, prefix=cfg.ingester_prefix, tracked=tracked) == []
+    for path, _, _ in PR2_PENDING_EXCEPTIONS:
+        full = REPO_ROOT / path
+        assert full.is_file() and not full.is_symlink(), f"pinned {path} is not a regular file in the checkout"
+    print(f"PR-2 pins: {len(PR2_PENDING_EXCEPTIONS)} row(s), {len(tracked)} tracked file(s)")
+
+
+@pytest.mark.parametrize("test_id", PR2_PIN_TESTS)
+def test_pr2_pin_tests_exist(test_id: str) -> None:
+    """Green today: a renamed consumer test would leave its pins pointing at nothing."""
+    module, _, name = test_id.partition("::")
+    mod = importlib.import_module(f"tests.{module.removesuffix('.py')}")
+    assert callable(getattr(mod, name, None)), f"{test_id} does not exist"
+
+
+def _pin_vectors(prefix: str) -> dict[str, tuple[tuple[object, ...], str | None]]:
+    """name -> (rows, fragment of the expected problem, None = accepted)."""
+    q, t, r = PR2_PENDING_EXCEPTIONS[0]
+    top = prefix.split("/")[0]
+    return {
+        "ok-real-row": (((q, t, r),), None),
+        "ok-deep-file": (((f"{prefix}/a/b/c.toml", t, r),), None),
+        "outside-prefix": ((("src/backend/pyproject.toml", t, r),), "outside"),
+        "prefix-itself": (((prefix, t, r),), "outside"),
+        "sibling-prefix": (((f"{prefix}2/pyproject.toml", t, r),), "outside"),
+        "parent-of-prefix": (((f"{top}/pyproject.toml", t, r),), "outside"),
+        "dotdot-escape": (((f"{prefix}/../../src/x.toml", t, r),), "not a full repo-relative"),
+        "dot-segment": (((f"{prefix}/./pyproject.toml", t, r),), "not a full repo-relative"),
+        "trailing-slash": (((f"{prefix}/tests/", t, r),), "not a full repo-relative"),
+        "double-slash": (((f"{prefix}//pyproject.toml", t, r),), "not a full repo-relative"),
+        "absolute": (((f"/{q}", t, r),), "not a full repo-relative"),
+        "glob-star": (((f"{prefix}/*.toml", t, r),), "not a full repo-relative"),
+        "glob-double-star": (((f"{prefix}/**", t, r),), "not a full repo-relative"),
+        "glob-question": (((f"{prefix}/SESSION_HANDOFF_?.md", t, r),), "not a full repo-relative"),
+        "glob-class": (((f"{prefix}/[ps]yproject.toml", t, r),), "not a full repo-relative"),
+        "backslash": (((q.replace("/", "\\"), t, r),), "not a full repo-relative"),
+        "space": (((f"{prefix}/py project.toml", t, r),), "printable ASCII"),
+        "empty-path": ((("", t, r),), "printable ASCII"),
+        "unknown-test": (((q, f"{t}_renamed", r),), "unknown test"),
+        "unknown-reason": (((q, t, "licence-missing"),), "unknown reason"),
+        "reason-trailing-space": (((q, t, r + " "),), "unknown reason"),
+        "untracked-file": (((f"{prefix}/gone.toml", t, r),), "not a tracked file"),
+        "duplicate-row": (((q, t, r), (q, t, r)), "listed twice"),
+        "short-row": (((q, t),), "not a (path, test, reason) row"),
+        "non-string": (((q, t, None),), "not a (path, test, reason) row"),
+    }
+
+
+PIN_VECTOR_NAMES = (
+    "ok-real-row", "ok-deep-file", "outside-prefix", "prefix-itself", "sibling-prefix", "parent-of-prefix",
+    "dotdot-escape", "dot-segment", "trailing-slash", "double-slash", "absolute", "glob-star",
+    "glob-double-star", "glob-question", "glob-class", "backslash", "space", "empty-path", "unknown-test",
+    "unknown-reason", "reason-trailing-space", "untracked-file", "duplicate-row", "short-row", "non-string",
+)
+
+
+@pytest.mark.parametrize("name", PIN_VECTOR_NAMES)
+def test_pr2_pin_vectors(name: str) -> None:
+    """Green today: a pin outside the prefix, a glob, a dotted or untracked path,
+    an unknown test or reason, or a duplicate is refused, with the reason."""
+    prefix = load_config().ingester_prefix
+    rows, fragment = _pin_vectors(prefix)[name]
+    tracked = frozenset(r[0] for r in rows if isinstance(r, tuple) and r and r[0] != f"{prefix}/gone.toml")
+    problems = check_pr2_pins(rows, prefix=prefix, tracked=tracked)  # type: ignore[arg-type]
+    if fragment is None:
+        assert problems == [], problems
+    else:
+        assert len(problems) == 1 and fragment in problems[0], problems
+
+
+def test_pr2_pin_vectors_cover_both_sides() -> None:
+    """Contract (QUALITY-BAR 9): one name list, accept and refuse rows both present."""
+    vectors = _pin_vectors(load_config().ingester_prefix)
+    assert tuple(vectors) == PIN_VECTOR_NAMES
+    assert {fragment is None for _, fragment in vectors.values()} == {True, False}
+
+
+def test_pr2_pins_refuse_generated_hostile_characters() -> None:
+    """Green today: every hostile character, at every position of a real pin, is refused."""
+    prefix = load_config().ingester_prefix
+    q, t, r = PR2_PENDING_EXCEPTIONS[0]
+    chars = HOSTILE_CHARS + ("\ud800", "\udfff", "\u00a0", "\u3000", "\u2215", "\uff0f", "*", "?", "[", "\\", " ")
+    cuts = sorted({1, len(prefix) - 1, len(prefix), len(prefix) + 1, len(q) - 1, len(q)})
+    count = 0
+    for ch in chars:
+        for cut in cuts:
+            hostile = q[:cut] + ch + q[cut:]
+            problems = check_pr2_pins(((hostile, t, r),), prefix=prefix, tracked=frozenset({hostile}))
+            assert problems, f"hostile pin {ascii(hostile)} accepted"
+            count += 1
+    print(f"generated hostile pins refused: {count}")
+
+
+def _real_violations() -> dict[str, dict[str, list[str]]]:
+    """Synthetic findings for exactly the pinned paths, keyed by consumer test."""
+    out: dict[str, dict[str, list[str]]] = {t: {} for t in PR2_PIN_TESTS}
+    for path, test_id, reason in PR2_PENDING_EXCEPTIONS:
+        out[test_id][path] = [f"{path}: {reason} finding"]
+    return out
+
+
+@pytest.mark.parametrize("test_id", PR2_PIN_TESTS)
+def test_apply_pr2_pins_excuses_exactly_the_pinned_paths(test_id: str) -> None:
+    """Green today: the pinned findings are excused and nothing else is reported."""
+    assert apply_pr2_pins(test_id, _real_violations()[test_id]) == []
+
+
+NEW_VIOLATION_LEAVES = {
+    PR2_PACKAGING_TEST: "extra/pyproject.toml",
+    PR2_CLAIM_TEST: "tests/fixtures/static/other_notice.yaml",
+    PR2_GITIGNORED_TEST: "SESSION_HANDOFF_2026-10-15_EXTRA.md",
+}
+
+
+@pytest.mark.parametrize("test_id", PR2_PIN_TESTS)
+def test_apply_pr2_pins_still_reports_a_new_ingester_violation(test_id: str) -> None:
+    """Green today: a second unlicensed, claiming or gitignored file under the
+    prefix is not covered by any pin and is reported."""
+    prefix = load_config().ingester_prefix
+    violations = _real_violations()[test_id]
+    extra = f"{prefix}/{NEW_VIOLATION_LEAVES[test_id]}"
+    violations[extra] = [f"{extra}: new finding"]
+    assert apply_pr2_pins(test_id, violations) == [f"{extra}: new finding"]
+
+
+def test_apply_pr2_pins_do_not_cross_tests() -> None:
+    """Green today: a path pinned for one test is still reported by another."""
+    path = next(p for p, t, _ in PR2_PENDING_EXCEPTIONS if t == PR2_PACKAGING_TEST)
+    violations = _real_violations()[PR2_GITIGNORED_TEST]
+    violations[path] = [f"{path}: matches .gitignore"]
+    assert apply_pr2_pins(PR2_GITIGNORED_TEST, violations) == [f"{path}: matches .gitignore"]
+
+
+@pytest.mark.parametrize("fixed", [{}, []], ids=["path-gone", "no-findings"])
+def test_apply_pr2_pins_flags_a_stale_pin(fixed: object) -> None:
+    """Green today: once PR 2 fixes a pinned file, its leftover row fails."""
+    path = next(p for p, t, _ in PR2_PENDING_EXCEPTIONS if t == PR2_PACKAGING_TEST)
+    violations = {} if fixed == {} else {path: []}
+    problems = apply_pr2_pins(PR2_PACKAGING_TEST, violations)
+    assert len(problems) == 1 and problems[0].startswith(f"stale PR-2 pin: {path} "), problems
+
+
+def test_apply_pr2_pins_refuses_a_pin_outside_the_prefix() -> None:
+    """Green today: a row outside the prefix excuses nothing and is reported."""
+    outside = "src/backend/pyproject.toml"
+    rows = PR2_PENDING_EXCEPTIONS + ((outside, PR2_PACKAGING_TEST, "licence-undeclared"),)
+    violations = _real_violations()[PR2_PACKAGING_TEST]
+    violations[outside] = [f"{outside}: declares no licence"]
+    problems = apply_pr2_pins(PR2_PACKAGING_TEST, violations, rows)
+    assert f"{outside}: declares no licence" in problems
+    assert any("outside" in p and outside in p for p in problems), problems
+    assert len(problems) == 2, problems
 
 
 # --------------------------------------------------------------------------

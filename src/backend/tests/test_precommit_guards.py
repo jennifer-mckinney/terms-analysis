@@ -46,6 +46,8 @@ from typing import Any
 import pytest
 import yaml
 
+from tests.test_monorepo_import import PR2_GITIGNORED_TEST, apply_pr2_pins
+
 # --- Paths resolved once, before any env is altered (AGENT-LANES probes). ---
 REPO_ROOT = Path(__file__).resolve().parents[3]
 HOOKS_DIR = REPO_ROOT / ".githooks"
@@ -570,13 +572,16 @@ def test_tracked_tree_scan_bad_pattern_config_fails_closed(tmp_path: Path) -> No
 
 
 def test_no_tracked_file_is_gitignored() -> None:
-    """Covers the committed src/backend/.pip-cache/ (231 files on main)."""
+    """Covers the committed src/backend/.pip-cache/ (231 files on main). The two
+    imported ingester handoffs are pinned PR-2 exceptions (#125); any other
+    tracked-and-ignored file, under the ingester prefix or not, still fails."""
     out = subprocess.run(
         ["git", "ls-files", "-ci", "--exclude-standard", "-z"], cwd=REPO_ROOT,
         capture_output=True, check=True,
     ).stdout
-    ignored = [os.fsdecode(x) for x in out.split(b"\0") if x]
-    assert ignored == [], f"{len(ignored)} tracked file(s) match .gitignore, e.g. {ignored[:3]}"
+    ignored = sorted({os.fsdecode(x) for x in out.split(b"\0") if x})
+    left = apply_pr2_pins(PR2_GITIGNORED_TEST, {rel: [f"{ascii(rel)}: matches .gitignore"] for rel in ignored})
+    assert left == [], f"{len(left)} tracked-and-ignored problem(s), e.g. {left[:3]}"
 
 
 @pytest.mark.parametrize("family,vector", BLOCK_ROWS, ids=[f"{f}:{ascii(v)}" for f, v in BLOCK_ROWS])
