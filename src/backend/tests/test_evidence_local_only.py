@@ -8,6 +8,9 @@ Card scope (issue #367):
    hook (check 1) and the gitignore-enforcement workflow both require it.
 4. The CI evidence-leak-scan job stays as the backstop for force-adds.
 5. No doc or agent brief in the repo tells agents to commit evidence.
+6. (#125, owner 2026-10-15 "Teach CI the waiver") the range step skips
+   exactly the full commit ids in the monorepo conf's waived_history_commits,
+   and fails closed on a malformed waiver.
 
 Behaviour over text: the hook cases run the real ``.githooks/pre-commit`` and
 the CI cases run the real ``run:`` steps of the workflows, through the #145
@@ -30,17 +33,29 @@ the manifest; the regen needs owner approval.
 
 from __future__ import annotations
 
+import hashlib
+import importlib.util
 import os
 import re
 import shutil
 import subprocess
+import sys
 import unicodedata
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 import yaml
 
+from tests.test_monorepo_import import (  # noqa: F401  (real_repo is a fixture)
+    CONFIG_REL,
+    WAIVER_KEY,
+    ConfigError,
+    Repo,
+    load_config,
+    parse_config,
+    real_repo,
+)
 from tests.test_precommit_guards import (  # noqa: F401  (sandbox is a fixture)
     GITIGNORE_FILE,
     GOV_DIR,
@@ -361,14 +376,20 @@ def test_ci_evidence_scan_job_is_pinned() -> None:
     assert gated == [], f"evidence-scan steps can be skipped: {gated}"
 
 
-def _run_evidence_job(tree: Path, ctx: dict[str, str]) -> list[tuple[str, int, str]]:
-    """Run the real `run:` steps of ci.yml's evidence-scan job in `tree`."""
+TIP_SCAN_RUN = 'bash scripts/governance/scan-evidence-leaks.sh "${GITHUB_WORKSPACE}"'
+
+
+def _run_evidence_job(tree: Path, ctx: dict[str, str], *, tip: bool = True) -> list[tuple[str, int, str]]:
+    """Run the real `run:` steps of ci.yml's evidence-scan job in `tree`.
+    tip=False drops the tip-scan step (the real checkout has untracked evidence)."""
     def resolve(m: re.Match[str]) -> str:
         assert m.group(1) in ctx, f"evidence-job harness: unsupported expression {m.group(1)!r}"
         return ctx[m.group(1)]
 
     run_steps = [s for s in _ci()["jobs"][EVIDENCE_JOB]["steps"] if "run" in s]
     assert len(run_steps) >= 2, f"evidence-scan has {len(run_steps)} run step(s); tip and range scans expected"
+    if not tip:
+        run_steps = [s for s in run_steps if s["run"].strip() != TIP_SCAN_RUN]
     results: list[tuple[str, int, str]] = []
     for step in run_steps:
         env = _env({"GITHUB_WORKSPACE": str(tree), "GITHUB_ACTIONS": "true", "CI": "true"})
@@ -470,6 +491,427 @@ def test_ci_evidence_scan_passes_on_card_untrack(tmp_path: Path) -> None:
     assert [rc for _, rc, _ in results] == [0] * len(results), results
     assert "no docs/evidence/ directory; scanned 0 files" in results[0][2], results[0][2]
     assert "1 commit(s) touching docs/evidence/, 0 added line(s)" in results[-1][2], results[-1][2]
+
+
+# --------------------------------------------------------------------------
+# 4b. #125: the range step honours waived_history_commits, exactly
+# --------------------------------------------------------------------------
+# PR 1 imports ingester history in which three commits added a local path
+# under docs/evidence/. The conf lists their full ids; the range step must skip
+# exactly those commits, name each one it skipped (no silent pass, F5), still
+# fail every other leaking commit, and refuse a waiver it cannot parse.
+RANGE_CLEAN = "no local machine paths"  # the scanner's range success sentinel
+IMPORT_GUARD_PY = SCRIPTS_DIR / "governance" / "import_guard.py"
+
+
+def _push_ctx(base: str, head: str) -> dict[str, str]:
+    return {
+        "github.event_name": "push",
+        "github.event.pull_request.base.sha": "",
+        "github.event.pull_request.head.sha": "",
+        "github.event.before": base,
+        "github.sha": head,
+    }
+
+
+EVENT_CTX = {"pull_request": _pr_ctx, "push": _push_ctx}
+
+
+TIP_KEY = "ingester_tip"  # the pinned import every waived commit must sit under
+
+
+def _conf_with(waiver: list[bytes] | None, tip: str | None = None) -> bytes:
+    """The real conf with its waiver line(s) replaced; None drops the key.
+
+    `tip` re-pins ingester_tip (a sandbox has none of the real ids); every
+    other key keeps the real conf's value."""
+    lines = [ln for ln in (REPO_ROOT / CONFIG_REL).read_bytes().split(b"\n")
+             if not ln.startswith(WAIVER_KEY.encode() + b"=")]
+    if tip is not None:
+        key = TIP_KEY.encode() + b"="
+        assert sum(ln.startswith(key) for ln in lines) == 1, f"{CONFIG_REL} has no single {TIP_KEY}"
+        lines = [key + tip.encode() if ln.startswith(key) else ln for ln in lines]
+    body = b"\n".join(ln for ln in lines if ln) + b"\n"
+    return body + b"".join(WAIVER_KEY.encode() + b"=" + w + b"\n" for w in (waiver or []))
+
+
+def _filler(n: int) -> list[str]:
+    """n full ids that name no commit in any sandbox (derived, not literals)."""
+    return [hashlib.sha1(f"filler-{i}".encode()).hexdigest() for i in range(n)]
+
+
+ConfBuilder = Callable[[dict[str, str], str], "bytes | None"]
+TIP = "@tip"  # label of the last commit before the conf commit (the sandbox import tip)
+
+
+def _waiving(*labels: str) -> ConfBuilder:
+    """The real conf, waiving the commits of `labels` by full id, with
+    ingester_tip pinned to the sandbox import tip (every step under it)."""
+    return lambda shas, base: _conf_with([" ".join(shas[label] for label in labels).encode()], shas[TIP])
+
+
+def _waiver_history(tmp_path: Path, steps: list[str], conf: ConfBuilder) -> tuple[Path, str, dict[str, str]]:
+    """Sandbox history: base, one commit per step, a tip scrub, then the conf.
+
+    "leak:<file>" adds docs/evidence/<file> with a home path; "clean:<file>"
+    adds it with clean text; "scrub" removes docs/evidence/; "side" makes a
+    commit off HEAD that HEAD never reaches (an unmerged tip); "chain:<n>"
+    adds n empty commits in one fast-import and records their ids, space
+    separated, under its label. A "#n" suffix
+    makes a repeated step a distinct label. shas[TIP] is the commit before the
+    conf commit. `conf(shas, base)` gives the head's conf bytes (None deletes
+    the file); the PR head carries it, as in PR 1. Returns (tree, base,
+    {label: full sha}).
+    """
+    tree = _scan_repo(tmp_path, {})
+    base = _head(tree)
+    shas: dict[str, str] = {}
+    for step in steps:
+        assert step not in shas, f"duplicate step label {step}"
+        kind, _, name = step.partition(":")
+        if kind == "chain":
+            shas[step] = " ".join(_chain(tree, int(name.split("#")[0])))
+            continue
+        if kind.startswith("side"):
+            shas[step] = _git(tree, "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", step).stdout.decode().strip()
+            continue
+        if kind.startswith("scrub"):
+            _git(tree, "rm", "-q", "-r", "--", EVIDENCE_DIR)
+        else:
+            rel = EVIDENCE_DIR + name.split("#")[0]
+            _write(tree, rel, FORCE_ADDED["md"] if kind == "leak" else b"clean <repo>/x\n")
+            _git(tree, "add", "-f", "--", rel)
+        shas[step] = _commit(tree, step)
+    if _git(tree, "ls-files", "--", EVIDENCE_DIR).stdout:
+        _git(tree, "rm", "-q", "-r", "--", EVIDENCE_DIR)
+        _commit(tree, "scrub tip")
+    shas[TIP] = _head(tree)
+    data = conf(shas, base)
+    if data is None:
+        _git(tree, "rm", "-q", "--", CONFIG_REL)
+    else:
+        _write(tree, CONFIG_REL, data)
+        _git(tree, "add", "-f", "--", CONFIG_REL)
+    _commit(tree, "conf")
+    return tree, base, shas
+
+
+def _chain(tree: Path, n: int) -> list[str]:
+    """n empty commits on the current branch, in one fast-import (F6: size
+    without n processes). Same tree as HEAD, so the checkout is unchanged."""
+    branch = _git(tree, "symbolic-ref", "HEAD").stdout.decode().strip()
+    parent = _head(tree)
+    stream = "".join(
+        f"commit {branch}\nmark :{i + 1}\ncommitter t <t@example.invalid> 0 +0000\ndata 6\nchain\n"
+        + (f"from {parent}\n" if i == 0 else "") + "\n"
+        for i in range(n))
+    marks = tree.parent / "chain.marks"
+    subprocess.run(["git", "-C", str(tree), "fast-import", "--quiet", f"--export-marks={marks}"],
+                   input=stream.encode(), check=True, capture_output=True)
+    ids: dict[int, str] = {}
+    for ln in marks.read_text().splitlines():
+        mark, sha = ln.split(" ")
+        ids[int(mark[1:])] = sha
+    assert len(ids) == n and _head(tree) == ids[n], "fast-import did not extend the branch"
+    return [ids[i + 1] for i in range(n)]
+
+
+def _head(tree: Path) -> str:
+    return _git(tree, "rev-parse", "HEAD").stdout.decode().strip()
+
+
+def _range_out(results: list[tuple[str, int, str]]) -> tuple[int, str]:
+    assert results and all(rc == 0 for _, rc, _ in results[:-1]), results
+    return results[-1][1], results[-1][2]
+
+
+def _assert_safe(out: str) -> None:
+    assert LEAK not in out, "CI output re-leaks the home path (F8)"
+    bad = sorted({ch for ch in out if not (" " <= ch <= "~" or ch == "\n")})
+    assert bad == [], f"raw non-printable characters in CI output: {[ascii(c) for c in bad]}"
+
+
+@pytest.mark.parametrize("event", EVENT_CTX)
+def test_ci_range_skips_a_waived_commit(tmp_path: Path, event: str) -> None:
+    """RED today: the only leaking commit is waived by full id, so the range
+    step passes with its clean sentinel and names the commit it skipped."""
+    tree, base, shas = _waiver_history(tmp_path, ["leak:run.md", "scrub"], _waiving("leak:run.md"))
+    rc, out = _range_out(_run_evidence_job(tree, EVENT_CTX[event](base, _head(tree))))
+    assert rc == 0, f"waived commit still fails the range step (rc={rc}): {out[-600:]!r}"
+    assert RANGE_CLEAN in out, out[-600:]
+    assert shas["leak:run.md"][:7] in out, f"range step does not name the waived commit: {out[-600:]!r}"
+    _assert_safe(out)
+
+
+@pytest.mark.parametrize("order", ["unwaived-first", "unwaived-last"])
+def test_ci_range_still_fails_an_unwaived_leak(tmp_path: Path, order: str) -> None:
+    """RED today (the waived commit is still reported): waiving one commit
+    skips it and leaves every other leaking commit in the range failing,
+    before or after it."""
+    waived, other = ["leak:waived.md", "scrub#1"], ["leak:other.md", "scrub#2"]
+    steps = other + waived if order == "unwaived-first" else waived + other
+    tree, base, shas = _waiver_history(tmp_path, steps, _waiving("leak:waived.md"))
+    rc, out = _range_out(_run_evidence_job(tree, _pr_ctx(base, _head(tree))))
+    assert rc == 1, f"rc={rc}: {out[-600:]!r}"
+    assert f"LEAK (history): {shas['leak:other.md'][:7]} {EVIDENCE_DIR}other.md" in out, out[-600:]
+    assert f"LEAK (history): {shas['leak:waived.md'][:7]} " not in out, "waived commit still reported"
+    assert RANGE_CLEAN not in out
+    _assert_safe(out)
+
+
+def test_ci_range_waiver_does_not_cover_a_replayed_line(tmp_path: Path) -> None:
+    """RED today (the waived commit is still reported): the waiver names a
+    commit, not a line; a later commit re-adding the same leaking line to the
+    same file still fails."""
+    steps = ["leak:run.md", "scrub", "leak:run.md#again", "scrub#again"]
+    tree, base, shas = _waiver_history(tmp_path, steps, _waiving("leak:run.md"))
+    rc, out = _range_out(_run_evidence_job(tree, _pr_ctx(base, _head(tree))))
+    assert rc == 1, f"rc={rc}: {out[-600:]!r}"
+    assert f"LEAK (history): {shas['leak:run.md#again'][:7]} {EVIDENCE_DIR}run.md" in out, out[-600:]
+    assert f"LEAK (history): {shas['leak:run.md'][:7]} " not in out, "waived commit still reported"
+
+
+def test_ci_range_waives_among_many_entries(tmp_path: Path) -> None:
+    """RED today (F6, size): the waived id buried among thousands of other
+    waived full ids, before and after it, is still matched and skipped. The
+    others are real commits under ingester_tip, so the bound waiver accepts
+    every one (a made-up id would rightly fail closed)."""
+    steps = ["chain:1000#a", "leak:run.md", "chain:1000#b", "scrub"]
+    def conf(shas: dict[str, str], base: str) -> bytes:
+        ids = [shas["chain:1000#a"], shas["leak:run.md"], shas["chain:1000#b"]]
+        return _conf_with([" ".join(ids).encode()], shas[TIP])
+
+    tree, base, shas = _waiver_history(tmp_path, steps, conf)
+    rc, out = _range_out(_run_evidence_job(tree, _pr_ctx(base, _head(tree))))
+    assert rc == 0 and RANGE_CLEAN in out, f"rc={rc}: {out[-600:]!r}"
+    assert shas["leak:run.md"][:7] in out
+    _assert_safe(out)
+
+
+# name -> waiver line(s) built from (subject commit, another full id). Every
+# entry is malformed: a short or prefix id, a revision expression, a bad
+# separator, a hostile character or a duplicate. Built from the commits under
+# test, so a prefix-matching or lenient reader would waive the subject.
+def _malformed_waivers(s: str, o: str) -> dict[str, list[bytes]]:
+    e = str.encode
+    return {
+        "short-7": [e(s[:7])],
+        "short-12": [e(s[:12])],
+        "prefix-39": [e(s[:39])],
+        "uppercase": [e(s.upper())],
+        "hex-41": [e(s + "0")],
+        "sha256-length": [e(s + "0" * 24)],
+        "caret-rev": [e("^" + s)],
+        "rev-range": [e(f"{o}..{s}")],
+        "symbolic-head": [b"HEAD"],
+        "glob": [b"*"],
+        "double-space": [e(f"{s}  {o}")],
+        "leading-space": [e(f" {s}")],
+        "trailing-space": [e(f"{s} ")],
+        "comma": [e(f"{s},{o}")],
+        "tab": [e(f"{s}\t{o}")],
+        "cr": [e(f"{s}\r")],
+        "nul": [e(f"{s}\0")],
+        "nbsp": [f"{s}\u00a0{o}".encode()],
+        "zwsp": [f"{s}\u200b".encode()],
+        "bom": [f"\ufeff{s}".encode()],
+        "cyrillic-a": [f"{s[:-1]}\u0430".encode()],
+        "fullwidth-digit": [f"{s[:-1]}\uff10".encode()],
+        "lone-surrogate": [f"{s}\ud800".encode("utf-8", "surrogatepass")],
+        "invalid-utf8": [e(s) + b"\xff"],
+        "duplicate-id": [e(f"{s} {s}")],
+        "duplicate-key": [e(s), e(o)],
+    }
+
+
+MALFORMED_NAMES = tuple(_malformed_waivers("0" * 40, "1" * 40))
+VALID_WAIVERS = {
+    "single": lambda s, o: [s.encode()],
+    "two": lambda s, o: [f"{o} {s}".encode()],
+    "many": lambda s, o: [" ".join(_filler(50) + [s]).encode()],
+}
+
+
+def _import_guard() -> Any:
+    spec = importlib.util.spec_from_file_location("import_guard_for_125_waiver", IMPORT_GUARD_PY)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod  # its dataclasses resolve their module by name
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_waiver_vectors_contract(tmp_path: Path) -> None:
+    """Contract, green today: both conf readers refuse every malformed vector
+    and accept every valid one, on the conf's own waived ids (F13: read, not
+    restated), so the CI step has a reader to agree with."""
+    cfg = load_config()
+    assert cfg.waived_history_commits, f"{CONFIG_REL} waives nothing; PR 1 needs its waiver"
+    s, o = cfg.waived_history_commits[0], cfg.app_anchor
+    guard = _import_guard()
+    assert set(MALFORMED_NAMES).isdisjoint(VALID_WAIVERS) and MALFORMED_NAMES and VALID_WAIVERS
+    bad = _malformed_waivers(s, o)
+    assert tuple(bad) == MALFORMED_NAMES
+    for name, lines in bad.items():
+        data = _conf_with(lines)
+        with pytest.raises(ConfigError):
+            parse_config(data)
+        (tmp_path / "c.conf").write_bytes(data)
+        with pytest.raises(guard.Refusal):
+            guard.load_conf(tmp_path / "c.conf")
+    for name, build in VALID_WAIVERS.items():
+        data = _conf_with(build(s, o))
+        assert s in parse_config(data).waived_history_commits, name
+        (tmp_path / "c.conf").write_bytes(data)
+        assert guard.load_conf(tmp_path / "c.conf") is not None, name
+
+
+@pytest.mark.parametrize("subject", ["leaking", "clean"])
+@pytest.mark.parametrize("name", MALFORMED_NAMES)
+def test_ci_range_refuses_a_malformed_waiver(tmp_path: Path, name: str, subject: str) -> None:
+    """Fail closed. On a leaking range (green today) a short, prefix or
+    look-alike id must not waive the leak; on a clean range (RED today) the
+    step must still fail and name the key or the conf, never pass a conf it
+    cannot parse."""
+    step = "leak:run.md" if subject == "leaking" else "clean:run.md"
+    def conf(shas: dict[str, str], base: str) -> bytes:
+        return _conf_with(_malformed_waivers(shas[step], base)[name], shas[TIP])
+
+    tree, base, _ = _waiver_history(tmp_path, [step, "scrub"], conf)
+    results = _run_evidence_job(tree, _pr_ctx(base, _head(tree)))
+    rc, out = results[-1][1], "".join(o for _, _, o in results)
+    assert rc != 0, f"[{name}] malformed waiver accepted: {out[-600:]!r}"
+    assert RANGE_CLEAN not in out, f"[{name}] range reported clean"
+    if subject == "clean":  # the refusal says what to fix: the key, or the conf file
+        assert WAIVER_KEY in out or CONFIG_REL in out, f"[{name}] refusal names neither: {out[-600:]!r}"
+    _assert_safe(out)
+
+
+@pytest.mark.parametrize("conf", ["key-missing", "key-empty", "file-missing"])
+def test_ci_range_without_a_waiver_waives_nothing(tmp_path: Path, conf: str) -> None:
+    """Green today: no key, an empty key or no conf at all waives nothing;
+    the leaking commit fails the range step."""
+    def build(shas: dict[str, str], base: str) -> bytes | None:
+        return {"key-missing": _conf_with(None, shas[TIP]), "key-empty": _conf_with([b""], shas[TIP]),
+                "file-missing": None}[conf]
+
+    tree, base, shas = _waiver_history(tmp_path, ["leak:run.md", "scrub"], build)
+    rc, out = _range_out(_run_evidence_job(tree, _pr_ctx(base, _head(tree))))
+    assert rc != 0 and RANGE_CLEAN not in out, f"[{conf}] rc={rc}: {out[-600:]!r}"
+    if conf != "file-missing":
+        assert f"LEAK (history): {shas['leak:run.md'][:7]} {EVIDENCE_DIR}run.md" in out, out[-600:]
+    assert LEAK not in out
+
+
+@pytest.mark.parametrize("conf", ["key-missing", "key-empty"])
+def test_ci_range_without_a_waiver_passes_a_clean_range(tmp_path: Path, conf: str) -> None:
+    """Green today (positive control): an absent or empty waiver is not an
+    error; a clean range still passes with its sentinel."""
+    def build(shas: dict[str, str], base: str) -> bytes:
+        return _conf_with(None if conf == "key-missing" else [b""], shas[TIP])
+
+    tree, base, _ = _waiver_history(tmp_path, ["clean:run.md", "scrub"], build)
+    results = _run_evidence_job(tree, _pr_ctx(base, _head(tree)))
+    assert [rc for _, rc, _ in results] == [0] * len(results), results
+    assert RANGE_CLEAN in results[-1][2]
+
+
+# Lead ruling 2026-10-15 (concern 1): the PR head carries the conf, so a
+# waiver is bound to the pinned import. A waived id counts only if it is
+# ingester_tip or an ancestor of it, and ingester_tip is in the scanned range.
+# A waived id outside the pinned history fails closed and is named; a PR can
+# waive its own commit only by re-pinning ingester_tip, which the import guard
+# and review see.
+OUTSIDE_PIN = {
+    # name -> (steps, waived labels); ingester_tip is pinned at "scrub#1"
+    "pr-leak-with-import": (["leak:imported.md", "scrub#1", "leak:pr.md", "scrub#2"],
+                            ("leak:imported.md", "leak:pr.md")),
+    "pr-leak-alone": (["clean:imported.md", "scrub#1", "leak:pr.md", "scrub#2"], ("leak:pr.md",)),
+    "pr-clean-commit": (["clean:imported.md", "scrub#1", "clean:pr.md", "scrub#2"],
+                        ("clean:imported.md", "clean:pr.md")),
+}
+
+
+@pytest.mark.parametrize("name", OUTSIDE_PIN)
+def test_ci_range_refuses_a_waiver_outside_the_pinned_import(tmp_path: Path, name: str) -> None:
+    """RED today: a commit authored in the PR range, after ingester_tip,
+    listed in the waiver fails closed (rc != 0, no clean sentinel) and is
+    named, whether or not it leaks. Without the ancestry check a PR could
+    waive its own leak."""
+    steps, waived = OUTSIDE_PIN[name]
+    def conf(shas: dict[str, str], base: str) -> bytes:
+        return _conf_with([" ".join(shas[label] for label in waived).encode()], shas["scrub#1"])
+
+    tree, base, shas = _waiver_history(tmp_path, steps, conf)
+    outside = shas[waived[-1]]
+    results = _run_evidence_job(tree, _pr_ctx(base, _head(tree)))
+    rc, out = results[-1][1], "".join(o for _, _, o in results)
+    assert rc != 0, f"[{name}] waiver outside ingester_tip accepted: {out[-600:]!r}"
+    assert RANGE_CLEAN not in out, f"[{name}] range reported clean"
+    assert outside[:7] in out, f"[{name}] refusal does not name {outside[:7]}: {out[-600:]!r}"
+    _assert_safe(out)
+
+
+@pytest.mark.parametrize("missing", ["waived-id", "ingester-tip"])
+def test_ci_range_refuses_a_waiver_naming_no_commit(tmp_path: Path, missing: str) -> None:
+    """RED today: a well-formed full id that names no object in the clone,
+    as a waived commit or as ingester_tip, fails closed on a clean range and
+    is named; it never waives anything."""
+    ghost = _filler(1)[0]
+    def conf(shas: dict[str, str], base: str) -> bytes:
+        if missing == "waived-id":
+            return _conf_with([f"{shas['clean:run.md']} {ghost}".encode()], shas[TIP])
+        return _conf_with([shas["clean:run.md"].encode()], ghost)
+
+    tree, base, _ = _waiver_history(tmp_path, ["clean:run.md", "scrub"], conf)
+    results = _run_evidence_job(tree, _pr_ctx(base, _head(tree)))
+    rc, out = results[-1][1], "".join(o for _, _, o in results)
+    assert rc != 0, f"[{missing}] unresolvable id accepted: {out[-600:]!r}"
+    assert RANGE_CLEAN not in out, f"[{missing}] range reported clean"
+    assert ghost[:7] in out, f"[{missing}] refusal does not name {ghost[:7]}: {out[-600:]!r}"
+    _assert_safe(out)
+
+
+def test_ci_range_does_not_waive_under_an_unmerged_tip(tmp_path: Path) -> None:
+    """Green today (guard): ingester_tip pinned to a commit the PR head never
+    reaches is not in the scanned range, so its ancestors are not waived; the
+    leaking commit still fails the range step. Without the in-range check a
+    re-pin to an unmerged side commit would waive the leak."""
+    steps = ["leak:run.md", "side", "scrub"]
+    def conf(shas: dict[str, str], base: str) -> bytes:
+        return _conf_with([shas["leak:run.md"].encode()], shas["side"])
+
+    tree, base, shas = _waiver_history(tmp_path, steps, conf)
+    head = _head(tree)
+    assert _git(tree, "merge-base", "--is-ancestor", shas["side"], head, check=False).returncode == 1
+    results = _run_evidence_job(tree, _pr_ctx(base, head))
+    rc, out = results[-1][1], "".join(o for _, _, o in results)
+    assert rc != 0 and RANGE_CLEAN not in out, f"unmerged ingester_tip waived the leak: {out[-600:]!r}"
+    assert shas["leak:run.md"][:7] in out, out[-600:]
+    _assert_safe(out)
+
+
+def test_ci_range_passes_on_this_repo_with_the_conf_waiver(real_repo: Repo) -> None:
+    """RED today (091f29b-class failure): the real range step, over the PR-1
+    import (app_anchor..HEAD, both from git and the conf), passes, and names
+    every waived commit. The ids are read from the conf, never restated."""
+    cfg = load_config()
+    assert cfg.waived_history_commits, f"{CONFIG_REL} waives nothing"
+    head = _git(REPO_ROOT, "rev-parse", "HEAD").stdout.decode().strip()
+    for sha in cfg.waived_history_commits:  # every waived id is a real commit in the range
+        assert _git(REPO_ROOT, "merge-base", "--is-ancestor", sha, head, check=False).returncode == 0, sha
+        assert _git(REPO_ROOT, "merge-base", "--is-ancestor", sha, cfg.app_anchor, check=False).returncode == 1, sha
+        assert _git(REPO_ROOT, "merge-base", "--is-ancestor", sha, cfg.ingester_tip, check=False).returncode == 0, sha
+    # the pinned import itself is in the scanned range (lead ruling 2026-10-15)
+    assert _git(REPO_ROOT, "merge-base", "--is-ancestor", cfg.ingester_tip, head, check=False).returncode == 0
+    assert _git(REPO_ROOT, "merge-base", "--is-ancestor", cfg.ingester_tip, cfg.app_anchor, check=False).returncode == 1
+    results = _run_evidence_job(REPO_ROOT, _pr_ctx(cfg.app_anchor, head), tip=False)
+    rc, out = _range_out(results)
+    assert rc == 0, f"range step rc={rc}: {out[-800:]!r}"
+    assert RANGE_CLEAN in out, out[-800:]
+    missing = [sha[:7] for sha in cfg.waived_history_commits if sha[:7] not in out]
+    assert missing == [], f"range step does not name waived commit(s) {missing}"
+    _assert_safe(out)
 
 
 def test_evidence_dir_is_one_value_across_guards() -> None:

@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv*
+venv/
+
+# OS
+.DS_Store
+*.swp
+
+# Env
+.env
+
+# Build / coverage
+.coverage
+coverage.xml
+htmlcov/
+out/
+.mypy_cache/
+.ruff_cache/
+
+# State files (runtime, not tracked)
+state/*.json
+!state/.gitkeep
+
+# VCR cassette PII scrub logs
+tests/fixtures/cassettes/*/pii-scrub.log
+
+# Agent worktrees (terms-analysis#123; roots: .claude/governance/worktree-roots.txt)
+/.claude/worktrees/
+
+# Evidence logs stay local; tracked evidence blocks the terms-analysis monorepo import (#120)
+/docs/evidence/

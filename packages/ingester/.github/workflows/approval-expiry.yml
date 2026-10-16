@@ -1,0 +1,120 @@
+name: Approval Expiry Watcher
+on:
+  schedule:
+    - cron: '0 6 * * *'   # 6 AM UTC daily
+  workflow_dispatch:        # allow manual trigger from Actions UI or gh CLI
+
+permissions:
+  contents: read
+  issues: write
+
+# Explicit pipefail: GitHub's default `bash -e` lets `cmd | tail` hide cmd's failure (terms-analysis#90).
+defaults:
+  run:
+    shell: bash -eo pipefail {0}
+
+jobs:
+  approval-expiry:
+    runs-on: ubuntu-latest
+    env:
+      ISSUE_LABEL: approval-expiry
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false  # no step needs git credentials; keep the token out of .git/config
+
+      # Fail loudly up front when the runner lacks gh or the issue label is
+      # missing, instead of failing only when an issue must be filed (#21).
+      - name: Preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then
+            echo "::error::gh CLI not found on the runner; gh ships on the ubuntu-latest image, so the runner image has changed" >&2
+            exit 1
+          fi
+          if ! gh api "repos/${GITHUB_REPOSITORY}/labels/${ISSUE_LABEL}" --silent; then
+            echo "::error::Issue label '${ISSUE_LABEL}' could not be read (missing, or the token lacks access); create it: gh label create ${ISSUE_LABEL}" >&2
+            exit 1
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version-file: .python-version
+
+      - name: Install
+        run: |
+          # Install only if pyproject.toml is present; skip on bare checkouts.
+          if [ -f pyproject.toml ]; then
+            python3 -m venv .venv
+            source .venv/bin/activate
+            pip install -e '.[dev]' 2>&1 | tail -5
+          else
+            echo "pyproject.toml not found; skipping install"
+          fi
+
+      - name: Run approval check
+        id: approval_check
+        run: |
+          if [ -f .venv/bin/activate ]; then
+            source .venv/bin/activate
+          fi
+          # Record the checker's exit code for the issue step's text (#13), then exit with
+          # it, so this step's outcome is still the checker's own (terms-analysis#173).
+          rc=0
+          python scripts/check_approvals.py --approvals-dir config/approvals || rc=$?
+          echo "rc=${rc}" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      # Scoped to the check step's own outcome: a checkout, Preflight or Install
+      # failure leaves approval_check skipped, so no misleading expiry alert opens.
+      # Those infra failures stay plain red, which GitHub notifies on (terms-analysis#90, #21).
+      - name: Open issue on expiry
+        if: failure() && steps.approval_check.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECK_RC: ${{ steps.approval_check.outputs.rc }}
+          # check_approvals.py's exit codes, defined once here: 1 is a failing approval
+          # (expired, malformed, undated or bad hash), 2 is its EXIT_CONFIG. The checker
+          # cannot be imported here (the step must work whatever it contains), so the
+          # real-checker tests in tests/unit/test_approval_expiry_workflow_exit.py pin
+          # these against its actual exit codes.
+          EXIT_APPROVAL_FAILED: '1'
+          EXIT_CONFIG: '2'
+        run: |
+          : "${EXIT_APPROVAL_FAILED:?}" "${EXIT_CONFIG:?}"
+          # The body depends on the checker's exit code (#13). It never carries checker
+          # output: the step log has the detail.
+          case "$CHECK_RC" in
+            "$EXIT_APPROVAL_FAILED")
+              cause="One or more APPROVAL.yaml files have expired or are failing validation (malformed, undated, or a signed-artifact hash mismatch)."
+              action="Expired or failing approvals block ingest for gated sources (HR9). Review each affected source, obtain a renewed or corrected approval, and update its APPROVAL.yaml before the next ingester refresh."
+              ;;
+            "$EXIT_CONFIG")
+              cause="The approval check could not run because of invalid input or configuration (exit ${EXIT_CONFIG}): the approvals or sources directory is missing, unreadable or holds no approval files. No approval was checked."
+              action="Fix the configuration named in the 'Run approval check' step log, then re-run this workflow."
+              ;;
+            *)
+              # Only a plain number is echoed; anything else the output held is not trusted.
+              if [[ "$CHECK_RC" =~ ^[0-9]{1,3}$ ]]; then code="$CHECK_RC"; else code="unknown"; fi
+              cause="check_approvals.py failed unexpectedly with exit code ${code}, which it does not define. This is a checker or runner failure, not an approval result."
+              action="Read the 'Run approval check' step log for the cause, fix it, then re-run this workflow."
+              ;;
+          esac
+          body="$(printf '%s\n\n%s\n\n%s\n' "$cause" "Run 'python scripts/check_approvals.py' to see the full status table." "$action")"
+          # The label must exist or `gh issue create --label` fails; --force makes this idempotent
+          # and any real error (auth, permissions) fails the step loudly (terms-analysis#90).
+          gh label create "$ISSUE_LABEL" --force --color B60205 --description "The scheduled APPROVAL.yaml check failed; the issue body names the cause"
+          open_count=$(gh issue list --label "$ISSUE_LABEL" --state open --json number --jq 'length') || {
+            echo "Warning: gh issue list failed; creating issue unconditionally." >&2
+            open_count=0
+          }
+          if [ "$open_count" -eq 0 ]; then
+            gh issue create \
+              --title "Approval expiry alert -- $(date -u +%Y-%m-%d)" \
+              --body "$body" \
+              --label "$ISSUE_LABEL"
+          else
+            echo "Approval expiry issue already open (#${open_count} open); skipping duplicate."
+          fi
