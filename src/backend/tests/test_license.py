@@ -53,6 +53,7 @@ from tests.test_docs_readme import (
     _read_text,
     _show,
 )
+from tests.test_monorepo_import import PR2_CLAIM_TEST, PR2_PACKAGING_TEST, apply_pr2_pins
 
 # --------------------------------------------------------------------------
 # Acceptance values (#333). Repo-relative paths only, so messages carry no
@@ -491,13 +492,12 @@ def test_readme_license_section_names_apache_2_0_and_links_license() -> None:
 
 
 def test_tracked_packaging_metadata_declares_apache_2_0() -> None:
-    """Green on the base commit: no packaging file is tracked (count printed)."""
+    """Every tracked packaging file declares the project licence (count printed).
+    The imported ingester pyproject is a pinned PR-2 exception (#125); any other
+    file, including a second one under the ingester prefix, still fails."""
     files = [p for p in _tracked_paths() if PurePosixPath(p).name in PACKAGING_BASENAMES]
-    problems = [
-        problem
-        for rel in files
-        for problem in _packaging_problems(rel, _read_text(REPO_ROOT, rel))
-    ]
+    violations = {rel: _packaging_problems(rel, _read_text(REPO_ROOT, rel)) for rel in files}
+    problems = apply_pr2_pins(PR2_PACKAGING_TEST, {rel: p for rel, p in violations.items() if p})
     print(f"packaging files checked: {len(files)}")
     assert problems == [], f"packaging licence problems: {problems}"
 
@@ -514,7 +514,9 @@ def test_no_tracked_file_claims_a_conflicting_licence() -> None:
         f"claim scan skips project-status docs {[_show(p) for p in unscanned]} "
         f"({len(status_docs)} top-level docs/*.md tracked)"
     )
-    hits: list[str] = []
+    # Per-path findings, so a pinned PR-2 exception (#125) excuses exactly its
+    # own file and nothing else.
+    violations: dict[str, list[str]] = {}
     binaries = 0
     for rel in scope:
         path = REPO_ROOT / rel
@@ -527,9 +529,12 @@ def test_no_tracked_file_claims_a_conflicting_licence() -> None:
         try:
             text = raw.decode("utf-8", errors="strict")
         except UnicodeDecodeError:
-            hits.append(f"{_show(rel)}: not UTF-8 and not binary; cannot be checked")
+            violations[rel] = [f"{_show(rel)}: not UTF-8 and not binary; cannot be checked"]
             continue
-        hits.extend(f"{_show(rel)}: {name}" for name in _conflict_hits(text))
+        found = [f"{_show(rel)}: {name}" for name in _conflict_hits(text)]
+        if found:
+            violations[rel] = found
+    hits = apply_pr2_pins(PR2_CLAIM_TEST, violations)
     print(f"claim scan: {len(scope)} files in scope, {binaries} binary skipped")
     assert hits == [], f"conflicting licence claims: {hits}"
 

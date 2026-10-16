@@ -1,0 +1,188 @@
+name: Weekly Corpus Refresh
+on:
+  schedule:
+    - cron: '0 3 * * 0'   # Sunday 3 AM UTC
+  workflow_dispatch:        # allow manual trigger from Actions UI or gh CLI
+    inputs:
+      seed_bundle_record:
+        # #71: --require-state keeps a missing bundle record red, so the first record is written
+        # on purpose, once, by a dispatch with this box ticked. A schedule has no inputs, and a
+        # plain dispatch keeps the default, so it never seeds by accident.
+        description: Record the bundle this run publishes as already announced (first run, or after a cache eviction)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: refresh
+  cancel-in-progress: false  # never cancel a refresh mid-run; partial bundles are invalid
+
+# One state dir for checkpoints, both licence baselines and the bundle record, declared with the
+# same value in refresh.yml and health.yml (terms-analysis#93 ruling K) and persisted between
+# hosted runners by actions/cache (ruling L, ingester #71). It sits outside the checkout, which
+# checkout's clean wipes. Not runner.temp: the runner context is not available in workflow or
+# job env (GitHub contexts reference, context availability; actionlint rejects it), so the dir
+# is the parent of the workspace, the job's own work dir for this repo on a hosted runner.
+env:
+  INGESTER_STATE_DIR: ${{ github.workspace }}/../legal-corpus-ingester-state
+
+# Explicit pipefail: GitHub's default `bash -e` lets `cmd | tail` hide cmd's failure (terms-analysis#90).
+defaults:
+  run:
+    shell: bash -eo pipefail {0}
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    # No job-level GH_TOKEN: only Preflight and the issue step get the token, so
+    # Install (third-party build hooks) and Run refresh cannot read it (terms-analysis#90).
+    env:
+      ISSUE_LABEL: corpus-refresh
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false  # no step needs git credentials; keep the token out of .git/config
+
+      # Fail loudly up front when the runner lacks gh or the issue label is
+      # missing, instead of failing only when an issue must be filed (#21).
+      - name: Preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then
+            echo "::error::gh CLI not found on the runner; gh ships on the ubuntu-latest image, so the runner image has changed" >&2
+            exit 1
+          fi
+          if ! gh api "repos/${GITHUB_REPOSITORY}/labels/${ISSUE_LABEL}" --silent; then
+            echo "::error::Issue label '${ISSUE_LABEL}' could not be read (missing, or the token lacks access); create it: gh label create ${ISSUE_LABEL}" >&2
+            exit 1
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version-file: .python-version
+
+      - name: Install
+        run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install -e '.[dev]' 2>&1 | tail -5
+
+      # The hosted runner's filesystem is discarded after every job (ADR-016), so state persists
+      # through the actions/cache restore + save pair (ingester #71, option 1). Restore takes the
+      # newest save by prefix. A miss is not fatal here: the first run must reach the seed step,
+      # and detect's --require-state keeps an unseeded or evicted record a red run.
+      - name: Restore ingester state
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ env.INGESTER_STATE_DIR }}
+          key: ingester-state-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ingester-state-${{ runner.os }}-
+
+      # Refresh runs on every trigger; only a ticked seed dispatch adds the licence-baseline seed
+      # flag (cli.REFRESH_SEED_FLAG). A schedule renders the input as '' and a plain dispatch as
+      # 'false', so neither seeds: after a cache miss they exit 9 instead of silently recording
+      # today's licence as the baseline (terms-analysis#93 Round 11). The input reaches bash only
+      # through env and is compared, never pasted into the script.
+      - name: Run refresh
+        env:
+          SEED_LICENSE_BASELINE: ${{ inputs.seed_bundle_record }}
+        run: |
+          source .venv/bin/activate
+          seed=()
+          if [ "$SEED_LICENSE_BASELINE" = "true" ]; then
+            seed=(--seed-license-baseline)
+          fi
+          # Any non-zero fails the job. Refresh runs the pipeline (terms-analysis#93): it exits 7 until
+          # the owner signs real approval hashes under config/approvals/, 8 if a source fails, and 9
+          # if the licence baseline is missing and this run does not seed it.
+          ingester refresh --all "${seed[@]}"
+
+      # Seeds the first bundle record (#71) only when the dispatch input is ticked. The input is
+      # read in `if:` only, never pasted into the script. Runs after refresh published, before
+      # detect reads the record, so this run announces nothing and the next one compares.
+      - name: Seed bundle record
+        if: inputs.seed_bundle_record
+        run: |
+          source .venv/bin/activate
+          python scripts/detect_bundle_change.py record \
+            --bundle-link out/current \
+            --state-file "$INGESTER_STATE_DIR/last-published-bundle.json"
+
+      - name: Detect bundle change
+        id: detect_change
+        run: |
+          source .venv/bin/activate
+          # Compares the bundle just published against the record of the last announced
+          # one, kept in the cached state dir (#71). Exits 1 if refresh succeeded but published
+          # no valid bundle (terms-analysis#90). --require-state turns a missing record (first
+          # run not seeded, or the cache evicted after 7 days unused) into exit 2: a red run,
+          # never an announce-and-forget every week.
+          python scripts/detect_bundle_change.py detect \
+            --bundle-link out/current \
+            --state-file "$INGESTER_STATE_DIR/last-published-bundle.json" \
+            --github-output "$GITHUB_OUTPUT" \
+            --require-state
+
+      - name: Open issue on corpus change
+        if: steps.detect_change.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_VER: ${{ steps.detect_change.outputs.new_target }}
+          RUN_ID: ${{ github.run_id }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          # The label must exist or `gh issue create --label` fails; --force makes this idempotent
+          # and any real error (auth, permissions) fails the step loudly (terms-analysis#90).
+          gh label create "$ISSUE_LABEL" --force --color 0E8A16 --description "Weekly corpus refresh published a new bundle"
+          open_count=$(gh issue list --label "$ISSUE_LABEL" --state open --json number --jq 'length') || {
+            echo "Warning: gh issue list failed; creating issue unconditionally." >&2
+            open_count=0
+          }
+          if [ "$open_count" -eq 0 ]; then
+            gh issue create \
+              --title "Weekly corpus refresh -- $(date -u +%Y-%m-%d)" \
+              --body "Corpus refreshed to bundle \`${BUNDLE_VER}\`.
+
+          Run \`ingester validate-round-trip out/current\` from an environment with terms-analysis installed to verify consumer compatibility (it exits 4 if the consumer is not importable) before updating the terms-analysis consumer.
+
+          Triggered by: ${EVENT_NAME} (run \`${RUN_ID}\`)" \
+              --label "$ISSUE_LABEL"
+          else
+            # Do not drop the news: name the new bundle on the open issue so the record step
+            # below can advance without the change going unannounced (terms-analysis#90).
+            open_issue=$(gh issue list --label "$ISSUE_LABEL" --state open --json number --jq '.[0].number')
+            gh issue comment "$open_issue" \
+              --body "A newer corpus bundle was published: \`${BUNDLE_VER}\` (run \`${RUN_ID}\`, triggered by ${EVENT_NAME})."
+          fi
+
+      # Runs only after the alert step succeeded, so a failed alert is retried next run.
+      - name: Record announced bundle
+        if: steps.detect_change.outputs.changed == 'true'
+        run: |
+          source .venv/bin/activate
+          python scripts/detect_bundle_change.py record \
+            --bundle-link out/current \
+            --state-file "$INGESTER_STATE_DIR/last-published-bundle.json"
+
+      # Saves on every outcome, so failure checkpoints and the licence baseline of a failed run
+      # persist too. A cache key is immutable, so each run and attempt saves under its own key;
+      # the next restore finds the newest by the restore-keys prefix.
+      - name: Save ingester state
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ env.INGESTER_STATE_DIR }}
+          key: ingester-state-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload health report
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1  # v4.6.1
+        if: always()
+        with:
+          name: health-report-${{ github.run_id }}
+          path: out/health/
