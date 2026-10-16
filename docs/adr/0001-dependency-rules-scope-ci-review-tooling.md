@@ -38,3 +38,41 @@ The exemption holds only while all of these are true. If any one stops being tru
 - Changing any condition above (unpinning the action, widening the tool allowlist, moving the jobs to a self-hosted runner, or sending product data) needs a new ADR that supersedes this one.
 - Unrelated to the exemption: `ci.yml` and `gitignore-enforcement.yml` pin actions by tag, not SHA; that is tracked separately.
 - Other development-time tools are not exempted by this ADR. Each one needs its own decision.
+
+## Amendment 2026-10-15: ruff and uv exempt from HR6
+
+- **Status:** Accepted
+- **Date:** 2026-10-15
+- **Decided by:** owner, 2026-10-15 (decision #14, the OpenAI acquisition of Astral)
+- **Amends:** the last bullet of Consequences above ("Other development-time tools are not exempted by this ADR"), for ruff and uv only
+
+### Context
+
+The lead's decisions record for 2026-10-13 notes that an OpenAI acquisition of Astral, the maker of ruff and uv, was announced on 2026-03-19, and that whether it has closed is unverified. ruff is already a required CI check (`Lint (ruff)` in `.github/workflows/ci.yml`). HR6 is worded for the LLM provider, and this ADR exempts only CI *review* tooling, so ruff and uv needed their own decision. The lead recommended an exemption with a watch item, because ruff is MIT-licensed and runs fully locally.
+
+### Decision
+
+The owner's ruling, verbatim: "accept this as an exception".
+
+ruff and uv are exempt from HR6 as development lint tooling, on the same footing as the CI review tooling above. As the decisions record states, they run locally, are MIT-licensed and send nothing to OpenAI.
+
+This exemption does not adopt uv. The monorepo decision of the same date (#125: "Don't adopt uv now") still stands; the exemption only means that adopting uv later as dev tooling would not breach HR6.
+
+### Scope and conditions
+
+The exemption holds only while all of these are true. If any one stops being true, the exemption lapses and HR6 applies in full.
+
+1. **Dev tooling only.** ruff and uv lint, format or install during development and in CI. They are never a runtime dependency of the product.
+2. **Not in the application.** Neither tool appears in `requirements.txt`, `src/backend/requirements.txt` or `src/webapp/requirements.txt`, and neither is installed or imported by the backend or the UI.
+3. **Nothing sent to OpenAI.** Neither tool sends source code, product data or telemetry to OpenAI or to any service it owns.
+
+### Watch item
+
+- **Trigger:** any change to the licence or the telemetry of ruff or uv. Any such change re-opens this decision; until the owner rules again, condition 3 is treated as unmet.
+- **Who checks:** the lead, who reads the upstream licence file and release notes of each tool.
+- **When:** before each gate sign-off from G2 onward, and in any PR that changes how either tool is installed. The result goes in that day's status log.
+
+### Consequences
+
+- ruff stays a required CI check without a replacement card. The alternative the owner did not take was carding a ruff replacement after G2.
+- The product's bar is unchanged: HR6 still bars OpenAI from the runtime and data path.
